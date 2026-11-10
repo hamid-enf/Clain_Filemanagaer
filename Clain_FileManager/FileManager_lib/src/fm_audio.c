@@ -63,7 +63,8 @@ static void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v >> 24);
 }
 
-static FM_Result file_read_exact(FM_File *f, void *data, uint32_t size)
+static FM_Result file_read_exact(FM_File *f, void *data, uint32_t size,
+                                 uint32_t *read_out)
 {
     uint8_t *p = (uint8_t *)data;
     uint32_t done = 0;
@@ -79,11 +80,12 @@ static FM_Result file_read_exact(FM_File *f, void *data, uint32_t size)
         }
         if (rd == 0)
         {
-            return FM_ERR_EOF;
+            break;                          /* EOF: keep whatever we got */
         }
         done += rd;
     }
-    return FM_OK;
+    if (read_out != NULL) *read_out = done;
+    return (done == size) ? FM_OK : FM_ERR_EOF;
 }
 
 static FM_Result file_write_exact(FM_File *f, const void *data, uint32_t size)
@@ -138,11 +140,14 @@ static const int8_t wav_adpcm_index[16] = { -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,
 static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16_t *dst, size_t dst_cap)
 {
     if (src_bytes < 4) return 0;
-    int16_t pred = (int16_t)(src[0] | (src[1] << 8));
-    uint8_t idx = src[2];
+    int32_t pred = (int32_t)(int16_t)(src[0] | (src[1] << 8));
+    /* idx is signed: IMA index can go negative on step-down nibbles.
+     * unsigned would wrap to 255 and get clamped to 88 instead of 0. */
+    int idx = src[2];
     if (idx > 88) idx = 88;
+    if (idx < 0) idx = 0;
     size_t out = 0;
-    if (out < dst_cap) dst[out++] = pred;
+    if (out < dst_cap) dst[out++] = (int16_t)pred;
     int step = wav_adpcm_step[idx];
     for (size_t i = 4; i < src_bytes && out < dst_cap; ++i) {
         uint8_t b = src[i];
@@ -152,12 +157,14 @@ static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16
             if (nib & 1) diff += step >> 2;
             if (nib & 2) diff += step >> 1;
             if (nib & 4) diff += step;
-            if (nib & 8) pred -= (int16_t)diff; else pred += (int16_t)diff;
+            /* Accumulate in int32_t so pred cannot overflow int16_t
+             * before the saturation clamp is applied. */
+            if (nib & 8) pred -= diff; else pred += diff;
             if (pred > 32767) pred = 32767; else if (pred < -32768) pred = -32768;
             idx += wav_adpcm_index[nib & 0x0F];
             if (idx > 88) idx = 88; else if (idx < 0) idx = 0;
             step = wav_adpcm_step[idx];
-            dst[out++] = pred;
+            dst[out++] = (int16_t)pred;
         }
     }
     return out;
@@ -180,7 +187,10 @@ typedef struct {
 } WavAdpcmState;
 
 #define WAV_ADPCM_RAW(st)   ((uint8_t *)((st) + 1))
-#define WAV_ADPCM_CARRY(st) ((int16_t *)(WAV_ADPCM_RAW(st) + (st)->block_align))
+/* Carry is int16_t[], so round block_align up to even to keep it aligned
+ * even when the WAV declares an odd block_align (bug #3). */
+#define WAV_ADPCM_CARRY_OFF(st) (((size_t)(st)->block_align + 1u) & ~(size_t)1u)
+#define WAV_ADPCM_CARRY(st)     ((int16_t *)(WAV_ADPCM_RAW(st) + WAV_ADPCM_CARRY_OFF(st)))
 
 static size_t wav_adpcm_carry_cap(uint16_t ba)
 {
@@ -213,8 +223,9 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
     /* Lazy per-stream state: block staging + decoded-sample carry. */
     if (st == NULL) {
         uint16_t ba = wav_adpcm_block_align_of(a);
+        size_t carry_off = ((size_t)ba + 1u) & ~(size_t)1u; /* align carry */
         size_t cap = wav_adpcm_carry_cap(ba);
-        st = (WavAdpcmState *)FM_Alloc(sizeof(*st) + (size_t)ba +
+        st = (WavAdpcmState *)FM_Alloc(sizeof(*st) + carry_off +
                                        cap * sizeof(int16_t));
         if (st == NULL) return FM_ERR_NO_MEMORY;
         memset(st, 0, sizeof(*st));
@@ -248,10 +259,18 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
         take = (size_t)st->block_align;
         if ((uint64_t)take > available)
             take = (size_t)available;       /* final partial block */
-        r2 = file_read_exact(&a->file, WAV_ADPCM_RAW(st), (uint32_t)take);
-        if (r2 != FM_OK && r2 != FM_ERR_EOF) {
-            if (out != 0u) break;
-            return r2;
+        {
+            uint32_t got_bytes = 0;
+            r2 = file_read_exact(&a->file, WAV_ADPCM_RAW(st), (uint32_t)take,
+                                 &got_bytes);
+            if (r2 != FM_OK && r2 != FM_ERR_EOF) {
+                if (out != 0u) break;
+                return r2;
+            }
+            /* Decode only the bytes that were actually read — a short
+             * final read at EOF must not decode stale/uninitialised
+             * tail bytes (bug #3). */
+            take = got_bytes;
         }
         got = wav_adpcm_decode_block(WAV_ADPCM_RAW(st), take,
                                      WAV_ADPCM_CARRY(st),
@@ -335,7 +354,15 @@ static FM_Result flac_file_open(FM_Audio *a) {
     a->info.data_offset = 0;
     a->info.data_size = sz;
     drflac_uint64 total_frames = p->totalPCMFrameCount;
-    if (total_frames == 0 || total_frames > 10*1024*1024) total_frames = 1024*1024;
+    if (total_frames > 10*1024*1024) {
+        /* File declares more frames than we can buffer — refuse rather
+         * than silently truncating the end of the track (bug #4). */
+        drflac_close(p);
+        FM_Free(data);
+        return FM_ERR_TOO_LARGE;
+    }
+    if (total_frames == 0)
+        total_frames = 1024*1024;   /* unknown length: generous upper bound */
     size_t total_samples = (size_t)(total_frames * p->channels);
     int16_t *pcm = (int16_t*)FM_Alloc(total_samples * sizeof(int16_t));
     if (!pcm) { drflac_close(p); FM_Free(data); return FM_ERR_NO_MEMORY; }
@@ -380,7 +407,13 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
     a->info.data_size = sz;
     if (info.channels <=0 || info.channels>2 || info.sample_rate==0) { stb_vorbis_close(v); FM_Free(data); return FM_ERR_UNSUPPORTED; }
     int total_frames = stb_vorbis_stream_length_in_samples(v);
-    if (total_frames <=0 || total_frames > 10*1024*1024) total_frames = 1024*256;
+    if (total_frames > 10*1024*1024) {
+        stb_vorbis_close(v);
+        FM_Free(data);
+        return FM_ERR_TOO_LARGE;   /* refuse silent truncation (bug #4) */
+    }
+    if (total_frames <= 0)
+        total_frames = 1024*256;   /* unknown length */
     size_t total_samples = (size_t)total_frames * (size_t)info.channels;
     int16_t *pcm = (int16_t*)FM_Alloc(total_samples * sizeof(int16_t));
     if (!pcm) { stb_vorbis_close(v); FM_Free(data); return FM_ERR_NO_MEMORY; }
@@ -571,7 +604,10 @@ static FM_Result opus_file_open(FM_Audio *a) {
                         pkt = data + p; pkt_len = plen;
                     } else {
                         uint8_t *np = (uint8_t*)FM_Realloc(pend, pend_len + plen);
-                        if (np == NULL) { r = FM_ERR_NO_MEMORY; goto done; }
+                        if (np == NULL) {
+                            FM_Free(pend); pend = NULL; pend_len = 0;  /* leak fix (bug #9) */
+                            r = FM_ERR_NO_MEMORY; goto done;
+                        }
                         pend = np;
                         memcpy(pend + pend_len, data + p, plen);
                         pend_len += plen;
@@ -643,9 +679,9 @@ done:
             if (r != FM_OK) { FM_Free(pcm); return r; }
             if (written == 0) { FM_Free(pcm); return FM_ERR_CORRUPTED; }
             if (truncated && written >= cap_samples) {
-                FM_AUDIO_LOG("opus: track longer than FM_OPUS_MAX_PCM_BYTES,"
-                             " truncated to %u s",
-                             (unsigned)(cap_samples / channels / 48000u));
+                /* Never report full success for truncated output (bug #4). */
+                FM_Free(pcm);
+                return FM_ERR_TOO_LARGE;
             }
 
             b = (PcmBuffer*)FM_Alloc(sizeof(PcmBuffer));
@@ -675,7 +711,7 @@ static FM_Result audio_parse_wav(FM_Audio *a)
     uint64_t pos = 12;
     uint64_t file_size = 0;
 
-    if (file_read_exact(&a->file, riff, sizeof(riff)) != FM_OK ||
+    if (file_read_exact(&a->file, riff, sizeof(riff), NULL) != FM_OK ||
         memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0)
     {
         return FM_ERR_INVALID_FORMAT;
@@ -692,7 +728,7 @@ static FM_Result audio_parse_wav(FM_Audio *a)
         uint64_t payload;
         uint64_t next;
 
-        if (file_read_exact(&a->file, chunk, sizeof(chunk)) != FM_OK)
+        if (file_read_exact(&a->file, chunk, sizeof(chunk), NULL) != FM_OK)
         {
             return FM_ERR_EOF;
         }
@@ -738,7 +774,7 @@ static FM_Result audio_parse_wav(FM_Audio *a)
             uint8_t fmt[16];
 
             if (chunk_size < sizeof(fmt) || file_read_exact(&a->file, fmt,
-                                                              sizeof(fmt)) != FM_OK)
+                                                            sizeof(fmt), NULL) != FM_OK)
             {
                 return FM_ERR_INVALID_FORMAT;
             }
@@ -884,7 +920,7 @@ static void mp3_release(FM_Mp3Stream *m)
 static FM_Result mp3_skip_id3(FM_File *f, uint64_t *off)
 {
     uint8_t h[10];
-    FM_Result r = file_read_exact(f, h, sizeof(h));
+    FM_Result r = file_read_exact(f, h, sizeof(h), NULL);
 
     if (r != FM_OK && r != FM_ERR_EOF)
     {
@@ -1569,7 +1605,7 @@ static FM_Result aac_read_header(FM_AacStream *s, uint32_t *frame_len,
 {
     uint8_t h[7];
 
-    if (file_read_exact(s->file, h, sizeof(h)) != FM_OK)
+    if (file_read_exact(s->file, h, sizeof(h), NULL) != FM_OK)
     {
         return FM_ERR_EOF;
     }
@@ -1678,7 +1714,7 @@ static FM_Result aac_decode_one(FM_AacStream *s)
     {
         return FM_ERR_TOO_LARGE;
     }
-    if (file_read_exact(s->file, s->frame + 7, frame_len - 7u) != FM_OK)
+    if (file_read_exact(s->file, s->frame + 7, frame_len - 7u, NULL) != FM_OK)
     {
         return FM_ERR_EOF;
     }
@@ -1973,7 +2009,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
         if (a->info.channels == 2u && (n & 1u) != 0u) n--;
         if (n == 0) return FM_ERR_EOF;
         if (n > (size_t)FM_AUDIO_PCM_CHUNK) n = (size_t)FM_AUDIO_PCM_CHUNK;
-        FM_Result r2 = file_read_exact(&a->file, g_wav_raw, (uint32_t)n);
+        FM_Result r2 = file_read_exact(&a->file, g_wav_raw, (uint32_t)n, NULL);
         if (r2 != FM_OK) return r2;
         for (size_t i = 0; i < n; i++) {
             uint8_t b = g_wav_raw[i];
@@ -2034,7 +2070,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
             chunk = (size_t)FM_AUDIO_PCM_CHUNK;
         }
         byte_count = (uint32_t)chunk * bytes_per_sample;
-        r = file_read_exact(&a->file, g_wav_raw, byte_count);
+        r = file_read_exact(&a->file, g_wav_raw, byte_count, NULL);
         FM_AUDIO_LOG("read: chunk %lu -> %d\n",
                      (unsigned long)chunk, (int)r);
         if (r != FM_OK)
