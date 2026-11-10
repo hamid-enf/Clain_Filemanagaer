@@ -84,6 +84,12 @@ typedef struct
     FATFS  *fatfs;
     uint8_t pdrv;
     FM_Bool mounted;
+    /* Who has this slot: set by FatFS_Init(), cleared by an unmount and
+     * by a mount that failed.  `last` stays behind then, with `pdrv`:
+     * it is what lets the same FM_FS mount again without a new
+     * FatFS_Init(), and what refuses any other one. */
+    FM_FS  *owner;
+    FM_FS  *last;
 
     uint8_t file_store[FM_MAX_OPEN_FILES][sizeof(FIL) + 32u];
     FIL    *files[FM_MAX_OPEN_FILES];
@@ -124,11 +130,18 @@ static FatFS_Ctx *fatfs_ctx(FM_FS *fs)
     return (FatFS_Ctx *)fs->user;
 }
 
+/* Everything back to its start, except who the slot is for. */
 static void fatfs_ctx_reset(FatFS_Ctx *ctx)
 {
+    FM_FS *owner = ctx->owner;
+    FM_FS *last = ctx->last;
+    uint8_t pdrv = ctx->pdrv;
     uint32_t i;
 
     memset(ctx, 0, sizeof(*ctx));
+    ctx->owner = owner;
+    ctx->last = last;
+    ctx->pdrv = pdrv;
     ctx->fatfs = (FATFS *)fm_place_aligned(ctx->fatfs_store,
                                            sizeof(ctx->fatfs_store),
                                            sizeof(FATFS),
@@ -254,39 +267,83 @@ static void fatfs_path(FatFS_Ctx *ctx, const char *path, char *out,
 /* ------------------------------------------------------------------ */
 /* Mount / format                                                      */
 /* ------------------------------------------------------------------ */
-static FM_Result fatfs_mount(FM_FS *fs, FM_Storage *storage)
+/* The slot of `fs`, if it is still its own.  An unmount -- and a mount
+ * that failed -- gives the slot back to the pool; the FM_FS keeps
+ * pointing at it.  Mounting that FM_FS again without a new FatFS_Init()
+ * (card out, card in) takes the slot back when nobody has had it since,
+ * and is refused otherwise: the slot then carries the drive number of
+ * somebody else, and two mounts never share one. */
+static FatFS_Ctx *fatfs_claim(FM_FS *fs)
 {
     FatFS_Ctx *ctx = fatfs_ctx(fs);
-    char drive[4] = { (char)('0' + ctx->pdrv), ':', 0, 0 };
+
+    if (ctx == NULL)
+    {
+        return NULL;
+    }
+    FM_Lock();
+    if (ctx->owner == NULL && ctx->last == fs)
+    {
+        ctx->owner = fs;
+    }
+    else if (ctx->owner != fs)
+    {
+        ctx = NULL;
+    }
+    FM_Unlock();
+    return ctx;
+}
+
+/* FS_Unmount() refuses to run while files/dirs are open, so the FIL/DIR
+ * slots inside ctx are idle here.  f_mount(NULL, ...) deregisters the
+ * volume but does NOT clear the FATFS object (fs_type stays set): the
+ * reset is what makes the slot good for its next mount. */
+static void fatfs_release(FatFS_Ctx *ctx)
+{
+    FM_Lock();
+    ctx->owner = NULL;
+    fatfs_ctx_reset(ctx);
+    FM_Unlock();
+}
+
+static FM_Result fatfs_mount(FM_FS *fs, FM_Storage *storage)
+{
+    FatFS_Ctx *ctx = fatfs_claim(fs);
+    char drive[4] = { '0', ':', 0, 0 };
     FRESULT fr;
 
     (void)storage;
+    if (ctx == NULL)
+    {
+        return FM_ERR_NOT_READY;
+    }
+    drive[0] = (char)('0' + ctx->pdrv);
     /* Use option 0 (Lazy mount) for stable SD card mounting */
     fr = f_mount(ctx->fatfs, drive, 0);
-    if (fr == FR_OK)
+    if (fr != FR_OK)
     {
-        ctx->mounted = FM_TRUE;
+        fatfs_release(ctx);
+        return fatfs_map_err(fr);
     }
-    return fatfs_map_err(fr);
+    ctx->mounted = FM_TRUE;
+    return FM_OK;
 }
 
 static FM_Result fatfs_unmount(FM_FS *fs)
 {
     FatFS_Ctx *ctx = fatfs_ctx(fs);
-    char drive[4] = { (char)('0' + ctx->pdrv), ':', 0, 0 };
+    char drive[4] = { '0', ':', 0, 0 };
 
+    if (ctx == NULL || ctx->owner != fs)
+    {
+        return FM_ERR_NOT_READY;
+    }
+    drive[0] = (char)('0' + ctx->pdrv);
     if (ctx->mounted)
     {
         (void)f_mount(NULL, drive, 0);
     }
-    /* Release the adapter slot.  f_mount(NULL, ...) deregisters the volume
-     * but does NOT clear the FATFS object (fs_type stays set), so without
-     * this the static g_fatfs[] pool leaks one slot per mount/unmount
-     * cycle and FatFS_Init() fails with FM_ERR_NO_MEMORY after FM_MAX_FS
-     * cycles.  FS_Unmount() refuses to run while files/dirs are open, so
-     * the FIL/DIR slots inside ctx are idle here. */
-    fatfs_ctx_reset(ctx);
-    fs->user = NULL;
+    fatfs_release(ctx);
     return FM_OK;
 }
 
@@ -683,50 +740,56 @@ static FM_Result fatfs_get_type(FM_FS *fs, char *type, size_t type_size)
 FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv)
 {
     FatFS_Ctx *ctx = NULL;
-    FatFS_Ctx *prev = NULL;
     uint32_t i;
 
     if (fs == NULL) return FM_ERR_INVALID_ARGUMENT;
     if (pdrv >= 10 || pdrv >= FF_VOLUMES) return FM_ERR_INVALID_ARGUMENT;
 
-    /* If this FM_FS already owns an adapter slot (repeat Init without an
-     * intervening unmount), reclaim that slot instead of leaking a new
-     * one.  Guard against garbage fs->user by range-checking the pointer
-     * against the static pool. */
-    {
-        uintptr_t u = (uintptr_t)fs->user;
-        if (u >= (uintptr_t)&g_fatfs[0] &&
-            u + sizeof(FatFS_Ctx) <= (uintptr_t)&g_fatfs[FM_MAX_FS] &&
-            (u - (uintptr_t)&g_fatfs[0]) % sizeof(FatFS_Ctx) == 0)
-        {
-            prev = (FatFS_Ctx *)u;
-        }
-    }
-
     memset(fs, 0, sizeof(*fs));
 
     FM_Lock();
-    if (prev != NULL)
+    /* An FM_FS that is initialised again keeps the slot it has; one that
+     * had a slot before gets that one back if it is free.  A slot is
+     * taken from FatFS_Init() on, not from the first disk access on:
+     * two FM_FS initialised before either is mounted (SD on drive 0,
+     * USB on drive 1) used to end up in the same slot, both on the
+     * drive of the second. */
+    for (i = 0; i < FM_MAX_FS; i++)
     {
-        ctx = prev;
-    }
-    else
-    {
-        for (i = 0; i < FM_MAX_FS; i++)
+        if (g_fatfs[i].owner == fs)
         {
-            if (!g_fatfs[i].mounted &&
-                (g_fatfs[i].fatfs == NULL || g_fatfs[i].fatfs->fs_type == 0))
-            {
-                ctx = &g_fatfs[i];
-                break;
-            }
+            ctx = &g_fatfs[i];
+            break;
+        }
+    }
+    for (i = 0; ctx == NULL && i < FM_MAX_FS; i++)
+    {
+        if (g_fatfs[i].owner == NULL && g_fatfs[i].last == fs)
+        {
+            ctx = &g_fatfs[i];
+        }
+    }
+    /* ...then one nobody is waiting for, then any free one */
+    for (i = 0; ctx == NULL && i < FM_MAX_FS; i++)
+    {
+        if (g_fatfs[i].owner == NULL && g_fatfs[i].last == NULL)
+        {
+            ctx = &g_fatfs[i];
+        }
+    }
+    for (i = 0; ctx == NULL && i < FM_MAX_FS; i++)
+    {
+        if (g_fatfs[i].owner == NULL)
+        {
+            ctx = &g_fatfs[i];
         }
     }
     if (ctx != NULL)
     {
-        fatfs_ctx_reset(ctx);
+        ctx->owner = fs;
+        ctx->last = fs;
         ctx->pdrv = pdrv;
-        ctx->mounted = FM_FALSE;
+        fatfs_ctx_reset(ctx);
     }
     FM_Unlock();
 
@@ -778,7 +841,12 @@ FM_Result FatFS_MountDefault(FM_FS *fs, uint8_t pdrv, FM_Storage *storage)
     if (r != FM_OK) return r;
 
     r = FatFS_BindStorage(pdrv, storage);
-    if (r != FM_OK) return r;
+    if (r != FM_OK)
+    {
+        /* not going to be mounted: do not keep a slot for it */
+        fatfs_release(fatfs_ctx(fs));
+        return r;
+    }
 
     return FS_MountDefault(fs);
 }

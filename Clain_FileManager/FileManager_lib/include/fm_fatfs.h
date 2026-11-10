@@ -47,7 +47,15 @@ FM_BEGIN_DECLS
 #endif
 
 /* Initialize the adapter for the given FatFS drive number (0..FF_VOLUMES-1).
- * Must be called before FS_Mount. */
+ * Must be called before the first FS_Mount of `fs`.
+ *
+ * The adapter has FM_MAX_FS slots.  FatFS_Init takes one for `fs`; an
+ * unmount, and a mount that fails, give it back.  After that the same
+ * FM_FS may be mounted again without a new FatFS_Init (card out, card
+ * in) for as long as no other FM_FS has been given its slot in between;
+ * once that happened FS_Mount answers FM_ERR_NOT_READY and FatFS_Init
+ * has to be called again.  An FM_FS that is initialised and then never
+ * mounted keeps its slot until it is initialised again. */
 FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv);
 
 /* Map a FatFS drive number to an FM_Storage driver.  Call before mounting

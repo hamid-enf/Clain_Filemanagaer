@@ -84,6 +84,9 @@ static void ex_1_sdcard_file_basic(FM_Result *init_r, FM_Result *mount_r)
 
 int main(void)
 {
+    /* Unbuffered: if the adapter crashes, the last line names the test
+     * that was running. */
+    setvbuf(stdout, NULL, _IONBF, 0);
     printf("== FatFS adapter host test ==\n");
 
     /* ---------------------------------------------------------- */
@@ -343,6 +346,215 @@ int main(void)
                      File_GetErrorString(r));
             FAIL(eb);
         }
+    }
+
+    /* A mount at "/name" wants a storage called "name"; FatFS does its
+     * own disk I/O here, so two small RAM blocks stand in for them. */
+    {
+        static FM_Storage sd_st, usb_st;
+        static uint8_t sd_mem[2048], usb_mem[2048];
+        FM_Result r;
+
+        TEST("storages 'sd' and 'usb' for the named mounts");
+        r = RamDisk_Init(&sd_st, "sd", sd_mem, sizeof(sd_mem), 512);
+        if (r == FM_OK) r = Storage_Register(&sd_st);
+        if (r == FM_OK) r = RamDisk_Init(&usb_st, "usb", usb_mem,
+                                         sizeof(usb_mem), 512);
+        if (r == FM_OK) r = Storage_Register(&usb_st);
+        CHECK(r, "RamDisk_Init / Storage_Register");
+    }
+
+#if FF_VOLUMES >= 2
+    /* ---------------------------------------------------------- */
+    printf("[8] two drives: SD on 0:, USB on 1:\n");
+    {
+        /* Both are initialised before either is mounted -- the normal
+         * start-up order.  The adapter used to think a slot free until
+         * its volume had been touched, so the second Init took the slot
+         * of the first: both FM_FS then shared one context, with the
+         * drive number of the last one. */
+        static FM_FS usb_fs;
+        FM_Result r;
+        FM_Result r2;
+        FM_File *fh = NULL;
+        char buf[32];
+        uint32_t got = 0;
+
+        ff_mock_reset();
+        r = FatFS_Init(&g_sd_fs, 0);
+        r2 = FatFS_Init(&usb_fs, 1);
+        TEST("two FatFS_Init before the first mount");
+        CHECK_TRUE(r == FM_OK && r2 == FM_OK, "FatFS_Init");
+
+        r = FS_Mount("/sd", &g_sd_fs);
+        r2 = FS_Mount("/usb", &usb_fs);
+        TEST("both drives mount");
+        CHECK_TRUE(r == FM_OK && r2 == FM_OK, "FS_Mount");
+
+        r = File_WriteText("/sd/on_sd.txt", "sd");
+        r2 = File_WriteText("/usb/on_usb.txt", "usb");
+        TEST("a file written to /sd is on drive 0, one to /usb on 1");
+        if (r != FM_OK || r2 != FM_OK) FAIL("File_WriteText");
+        else if (ff_mock_file_count_on(0) != 1 ||
+                 ff_mock_file_count_on(1) != 1)
+        {
+            char eb[96];
+            snprintf(eb, sizeof(eb), "drive 0 has %d files, drive 1 has %d",
+                     ff_mock_file_count_on(0), ff_mock_file_count_on(1));
+            FAIL(eb);
+        }
+        else PASS();
+
+        TEST("unmounting /usb leaves a file open on /sd alone");
+        fh = File_Open("/sd/on_sd.txt", FM_OPEN_READ);
+        r = (fh != NULL) ? FM_OK : FM_ERR_NOT_FOUND;
+        r2 = FS_Unmount("/usb");
+        memset(buf, 0, sizeof(buf));
+        if (r == FM_OK) r = File_Read(fh, buf, 2, &got);
+        if (fh != NULL) (void)File_Close(fh);
+        CHECK_TRUE(r == FM_OK && r2 == FM_OK && got == 2 &&
+                   memcmp(buf, "sd", 2) == 0, "read through the handle");
+
+        TEST("/usb mounts again without a new FatFS_Init, on drive 1");
+        r = FS_Mount("/usb", &usb_fs);
+        if (r == FM_OK) r = File_ReadText("/usb/on_usb.txt", buf,
+                                          sizeof(buf), NULL);
+        CHECK_TRUE(r == FM_OK && strcmp(buf, "usb") == 0, "remount");
+
+        (void)FS_Unmount("/usb");
+        (void)FS_Unmount("/sd");
+    }
+#endif
+
+    /* ---------------------------------------------------------- */
+    printf("[9] an FM_FS whose slot went to another one\n");
+    {
+        /* `old` is unmounted and never initialised again; `cur` then
+         * gets the slot `old` had.  Mounting `old` must be refused, not
+         * run on the context that is now `cur`'s. */
+        static FM_FS old_fs;
+        static FM_FS cur_fs[FM_MAX_FS];
+        FM_Result r;
+        FM_Result r2 = FM_OK;
+        FM_Bool exists = FM_FALSE;
+        int i;
+
+        ff_mock_reset();
+        r = FatFS_Init(&old_fs, 0);
+        if (r == FM_OK) r = FS_Mount("/sd", &old_fs);
+        if (r == FM_OK) r = FS_Unmount("/sd");
+        /* every slot there is, so the one `old` had is among them */
+        for (i = 0; i < FM_MAX_FS && r == FM_OK; i++)
+        {
+            r = FatFS_Init(&cur_fs[i], 0);
+        }
+        if (r == FM_OK) r = FS_Mount("/sd", &cur_fs[0]);
+        if (r == FM_OK) r = File_WriteText("/sd/keep.txt", "keep");
+        TEST("set-up: every adapter slot taken, one mounted");
+        CHECK(r, "set-up");
+
+        TEST("mounting the stale FM_FS is refused");
+        r2 = FS_Mount("/usb", &old_fs);
+        if (r2 == FM_OK) (void)FS_Unmount("/usb");
+        if (r2 == FM_ERR_NOT_READY) PASS(); else {
+            char eb[96];
+            snprintf(eb, sizeof(eb), "expected 'not ready', got '%s'",
+                     File_GetErrorString(r2));
+            FAIL(eb);
+        }
+
+        TEST("...and the live mount is untouched");
+        r = File_Exists("/sd/keep.txt", &exists);
+        CHECK_TRUE(r == FM_OK && exists, "keep.txt");
+
+        (void)FS_Unmount("/sd");
+        /* give the slots back: mount + unmount each */
+        r = FM_OK;
+        for (i = 0; i < FM_MAX_FS && r == FM_OK; i++)
+        {
+            r = FS_Mount("/sd", &cur_fs[i]);
+            if (r == FM_OK) r = FS_Unmount("/sd");
+        }
+        TEST("each of them mounts and unmounts");
+        CHECK(r, "mount cycle");
+    }
+
+    /* ---------------------------------------------------------- */
+    printf("[10] card out, card in: mount again without FatFS_Init\n");
+    {
+        FM_Result r;
+        char buf[32];
+        int cycle;
+
+        ff_mock_reset();
+        TEST("FatFS_Init once, then 10 x (mount, write, read, unmount)");
+        r = FatFS_Init(&g_sd_fs, 0);
+        for (cycle = 1; cycle <= 10 && r == FM_OK; cycle++)
+        {
+            r = FS_Mount("/", &g_sd_fs);
+            if (r != FM_OK) break;
+            r = File_WriteText("/cyc.txt", "cycle");
+            if (r == FM_OK) r = File_ReadText("/cyc.txt", buf,
+                                              sizeof(buf), NULL);
+            if (r == FM_OK && strcmp(buf, "cycle") != 0) r = FM_ERR_CRC;
+            (void)FS_Unmount("/");
+        }
+        if (r == FM_OK) PASS(); else {
+            char eb[96];
+            snprintf(eb, sizeof(eb), "cycle %d failed: %s", cycle,
+                     File_GetErrorString(r));
+            FAIL(eb);
+        }
+
+        TEST("a mount that fails gives the slot back");
+        /* (the mock is told to fail f_mount, as a forced mount of a
+         *  card that does not answer would) */
+        {
+            static FM_FS bad_fs[FM_MAX_FS + 2];
+            static FM_FS good_fs;
+            int i;
+
+            r = FM_OK;
+            for (i = 0; i < FM_MAX_FS + 2 && r == FM_OK; i++)
+            {
+                r = FatFS_Init(&bad_fs[i], 0);
+                if (r != FM_OK) break;
+                ff_mock_fail_mounts(1);
+                if (FS_Mount("/", &bad_fs[i]) == FM_OK)
+                {
+                    (void)FS_Unmount("/");
+                    r = FM_ERR_INTERNAL;
+                }
+                ff_mock_fail_mounts(0);
+            }
+            if (r == FM_OK) r = FatFS_Init(&good_fs, 0);
+            if (r == FM_OK) r = FS_Mount("/", &good_fs);
+            if (r == FM_OK) r = FS_Unmount("/");
+        }
+        CHECK(r, "after failed mounts");
+
+        TEST("FatFS_MountDefault that stops at the bind keeps no slot");
+        /* (this build has no diskio of its own, so the bind is refused) */
+        {
+            static FM_FS half_fs[FM_MAX_FS + 2];
+            static FM_FS good_fs;
+            int i;
+
+            r = FM_OK;
+            for (i = 0; i < FM_MAX_FS + 2 && r == FM_OK; i++)
+            {
+                if (FatFS_MountDefault(&half_fs[i], 0, NULL) !=
+                    FM_ERR_UNSUPPORTED)
+                {
+                    (void)FS_Unmount("/");
+                    r = FM_ERR_INTERNAL;
+                }
+            }
+            if (r == FM_OK) r = FatFS_Init(&good_fs, 0);
+            if (r == FM_OK) r = FS_Mount("/", &good_fs);
+            if (r == FM_OK) r = FS_Unmount("/");
+        }
+        CHECK(r, "after FatFS_MountDefault");
     }
 
     printf("\n  Results: %d/%d passed, %d failures\n",

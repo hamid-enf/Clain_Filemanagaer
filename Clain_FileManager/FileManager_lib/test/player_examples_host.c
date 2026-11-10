@@ -137,6 +137,11 @@ static void make_two_wavs(void)
 
 int main(void)
 {
+    /* The examples print through FM_Log (as on the board, where that is
+     * the UART).  Without a sink every line -- the "!!" of a step that
+     * failed included -- went nowhere and this runner could not fail. */
+    FM_Log_UseStdout();
+
     if (SD_examples_begin() != FM_OK)
     {
         printf("SD_examples_begin FAILED\n");

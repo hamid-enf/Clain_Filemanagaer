@@ -37,7 +37,13 @@ typedef char     TCHAR;
 
 #define FF_MAX_SS   512
 #define FF_MAX_LFN  255
+/* One volume, like a CubeMX project with just the SD card.  Build with
+ * -DMOCK_FF_VOLUMES=2 for the tests that need a second drive ("1:"). */
+#ifdef MOCK_FF_VOLUMES
+#define FF_VOLUMES  MOCK_FF_VOLUMES
+#else
 #define FF_VOLUMES  1
+#endif
 
 #ifdef MOCK_FATFS_MODERN
 #define FM_FAT      0x01
@@ -96,6 +102,7 @@ typedef struct {
 
 typedef struct {
     char   path[256];
+    int    vol;         /* the volume it was opened on */
     int    cursor;      /* iteration cursor, -1 = fresh */
     BYTE   is_open;
 } DIR;
@@ -146,5 +153,7 @@ FSIZE_t f_tell (FIL* fp);
 /* mock-only helpers */
 void ff_mock_reset(void);
 int  ff_mock_file_count(void);
+int  ff_mock_file_count_on(int vol);    /* files + directories on a drive */
+void ff_mock_fail_mounts(int on);       /* f_mount(fs != NULL) -> FR_DISK_ERR */
 
 #endif /* FF_MOCK_H */

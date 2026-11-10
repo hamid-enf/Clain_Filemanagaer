@@ -13,6 +13,7 @@
 typedef struct {
     uint8_t used;
     uint8_t is_dir;
+    uint8_t vol;
     char    name[256];
     uint8_t attrib;
     size_t  len;
@@ -22,6 +23,12 @@ typedef struct {
 
 static FATFS *g_vol[FF_VOLUMES];
 static MockFile g_files[MOCK_MAX_FILES];
+static int g_fail_mounts;
+
+void ff_mock_fail_mounts(int on)
+{
+    g_fail_mounts = on;
+}
 
 void ff_mock_reset(void)
 {
@@ -36,12 +43,28 @@ int ff_mock_file_count(void)
     return n;
 }
 
+int ff_mock_file_count_on(int vol)
+{
+    int i, n = 0;
+    for (i = 0; i < MOCK_MAX_FILES; i++)
+        n += (g_files[i].used && g_files[i].vol == vol) ? 1 : 0;
+    return n;
+}
+
 /* ---- helpers ---- */
+/* The volume a path names ("0:", "1:", ...), or -1. */
+static int vol_of(const char *path)
+{
+    if (path == NULL) return -1;
+    if (path[0] < '0' || path[0] >= '0' + FF_VOLUMES) return -1;
+    if (path[1] != ':') return -1;
+    return path[0] - '0';
+}
+
 static int name_ok(const char *path)
 {
-    /* must be "0:/..." (only volume 0 exists) */
-    if (path == NULL) return 0;
-    if (path[0] != '0' || path[1] != ':') return 0;
+    /* must be "N:/..." with a volume that exists */
+    if (vol_of(path) < 0) return 0;
     if (path[2] != '/') return 0;
     return 1;
 }
@@ -61,7 +84,8 @@ static MockFile *find_file(const char *path)
     name = strip(path);
     if (name[0] == '\0') return NULL;
     for (i = 0; i < MOCK_MAX_FILES; i++)
-        if (g_files[i].used && strcmp(g_files[i].name, name) == 0)
+        if (g_files[i].used && g_files[i].vol == vol_of(path) &&
+            strcmp(g_files[i].name, name) == 0)
             return &g_files[i];
     return NULL;
 }
@@ -78,6 +102,7 @@ static MockFile *alloc_file(const char *path, uint8_t is_dir)
             memset(&g_files[i], 0, sizeof(g_files[i]));
             g_files[i].used = 1;
             g_files[i].is_dir = is_dir;
+            g_files[i].vol = (uint8_t)vol_of(path);
             strcpy(g_files[i].name, name);
             g_files[i].attrib = is_dir ? AM_DIR : AM_ARC;
             return &g_files[i];
@@ -90,9 +115,12 @@ static MockFile *alloc_file(const char *path, uint8_t is_dir)
  * fs_type stays set even after f_mount(NULL) deregistration (like FatFS,
  * the object is not cleared) - this is what triggers the adapter's
  * g_fatfs slot-leak reproduction. */
-static FRESULT volume_ok(FATFS **out)
+static FRESULT volume_ok(const char *path, FATFS **out)
 {
-    FATFS *fs = g_vol[0];
+    int vol = vol_of(path);
+    FATFS *fs;
+    if (vol < 0) return FR_INVALID_DRIVE;
+    fs = g_vol[vol];
     if (fs == NULL) return FR_NOT_ENABLED;      /* not registered      */
     if (fs->fs_type == 0)                       /* lazy validation     */
     {
@@ -109,8 +137,9 @@ FRESULT f_mount(FATFS *fs, const TCHAR *path, BYTE opt)
 {
     (void)opt;
     if (path == NULL || path[0] == '\0') return FR_INVALID_NAME;
-    if (path[0] != '0' || path[1] != ':') return FR_INVALID_DRIVE;
-    g_vol[0] = fs;                              /* NULL = deregister  */
+    if (vol_of(path) < 0) return FR_INVALID_DRIVE;
+    if (fs != NULL && g_fail_mounts) return FR_DISK_ERR;
+    g_vol[vol_of(path)] = fs;                   /* NULL = deregister  */
     return FR_OK;
 }
 
@@ -122,7 +151,7 @@ FRESULT f_open(FIL *fp, const TCHAR *path, BYTE mode)
     memset(fp, 0, sizeof(*fp));
     if ((mode & (FA_READ | FA_WRITE)) == 0) return FR_INVALID_PARAMETER;
     {
-        FRESULT fr = volume_ok(&fp->obj_fs);
+        FRESULT fr = volume_ok(path, &fp->obj_fs);
         if (fr != FR_OK) return fr;
     }
     f = find_file(path);
@@ -233,7 +262,7 @@ FSIZE_t f_tell(FIL *fp)
 FRESULT f_stat(const TCHAR *path, FILINFO *fno)
 {
     MockFile *f;
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
     f = find_file(path);
     if (f == NULL) return FR_NO_FILE;
@@ -249,14 +278,15 @@ FRESULT f_stat(const TCHAR *path, FILINFO *fno)
 FRESULT f_unlink(const TCHAR *path)
 {
     MockFile *f;
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
     f = find_file(path);
     if (f == NULL) return FR_NO_FILE;
     if (f->is_dir) {
         int i, prefix = (int)strlen(f->name);
         for (i = 0; i < MOCK_MAX_FILES; i++)
-            if (g_files[i].used && strncmp(g_files[i].name, f->name,
+            if (g_files[i].used && g_files[i].vol == f->vol &&
+                strncmp(g_files[i].name, f->name,
                                            (size_t)prefix) == 0 &&
                 g_files[i].name[prefix] == '/')
                 return FR_DENIED;               /* dir not empty */
@@ -268,7 +298,7 @@ FRESULT f_unlink(const TCHAR *path)
 FRESULT f_rename(const TCHAR *path_old, const TCHAR *path_new)
 {
     MockFile *src, *dst;
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path_old, NULL);
     if (fr != FR_OK) return fr;
     src = find_file(path_old);
     if (src == NULL) return FR_NO_FILE;
@@ -285,7 +315,7 @@ FRESULT f_rename(const TCHAR *path_old, const TCHAR *path_new)
 FRESULT f_mkdir(const TCHAR *path)
 {
     MockFile *d;
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
     if (find_file(path) != NULL) return FR_EXIST;
     d = alloc_file(path, 1);
@@ -296,7 +326,7 @@ FRESULT f_mkdir(const TCHAR *path)
 FRESULT f_rmdir(const TCHAR *path)
 {
     MockFile *d = find_file(path);
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
     if (d == NULL) return FR_NO_PATH;
     if (!d->is_dir) return FR_INVALID_NAME;
@@ -305,10 +335,11 @@ FRESULT f_rmdir(const TCHAR *path)
 
 FRESULT f_opendir(DIR *dp, const TCHAR *path)
 {
-    FRESULT fr = volume_ok(NULL);
+    FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
     if (dp == NULL) return FR_INVALID_OBJECT;
     memset(dp, 0, sizeof(*dp));
+    dp->vol = vol_of(path);
     {
         const char *p = path + 2;
         while (*p == '/') p++;
@@ -345,7 +376,7 @@ FRESULT f_readdir(DIR *dp, FILINFO *fno)
     for (i = dp->cursor - 1; i < MOCK_MAX_FILES; i++) {
         MockFile *f = &g_files[i];
         const char *rel;
-        if (!f->used) continue;
+        if (!f->used || f->vol != dp->vol) continue;
         /* direct children only */
         if (dp->path[0] != '\0') {
             size_t plen = strlen(dp->path);
@@ -378,11 +409,9 @@ FRESULT f_closedir(DIR *dp)
 
 FRESULT f_getfree(const TCHAR *path, DWORD *nclst, FATFS **fatfs)
 {
-    FRESULT fr = volume_ok(fatfs);
-    if (fr != FR_OK) return fr;
     /* FatFS accepts both "0:" and "0:/" here */
-    if (path == NULL || path[0] != '0' || path[1] != ':')
-        return FR_INVALID_DRIVE;
+    FRESULT fr = volume_ok(path, fatfs);
+    if (fr != FR_OK) return fr;
     if (nclst) *nclst = 100000;                 /* ~50 MB free */
     return FR_OK;
 }

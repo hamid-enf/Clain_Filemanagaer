@@ -249,7 +249,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick
+.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick fatfs
 
 all: $(LIBS) fm_test
 
@@ -429,8 +429,15 @@ tapstest: $(LIBS)
 		tools/board_taps_host_test.c $(LIBS) -lm -o fm_tapstest
 	@./fm_tapstest
 
+# fatfs — the FatFS adapter against a mock FatFS (three header
+# generations, one and two drives) and the SD-card example set, all under
+# ASan + UBSan.  The adapter is not in the default host build (it needs
+# ff.h), so this is the only place it is compiled and run.
+fatfs:
+	@sh test/build_fatfs_host.sh
+
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks ex33test tapstest asan ports
+check: test cachetest videohooks ex33test tapstest asan ports fatfs
 	@sh tools/check_examples.sh
 	@sh tools/check_cmake.sh
 

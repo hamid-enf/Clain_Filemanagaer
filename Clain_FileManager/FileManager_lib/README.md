@@ -658,12 +658,17 @@ host run cannot show is real interrupt/priority behaviour on the target.
 - After an I/O error in the middle of a compaction the volume stays
   usable: the interrupted move is finished at the start of the next
   operation that changes anything (or by the next mount).
-- `FMFS_Init()` / `LittleFS_Init()` take one of `FM_MAX_FS` contexts.
-  `FS_Unmount()` and a failed `FS_Mount()` give it back, so a medium can
-  be mounted and unmounted any number of times.  Call the init function
-  before each mount; an `FM_FS` mounted again without it is refused
-  with `FM_ERR_NOT_READY` when its old context now belongs to another
-  mount.
+- `FMFS_Init()` / `LittleFS_Init()` / `FatFS_Init()` take one of
+  `FM_MAX_FS` contexts.  `FS_Unmount()` and a failed `FS_Mount()` give it
+  back, so a medium can be mounted and unmounted any number of times.
+  The same `FM_FS` can be mounted again without a new init call (card
+  out, card in); `FS_Mount()` answers `FM_ERR_NOT_READY` instead when
+  its old context now belongs to another `FM_FS` -- with FatFS, where
+  the context carries the drive number, also when it has belonged to
+  one since -- and the init function then has to be called again.
+  Calling it before every mount is always right.  Several FatFS drives
+  (`FatFS_Init(&sd, 0)`, `FatFS_Init(&usb, 1)`) may be initialised in
+  any order before the first of them is mounted.
 
 **How the power-fail safety is verified.**  On the host, not on a
 board: the test suite replays several hundred random operations on
@@ -727,11 +732,13 @@ STM32H7/SD examples are target-oriented and are not part of `make examples`:
 - `examples/spi_tft_dma.h` — H7 SPI master DMA bounce (no ILI9341 driver)
 - `examples/README_sdcard_stm32h7.md` — CubeMX setup and STM32H7 SD/DMA/cache troubleshooting
 
-The target example suites are also compiled and executed against the host FatFS
-mock (with AddressSanitizer and UndefinedBehaviorSanitizer):
+The FatFS adapter and the target example suites are compiled and executed
+against the host FatFS mock (three FatFS header generations, one and two
+drives, with AddressSanitizer and UndefinedBehaviorSanitizer).  This is
+part of `make check`:
 
 ```bash
-sh test/build_fatfs_host.sh
+make fatfs          # = sh test/build_fatfs_host.sh
 ```
 
 ## License

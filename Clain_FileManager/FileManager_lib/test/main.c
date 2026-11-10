@@ -18189,6 +18189,7 @@ static int        g_pf_tear;
 static uint32_t   g_pf_torn;        /* ...and how often it did            */
 static long       g_pf_cut = -1;    /* the storage write that loses power */
 static long       g_pf_fail = -1;   /* the storage write that fails, once */
+static long       g_pf_fail_n = 1;  /* ...and how many after it do too    */
 static long       g_pf_writes;
 static int        g_pf_dead;
 static uint32_t   g_pf_rng;
@@ -18245,7 +18246,8 @@ static FM_Result pf_st_write(FM_Storage *s, uint64_t off, const void *buf,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (g_pf_writes == g_pf_fail)
+    if (g_pf_fail >= 0 && g_pf_writes >= g_pf_fail &&
+        g_pf_writes < g_pf_fail + g_pf_fail_n)
     {
         g_pf_writes++;
         return FM_ERR_IO;           /* nothing written, device alive */
@@ -19019,6 +19021,111 @@ static FM_Result pf_campaign(uint32_t cap, uint32_t block, int v1,
 }
 
 #if FM_FMFS_POWER_SAFE
+/* The same run, but instead of the power going, ONE storage write of
+ * the operation fails and the device stays alive (a NAK, a timeout).
+ * The volume is not mounted again in between: the operation's files
+ * must read back as before or as it leaves them, everything else as
+ * before, and the mount must go on working -- which shows that the
+ * table in RAM and the one on the storage have not drifted apart.
+ * `st->cuts` counts the failed writes, `st->refused` the operations
+ * that reported one. */
+static FM_Result pf_io_campaign(uint32_t cap, uint32_t block, uint32_t seed,
+                                uint32_t nops, PfStats *st)
+{
+    FM_Result r;
+    uint32_t k;
+
+    memset(st, 0, sizeof(*st));
+    g_pf_why[0] = '\0';
+    g_pf_cap = cap;
+    g_pf_block = block;
+    g_pf_rng = seed;
+    g_pf_j_copy = 0;
+    g_pf_j_bounce = 0;
+    g_pf_j_up = 0;
+    g_pf_tear = 0;
+    memset(&g_pf_model, 0, sizeof(g_pf_model));
+    memset(g_pf_mem, 0, cap);
+    r = pf_attach(-1);
+    for (k = 0; k < nops && r == FM_OK && st->damaged == 0u; k++)
+    {
+        PfOp op;
+        long writes;
+        long t;
+        FM_Result ro;
+
+        pf_gen(&g_pf_model, &op, k);
+        memcpy(g_pf_before_mem, g_pf_mem, cap);
+        g_pf_before = g_pf_model;
+        g_pf_writes = 0;
+        ro = pf_run(&op);
+        writes = g_pf_writes;
+        if (ro == FM_OK)
+        {
+            pf_apply(&g_pf_model, &op);
+        }
+        if (pf_verify(&g_pf_model, (ro == FM_OK) ? NULL : &op) != 0)
+        {
+            r = FM_ERR_INTERNAL;
+            break;
+        }
+        memcpy(g_pf_after_mem, g_pf_mem, cap);
+        g_pf_after = g_pf_model;
+
+        for (t = 0; r == FM_OK && st->damaged == 0u; t++)
+        {
+            long at = pf_cut_point(writes, t);
+
+            if (at < 0)
+            {
+                break;
+            }
+            pf_detach();
+            memcpy(g_pf_mem, g_pf_before_mem, cap);
+            g_pf_model = g_pf_before;
+            r = pf_attach(-1);
+            if (r != FM_OK)
+            {
+                break;
+            }
+            g_pf_writes = 0;
+            g_pf_fail = at;
+            ro = pf_run(&op);
+            g_pf_fail = -1;
+            st->cuts++;
+            if (ro != FM_OK)
+            {
+                st->refused++;
+            }
+            if (pf_verify(&g_pf_model, &op) != 0 ||
+                pf_aftercare(&g_pf_model) != 0)
+            {
+                char why[120];
+
+                (void)snprintf(why, sizeof(why), "%.119s", g_pf_why);
+                (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                               "op %u (kind %u, %s) with write %ld of %ld "
+                               "failing: %s", (unsigned)k,
+                               (unsigned)op.kind, FM_ResultString(ro), at,
+                               writes, why);
+                st->damaged++;
+            }
+        }
+        pf_detach();
+        memcpy(g_pf_mem, g_pf_after_mem, cap);
+        g_pf_model = g_pf_after;
+        if (r == FM_OK)
+        {
+            r = pf_attach(-1);
+        }
+    }
+    pf_detach();
+    st->j_copy = g_pf_j_copy;
+    st->j_bounce = g_pf_j_bounce;
+    st->j_up = g_pf_j_up;
+    return r;
+}
+
 static void pf_report(FM_Result r, const PfStats *st, int blocks)
 {
     printf("[%u cuts, %u took a block, %u more during recovery, %u "
@@ -19426,6 +19533,150 @@ static void test_fmfs_powerfail(void)
         }
     }
     CHECK_RESULT(r, "error in compaction");
+
+    TEST("FMFS: one failing write in any operation leaves the mount sound");
+    r = pf_io_campaign(30u * 1024u, 1, 0x51u, 150, &stats);
+    if (r == FM_OK)
+    {
+        r = pf_io_campaign(34u * 1024u, 512, 0x9E3u, 150, &stats);
+    }
+    printf("[%u failing writes, %u reported] ", (unsigned)stats.cuts,
+           (unsigned)stats.refused);
+    if (r != FM_OK || stats.damaged != 0u)
+    {
+        FAIL(g_pf_why[0] ? g_pf_why : "the harness could not run");
+    }
+    else if (stats.cuts < 1000u || stats.j_copy == 0u ||
+             stats.j_bounce == 0u || stats.j_up == 0u)
+    {
+        FAIL("the run did not exercise every path");
+    }
+    else
+    {
+        PASS();
+    }
+
+    TEST("FMFS: a save that failed is made good before space is reused");
+    {
+        /* n0, n1, n2, n3 back to back, hardly any tail.  Cutting n0
+         * down to 100 bytes fails at its one table write: the mount
+         * has the short n0, the storage still the long one.  The next
+         * operation moves a growing n1 into the bytes n0 gave up --
+         * and then the power goes.  If the table with the short n0
+         * were not written first, the reset would bring the long n0
+         * back with n1's bytes in it. */
+        static const PfOp setup[] = {
+            { PF_CREATE, 0, 0, 0, 0, 0 },
+            { PF_APPEND, 0, 0, 0, 6000, 2 },
+            { PF_CREATE, 1, 0, 0, 0, 0 },
+            { PF_APPEND, 1, 0, 0, 3000, 1 },
+            { PF_CREATE, 2, 0, 0, 0, 0 },
+            { PF_APPEND, 2, 0, 0, 9000, 3 },
+            { PF_CREATE, 3, 0, 0, 0, 0 },
+            { PF_APPEND, 3, 0, 0, 2500, 4 }
+        };
+        static const PfOp cut = { PF_TRUNC, 0, 0, 0, 100, 0 };
+        static const PfOp grow[2] = {
+            { PF_APPEND, 1, 0, 0, 2000, 5 },
+            { PF_TRUNC, 1, 0, 0, 5000, 0 }
+        };
+        static PfModel start;
+        uint32_t tried = 0;
+        uint32_t back = 0;
+        uint32_t which;
+        uint32_t i;
+
+        g_pf_cap = 32u * 1024u;
+        g_pf_block = 1;
+        memset(g_pf_mem, 0, g_pf_cap);
+        memset(&g_pf_model, 0, sizeof(g_pf_model));
+        r = pf_attach(-1);
+        for (i = 0; i < sizeof(setup) / sizeof(setup[0]) && r == FM_OK; i++)
+        {
+            r = pf_run(&setup[i]);
+            if (r == FM_OK) pf_apply(&g_pf_model, &setup[i]);
+        }
+        pf_detach();
+        memcpy(g_pf_before_mem, g_pf_mem, g_pf_cap);
+        start = g_pf_model;
+
+        for (which = 0; which < 2u && r == FM_OK; which++)
+        {
+            long writes = 1;
+            long j;
+
+            for (j = -1; j < writes && r == FM_OK; j++)
+            {
+                uint32_t size = 0;
+                FM_Result rd;
+                int state;
+
+                memcpy(g_pf_mem, g_pf_before_mem, g_pf_cap);
+                g_pf_model = start;
+                r = pf_attach(-1);
+                if (r != FM_OK) break;
+                /* the save of the truncate fails, and so does the one
+                 * that closing the file tries */
+                g_pf_writes = 0;
+                g_pf_fail = 0;
+                g_pf_fail_n = 2;
+                rd = pf_run(&cut);
+                g_pf_fail = -1;
+                g_pf_fail_n = 1;
+                /* (not looking at n0 here: closing ANY handle writes a
+                 * table that is behind, and the window would be gone) */
+                if (rd == FM_OK)
+                {
+                    printf("[the truncate did not fail] ");
+                    r = FM_ERR_INTERNAL;
+                }
+                g_pf_writes = 0;
+                g_pf_cut = j;           /* -1: count the writes */
+                rd = pf_run(&grow[which]);
+                if (j < 0)
+                {
+                    writes = g_pf_writes;
+                    if (rd != FM_OK || writes < 4)
+                    {
+                        printf("[grow: %s, %ld writes] ",
+                               FM_ResultString(rd), writes);
+                        r = FM_ERR_INTERNAL;
+                    }
+                }
+                pf_detach();            /* the power is gone */
+                if (r != FM_OK) break;
+                r = pf_attach(-1);
+                if (r != FM_OK) break;
+                /* n0: its first 100 bytes, or all of it */
+                state = pf_read(0, &size);
+                if (state == 1 && size == 100u)
+                {
+                    g_pf_model.f[0].size = 100;
+                }
+                else
+                {
+                    back++;
+                }
+                if (pf_verify(&g_pf_model, &grow[which]) != 0)
+                {
+                    printf("[%s, cut at write %ld of %ld: %s] ",
+                           which ? "truncate" : "append", j, writes,
+                           g_pf_why);
+                    r = FM_ERR_CRC;
+                }
+                pf_detach();
+                tried++;
+            }
+        }
+        /* both outcomes have to have been seen */
+        if (r == FM_OK && (tried < 20u || back == 0u || back == tried))
+        {
+            printf("[%u cuts, the long n0 back %u times] ", (unsigned)tried,
+                   (unsigned)back);
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    CHECK_RESULT(r, "failed save");
 
     TEST("FMFS: files go into the holes deleted files left");
     {
