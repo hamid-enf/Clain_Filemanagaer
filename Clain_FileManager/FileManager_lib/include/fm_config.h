@@ -391,8 +391,8 @@
 #ifndef FM_VIDEO_MAX_AUDIO_FRAMES
 /* Audio packet index of an open video, sized independently of the video
  * frame index: a compressed track has several packets per picture.
- * Packets past the index are streamed from the container (AVI movi /
- * MKV clusters); MP4 and FLV stop at this limit and say so in the log. */
+ * Packets past the index are streamed from the container (AVI movi
+ * list, MKV clusters, MP4 sample tables, FLV tags). */
 #define FM_VIDEO_MAX_AUDIO_FRAMES FM_VIDEO_MAX_FRAMES
 #endif
 #ifndef FM_VIDEO_AUDIO_PRIVATE_MAX

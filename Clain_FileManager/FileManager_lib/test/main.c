@@ -11009,7 +11009,7 @@ typedef struct
 
 static void eb_raw(Eb *e, const void *p, size_t n)
 {
-    if (e->n + n <= e->cap)
+    if (n != 0u && e->n + n <= e->cap)
     {
         memcpy(e->b + e->n, p, n);
     }
@@ -11439,6 +11439,334 @@ static void vr_avi(Eb *e, AviOpt *o)
 
 /* ---- fake hardware decoder ---------------------------------------- */
 static uint8_t  g_vr_hw_in[256];
+/* ---- FLV builder --------------------------------------------------- */
+static void eb_be32(Eb *e, uint32_t v);
+static void eb_be16(Eb *e, uint16_t v);
+static void eb_zero(Eb *e, size_t n);
+
+static void vr_flv_head(Eb *e)
+{
+    eb_raw(e, "FLV\x01\x05", 5);
+    eb_be32(e, 9);
+    eb_be32(e, 0);                      /* PreviousTagSize0 */
+}
+
+/* One tag: `hdr` is the codec header inside the payload, `pl` the data. */
+static void vr_flv_tag(Eb *e, uint8_t type, uint32_t ts, const void *hdr,
+                       size_t hn, const void *pl, size_t pn)
+{
+    uint32_t n = (uint32_t)(hn + pn);
+
+    eb_u8(e, type);
+    eb_u8(e, (uint8_t)(n >> 16)); eb_u8(e, (uint8_t)(n >> 8)); eb_u8(e, (uint8_t)n);
+    eb_u8(e, (uint8_t)(ts >> 16)); eb_u8(e, (uint8_t)(ts >> 8)); eb_u8(e, (uint8_t)ts);
+    eb_u8(e, (uint8_t)(ts >> 24));
+    eb_zero(e, 3);
+    eb_raw(e, hdr, hn);
+    eb_raw(e, pl, pn);
+    eb_be32(e, 11u + n);
+}
+
+static void vr_amf_key(Eb *e, const char *key)
+{
+    eb_be16(e, (uint16_t)strlen(key));
+    eb_raw(e, key, strlen(key));
+}
+
+static void vr_amf_num(Eb *e, const char *key, double v)
+{
+    uint8_t b[8];
+    int i;
+
+    memcpy(b, &v, 8);                   /* host: little-endian IEEE-754 */
+    vr_amf_key(e, key);
+    eb_u8(e, 0);
+    for (i = 7; i >= 0; i--)
+    {
+        eb_u8(e, b[i]);
+    }
+}
+
+/* onMetaData with the three numbers the demuxer wants, behind a string
+ * and a boolean it has to step over. */
+static void vr_flv_meta(Eb *e, double w, double h, double fps)
+{
+    uint8_t m[160];
+    Eb me;
+
+    memset(&me, 0, sizeof(me));
+    me.b = m; me.cap = sizeof(m);
+    eb_u8(&me, 2); vr_amf_key(&me, "onMetaData");
+    eb_u8(&me, 8); eb_be32(&me, 6);
+    vr_amf_key(&me, "encoder"); eb_u8(&me, 2); vr_amf_key(&me, "Lavf-test");
+    vr_amf_key(&me, "stereo"); eb_u8(&me, 1); eb_u8(&me, 1);
+    vr_amf_num(&me, "duration", 2.5);
+    vr_amf_num(&me, "width", w);
+    vr_amf_num(&me, "height", h);
+    vr_amf_num(&me, "framerate", fps);
+    eb_u8(&me, 0); eb_u8(&me, 0); eb_u8(&me, 9);
+    vr_flv_tag(e, 18, 0, NULL, 0, m, me.n);
+}
+
+/* ---- MP4 builder (long clips) -------------------------------------- */
+typedef struct
+{
+    uint32_t nvideo;
+    uint32_t naudio;
+    int      co64;          /* 64-bit chunk offsets ("co64")            */
+    int      large_mdat;    /* mdat with the 64-bit size form           */
+    int      a_uniform;     /* audio stsz: uniform size, no table       */
+    const char *a_fourcc;   /* audio sample entry (NULL = "sowt")       */
+} Mp4Opt;
+
+static void eb_be32(Eb *e, uint32_t v)
+{
+    uint8_t b[4];
+
+    b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16);
+    b[2] = (uint8_t)(v >> 8);  b[3] = (uint8_t)v;
+    eb_raw(e, b, 4);
+}
+
+static void eb_be16(Eb *e, uint16_t v)
+{
+    eb_u8(e, (uint8_t)(v >> 8));
+    eb_u8(e, (uint8_t)v);
+}
+
+static void eb_zero(Eb *e, size_t n)
+{
+    while (n-- > 0u)
+    {
+        eb_u8(e, 0);
+    }
+}
+
+static size_t vr_box(Eb *e, const char *type)
+{
+    size_t at = e->n;
+
+    eb_be32(e, 0);
+    eb_raw(e, type, 4);
+    return at;
+}
+
+static void vr_box_end(Eb *e, size_t at)
+{
+    if (e->n <= e->cap)
+    {
+        uint32_t n = (uint32_t)(e->n - at);
+
+        e->b[at] = (uint8_t)(n >> 24); e->b[at + 1u] = (uint8_t)(n >> 16);
+        e->b[at + 2u] = (uint8_t)(n >> 8); e->b[at + 3u] = (uint8_t)n;
+    }
+}
+
+/* Samples in video chunk `c` (0-based): runs of 3, 7, 1 and 5, so the
+ * index table ends in the middle of a chunk and the stsc table has
+ * several entries. */
+static uint32_t vr_mp4_vchunk(uint32_t c)
+{
+    return (c < 4u) ? 3u : ((c < 8u) ? 7u : ((c < 11u) ? 1u : 5u));
+}
+
+static void vr_mp4_chunk_table(Eb *e, const Mp4Opt *o, const uint32_t *off,
+                               uint32_t n)
+{
+    size_t b = vr_box(e, o->co64 ? "co64" : "stco");
+    uint32_t i;
+
+    eb_be32(e, 0);
+    eb_be32(e, n);
+    for (i = 0; i < n; i++)
+    {
+        if (o->co64)
+        {
+            eb_be32(e, 0);
+        }
+        eb_be32(e, off[i]);
+    }
+    vr_box_end(e, b);
+}
+
+/* Motion-JPEG video ("jpeg") + 16-bit PCM audio ("sowt"), every sample
+ * 4 bytes holding its own number (vr_idx_bytes).  mdat comes first,
+ * video and audio chunks interleaved.  Returns 0 on success. */
+static int vr_mp4(Eb *e, const Mp4Opt *o)
+{
+    uint32_t *voff = (uint32_t *)malloc(((size_t)o->nvideo + 1u) * 4u);
+    uint32_t *aoff = (uint32_t *)malloc(((size_t)o->naudio + 1u) * 4u);
+    uint32_t nvc = 0;
+    uint32_t nac = 0;
+    uint32_t vs = 0;
+    uint32_t as = 0;
+    uint32_t i;
+    size_t mdat;
+    size_t moov;
+    size_t b;
+
+    if (voff == NULL || aoff == NULL)
+    {
+        free(voff); free(aoff);
+        return -1;
+    }
+    b = vr_box(e, "ftyp");
+    eb_raw(e, "isom", 4); eb_be32(e, 0x200); eb_raw(e, "isom", 4);
+    vr_box_end(e, b);
+
+    mdat = e->n;
+    if (o->large_mdat)
+    {
+        eb_be32(e, 1); eb_raw(e, "mdat", 4); eb_be32(e, 0); eb_be32(e, 0);
+    }
+    else
+    {
+        (void)vr_box(e, "mdat");
+    }
+    while (vs < o->nvideo || as < o->naudio)
+    {
+        uint8_t px[4];
+
+        if (vs < o->nvideo)
+        {
+            uint32_t n = vr_mp4_vchunk(nvc);
+
+            voff[nvc++] = (uint32_t)e->n;
+            for (i = 0; i < n && vs < o->nvideo; i++)
+            {
+                vr_idx_bytes(px, vs++);
+                eb_raw(e, px, 4);
+            }
+        }
+        if (as < o->naudio)
+        {
+            aoff[nac++] = (uint32_t)e->n;
+            for (i = 0; i < 2u && as < o->naudio; i++)
+            {
+                vr_idx_bytes(px, as++);
+                eb_raw(e, px, 4);
+            }
+        }
+    }
+    if (o->large_mdat)
+    {
+        if (e->n <= e->cap)
+        {
+            uint32_t n = (uint32_t)(e->n - mdat);
+
+            e->b[mdat + 12u] = (uint8_t)(n >> 24);
+            e->b[mdat + 13u] = (uint8_t)(n >> 16);
+            e->b[mdat + 14u] = (uint8_t)(n >> 8);
+            e->b[mdat + 15u] = (uint8_t)n;
+        }
+    }
+    else
+    {
+        vr_box_end(e, mdat);
+    }
+
+    moov = vr_box(e, "moov");
+    {
+        size_t trak = vr_box(e, "trak");
+        size_t mdia = vr_box(e, "mdia");
+        size_t minf;
+        size_t stbl;
+
+        b = vr_box(e, "mdhd");
+        eb_be32(e, 0); eb_be32(e, 0); eb_be32(e, 0);
+        eb_be32(e, 30); eb_be32(e, o->nvideo);
+        eb_be16(e, 0x55C4); eb_be16(e, 0);
+        vr_box_end(e, b);
+        b = vr_box(e, "hdlr");
+        eb_be32(e, 0); eb_be32(e, 0); eb_raw(e, "vide", 4);
+        eb_zero(e, 12); eb_raw(e, "vide", 4);
+        vr_box_end(e, b);
+        minf = vr_box(e, "minf");
+        stbl = vr_box(e, "stbl");
+        b = vr_box(e, "stsd");
+        eb_be32(e, 0); eb_be32(e, 1);
+        {
+            size_t en = vr_box(e, "jpeg");
+
+            eb_zero(e, 24);
+            eb_be16(e, 64); eb_be16(e, 48);
+            eb_zero(e, 50);
+            vr_box_end(e, en);
+        }
+        vr_box_end(e, b);
+        b = vr_box(e, "stts");
+        eb_be32(e, 0); eb_be32(e, 1); eb_be32(e, o->nvideo); eb_be32(e, 1);
+        vr_box_end(e, b);
+        b = vr_box(e, "stsc");
+        eb_be32(e, 0); eb_be32(e, 4);
+        eb_be32(e, 1);  eb_be32(e, 3); eb_be32(e, 1);
+        eb_be32(e, 5);  eb_be32(e, 7); eb_be32(e, 1);
+        eb_be32(e, 9);  eb_be32(e, 1); eb_be32(e, 1);
+        eb_be32(e, 12); eb_be32(e, 5); eb_be32(e, 1);
+        vr_box_end(e, b);
+        b = vr_box(e, "stsz");
+        eb_be32(e, 0); eb_be32(e, 0); eb_be32(e, o->nvideo);
+        for (i = 0; i < o->nvideo; i++)
+        {
+            eb_be32(e, 4);
+        }
+        vr_box_end(e, b);
+        vr_mp4_chunk_table(e, o, voff, nvc);
+        vr_box_end(e, stbl);
+        vr_box_end(e, minf);
+        vr_box_end(e, mdia);
+        vr_box_end(e, trak);
+    }
+    if (o->naudio != 0u)
+    {
+        size_t trak = vr_box(e, "trak");
+        size_t stbl;
+
+        b = vr_box(e, "hdlr");
+        eb_be32(e, 0); eb_be32(e, 0); eb_raw(e, "soun", 4);
+        eb_zero(e, 12); eb_raw(e, "soun", 4);
+        vr_box_end(e, b);
+        stbl = vr_box(e, "stbl");
+        b = vr_box(e, "stsd");
+        eb_be32(e, 0); eb_be32(e, 1);
+        {
+            size_t en = vr_box(e, (o->a_fourcc != NULL) ? o->a_fourcc
+                                                        : "sowt");
+
+            eb_zero(e, 16);
+            eb_be16(e, 2);              /* channels    */
+            eb_be16(e, 16);             /* sample size */
+            eb_be32(e, 0);
+            eb_be32(e, 8000u << 16);    /* rate 16.16  */
+            vr_box_end(e, en);
+        }
+        vr_box_end(e, b);
+        b = vr_box(e, "stsc");
+        eb_be32(e, 0); eb_be32(e, 1);
+        eb_be32(e, 1); eb_be32(e, 2); eb_be32(e, 1);
+        vr_box_end(e, b);
+        b = vr_box(e, "stsz");
+        eb_be32(e, 0);
+        eb_be32(e, o->a_uniform ? 4u : 0u);
+        eb_be32(e, o->naudio);
+        if (!o->a_uniform)
+        {
+            for (i = 0; i < o->naudio; i++)
+            {
+                eb_be32(e, 4);
+            }
+        }
+        vr_box_end(e, b);
+        vr_mp4_chunk_table(e, o, aoff, nac);
+        vr_box_end(e, stbl);
+        vr_box_end(e, trak);
+    }
+    vr_box_end(e, moov);
+    free(voff);
+    free(aoff);
+    return 0;
+}
+
 static size_t   g_vr_hw_in_len;
 static int      g_vr_hw_calls;
 
@@ -12554,6 +12882,528 @@ static void test_video_report(void)
         }
         CHECK_RESULT(r, "mkv long clip");
         (void)File_Delete("/vr_long.mkv");
+
+        /* MP4: 4 bytes of stsz per frame on top of the AVI budget */
+        {
+            uint32_t variant;
+
+            for (variant = 0; variant < 2u; variant++)
+            {
+                size_t mcap = (size_t)nv * 16u + (size_t)na * 16u + 8192u;
+                uint8_t *mb = (uint8_t *)malloc(mcap);
+                Mp4Opt mo;
+
+                TEST(variant == 0u
+                     ? "mp4: video + audio past their indexes are streamed"
+                     : "mp4: the same with co64, 64-bit mdat size, uniform stsz");
+                r = (mb != NULL) ? FM_OK : FM_ERR_NO_MEMORY;
+                if (r == FM_OK)
+                {
+                    memset(&e, 0, sizeof(e));
+                    memset(&vid, 0, sizeof(vid));
+                    memset(&mo, 0, sizeof(mo));
+                    e.b = mb; e.cap = mcap;
+                    mo.nvideo = nv;
+                    mo.naudio = na;
+                    if (variant == 1u)
+                    {
+                        mo.co64 = 1; mo.large_mdat = 1; mo.a_uniform = 1;
+                    }
+                    if (vr_mp4(&e, &mo) != 0) r = FM_ERR_NO_MEMORY;
+                }
+                if (r == FM_OK) r = vr_write("/vr_long.mp4", &e);
+                if (r == FM_OK) r = Video_Open("/vr_long.mp4", &vid);
+                if (r == FM_OK)
+                {
+                    FM_AudioTrackInfo ai;
+                    const uint32_t edge = (uint32_t)FM_VIDEO_MAX_FRAMES;
+                    const uint32_t aedge = (uint32_t)FM_VIDEO_MAX_AUDIO_FRAMES;
+
+                    if (vid.info.frame_count != nv)
+                    {
+                        printf("[%u frames, want %u] ",
+                               (unsigned)vid.info.frame_count, (unsigned)nv);
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    /* every frame in order, straight through the end of
+                     * the index table, then EOF */
+                    for (i = 0; i < nv && r == FM_OK; i++)
+                    {
+                        r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                        if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                        if (r != FM_OK) printf("[frame %u] ", (unsigned)i);
+                    }
+                    if (r == FM_OK &&
+                        Video_ReadFrame(&vid, fb, sizeof(fb), &got) != FM_ERR_EOF)
+                    {
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    /* jumps: back inside the streamed part, back into
+                     * the table, far forward, the same frame twice */
+                    if (r == FM_OK) r = Video_Seek(&vid, edge + 3u);
+                    if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, edge + 3u);
+                    if (r == FM_OK) r = Video_Seek(&vid, 5u);
+                    if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, 5u);
+                    if (r == FM_OK) r = Video_Seek(&vid, nv - 1u);
+                    if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, nv - 1u);
+                    if (r == FM_OK) r = Video_Seek(&vid, edge);
+                    if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, edge);
+                    if (r == FM_OK) r = Video_Seek(&vid, edge);
+                    if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, edge);
+                    if (r != FM_OK) printf("[video %d] ", (int)r);
+                    /* audio */
+                    if (r == FM_OK) r = Video_GetAudioInfo(&vid, &ai);
+                    if (r == FM_OK && ai.sample_count != na)
+                    {
+                        printf("[%u packets, want %u] ",
+                               (unsigned)ai.sample_count, (unsigned)na);
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    if (r == FM_OK) r = Video_SeekAudio(&vid, 0u);
+                    for (i = 0; i < na && r == FM_OK; i++)
+                    {
+                        r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                        if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                        if (r != FM_OK) printf("[packet %u] ", (unsigned)i);
+                    }
+                    if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 7u);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 7u);
+                    if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 1u);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 1u);
+                    if (r == FM_OK) r = Video_SeekAudio(&vid, na - 1u);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, na - 1u);
+                    (void)Video_Close(&vid);
+                }
+                CHECK_RESULT(r, "mp4 long clip");
+                (void)File_Delete("/vr_long.mp4");
+                free(mb);
+            }
+        }
+
+        TEST("mp4: a chunk table that covers fewer samples than stsz says");
+        {
+            /* 40 samples declared, but the chunk-offset table is cut to
+             * 6 chunks (3+3+3+3+7+7 = 26 samples): 26 frames, not 40
+             * with 14 of them read from wherever. */
+            static uint8_t mb[4096];
+            Mp4Opt mo;
+            size_t at;
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            memset(&mo, 0, sizeof(mo));
+            e.b = mb; e.cap = sizeof(mb);
+            mo.nvideo = 40u;
+            r = (vr_mp4(&e, &mo) == 0) ? FM_OK : FM_ERR_NO_MEMORY;
+            for (at = 0; r == FM_OK && at + 16u <= e.n; at++)
+            {
+                if (memcmp(mb + at + 4u, "stco", 4) == 0)
+                {
+                    mb[at + 15u] = 6u;          /* entry count */
+                    break;
+                }
+            }
+            if (r == FM_OK) r = vr_write("/vr_cut.mp4", &e);
+            if (r == FM_OK) r = Video_Open("/vr_cut.mp4", &vid);
+            if (r == FM_OK)
+            {
+                if (vid.info.frame_count != 26u)
+                {
+                    printf("[%u frames] ", (unsigned)vid.info.frame_count);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                for (i = 0; i < 26u && r == FM_OK; i++)
+                {
+                    r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                }
+                (void)Video_Close(&vid);
+            }
+            /* a chunk count far beyond the box is not believed either */
+            if (r == FM_OK)
+            {
+                mb[at + 12u] = 0x7Fu; mb[at + 13u] = 0xFFu;
+                mb[at + 14u] = 0xFFu; mb[at + 15u] = 0xFFu;
+                r = vr_write("/vr_cut.mp4", &e);
+                if (r == FM_OK) r = Video_Open("/vr_cut.mp4", &vid);
+                if (r == FM_OK)
+                {
+                    if (vid.info.frame_count != 40u)
+                    {
+                        printf("[huge count: %u frames] ",
+                               (unsigned)vid.info.frame_count);
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    (void)Video_Close(&vid);
+                }
+            }
+        }
+        CHECK_RESULT(r, "mp4 short chunk table");
+        (void)File_Delete("/vr_cut.mp4");
+
+        TEST("mp4: Apple Lossless (alac) is not handed out as PCM");
+        {
+            static uint8_t mb[4096];
+            Mp4Opt mo;
+            FM_AudioTrackInfo ai;
+            FM_Result ra;
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            memset(&mo, 0, sizeof(mo));
+            memset(&ai, 0, sizeof(ai));
+            e.b = mb; e.cap = sizeof(mb);
+            mo.nvideo = 6u;
+            mo.naudio = 6u;
+            mo.a_fourcc = "alac";
+            r = (vr_mp4(&e, &mo) == 0) ? FM_OK : FM_ERR_NO_MEMORY;
+            if (r == FM_OK) r = vr_write("/vr_alac.mp4", &e);
+            if (r == FM_OK) r = Video_Open("/vr_alac.mp4", &vid);
+            if (r == FM_OK)
+            {
+                ra = Video_GetAudioInfo(&vid, &ai);
+                if (ra == FM_OK && ai.codec == FM_VIDEO_AUDIO_PCM)
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                /* the picture is still there */
+                if (r == FM_OK && vid.info.frame_count != 6u)
+                {
+                    r = FM_ERR_CORRUPTED;
+                }
+                (void)Video_Close(&vid);
+            }
+        }
+        CHECK_RESULT(r, "mp4 alac");
+        (void)File_Delete("/vr_alac.mp4");
+
+        /* ---------------- FLV ---------------- */
+        TEST("flv: H.264 + AAC: avcC prefix, Annex-B, metadata, ASC");
+        {
+            static uint8_t fbuf[1024];
+            static const uint8_t avcc[] = {
+                1, 0x42, 0, 0x1F, 0xFF, 0xE1, 0, 4, 'S', 'P', 'S', 'x',
+                1, 0, 3, 'P', 'P', 'S' };
+            static const uint8_t want1[] = {
+                0, 0, 0, 1, 'S', 'P', 'S', 'x', 0, 0, 0, 1, 'P', 'P', 'S',
+                0, 0, 0, 1, 'P', '1' };
+            uint8_t out[96];
+            FM_AudioTrackInfo ai;
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            e.b = fbuf; e.cap = sizeof(fbuf);
+            vr_flv_head(&e);
+            vr_flv_meta(&e, 640.0, 360.0, 29.97);
+            vr_flv_tag(&e, 9, 0, "\x17\x00\x00\x00\x00", 5, avcc, sizeof(avcc));
+            vr_flv_tag(&e, 8, 0, "\xAF\x00", 2, "\x15\x88", 2);
+            vr_flv_tag(&e, 9, 0, "\x17\x01\x00\x00\x00", 5,
+                       "\x00\x00\x00\x05IDR00", 9);
+            vr_flv_tag(&e, 8, 0, "\xAF\x01", 2, "AAAA", 4);
+            vr_flv_tag(&e, 9, 33, "\x27\x01\x00\x00\x00", 5,
+                       "\x00\x00\x00\x02P1", 6);
+            vr_flv_tag(&e, 9, 66, "\x17\x02\x00\x00\x00", 5, NULL, 0);
+            r = vr_write("/vr.flv", &e);
+            if (r == FM_OK) r = Video_Open("/vr.flv", &vid);
+            if (r == FM_OK)
+            {
+                if (vid.info.codec != FM_VIDEO_CODEC_H264 ||
+                    vid.info.width != 640u || vid.info.height != 360u ||
+                    vid.info.fps != 30u || vid.info.frame_count != 2u)
+                {
+                    printf("[codec %d %ux%u %u fps %u frames] ",
+                           (int)vid.info.codec, (unsigned)vid.info.width,
+                           (unsigned)vid.info.height, (unsigned)vid.info.fps,
+                           (unsigned)vid.info.frame_count);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                if (r == FM_OK) r = Video_Seek(&vid, 1u);
+                if (r == FM_OK) r = Video_ReadFrame(&vid, out, sizeof(out), &got);
+                if (r == FM_OK && (got != sizeof(want1) ||
+                                   memcmp(out, want1, got) != 0))
+                {
+                    printf("[frame 1: %u bytes] ", (unsigned)got);
+                    r = FM_ERR_CRC;
+                }
+                if (r == FM_OK) r = Video_GetAudioInfo(&vid, &ai);
+                if (r == FM_OK && (ai.codec != FM_VIDEO_AUDIO_AAC ||
+                                   ai.sample_rate != 8000u ||
+                                   ai.channels != 1u || ai.sample_count != 1u))
+                {
+                    printf("[audio %d %u Hz %u ch %u pkts] ", (int)ai.codec,
+                           (unsigned)ai.sample_rate, (unsigned)ai.channels,
+                           (unsigned)ai.sample_count);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                (void)Video_Close(&vid);
+            }
+        }
+        CHECK_RESULT(r, "flv avc");
+
+        TEST("flv: Enhanced-FLV hvc1, frame rate from the timestamps");
+        {
+            static uint8_t fbuf[1024];
+            static const uint8_t hvcc[] = {
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0xFD, 2,
+                0x80 | 33, 0, 1, 0, 4, 'S', 'P', 'S', 'x',
+                0x80 | 34, 0, 1, 0, 3, 'P', 'P', 'S' };
+            static const uint8_t want[] = {
+                0, 0, 0, 1, 'S', 'P', 'S', 'x', 0, 0, 0, 1, 'P', 'P', 'S',
+                0, 0, 0, 1, 'P', '2' };
+            uint8_t out[96];
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            e.b = fbuf; e.cap = sizeof(fbuf);
+            vr_flv_head(&e);
+            vr_flv_tag(&e, 9, 0, "\x90hvc1", 5, hvcc, sizeof(hvcc));
+            vr_flv_tag(&e, 9, 0, "\x93hvc1", 5, "\x00\x02P1", 4);
+            vr_flv_tag(&e, 9, 40, "\xA1hvc1\x00\x00\x00", 8, "\x00\x02P2", 4);
+            vr_flv_tag(&e, 9, 80, "\xA3hvc1", 5, "\x00\x02P3", 4);
+            r = vr_write("/vr.flv", &e);
+            if (r == FM_OK) r = Video_Open("/vr.flv", &vid);
+            if (r == FM_OK)
+            {
+                if (vid.info.codec != FM_VIDEO_CODEC_HEVC ||
+                    vid.info.fps != 25u || vid.info.frame_count != 3u)
+                {
+                    printf("[codec %d %u fps %u frames] ", (int)vid.info.codec,
+                           (unsigned)vid.info.fps,
+                           (unsigned)vid.info.frame_count);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                if (r == FM_OK) r = Video_Seek(&vid, 1u);
+                if (r == FM_OK) r = Video_ReadFrame(&vid, out, sizeof(out), &got);
+                if (r == FM_OK && (got != sizeof(want) ||
+                                   memcmp(out, want, got) != 0))
+                {
+                    r = FM_ERR_CRC;
+                }
+                (void)Video_Close(&vid);
+            }
+        }
+        CHECK_RESULT(r, "flv hvc1");
+
+        TEST("flv: video + audio past their indexes are streamed");
+        {
+            size_t fcap = ((size_t)nv + na) * 24u + 16384u;
+            uint8_t *fbuf = (uint8_t *)malloc(fcap);
+            uint32_t fvs = 0;
+            uint32_t fas = 0;
+            uint32_t step = 0;
+
+            r = (fbuf != NULL) ? FM_OK : FM_ERR_NO_MEMORY;
+            if (r == FM_OK)
+            {
+                memset(&e, 0, sizeof(e));
+                memset(&vid, 0, sizeof(vid));
+                e.b = fbuf; e.cap = fcap;
+                vr_flv_head(&e);
+                while (fvs < nv || fas < na)
+                {
+                    uint8_t px[4];
+
+                    if (fvs < nv)
+                    {
+                        vr_idx_bytes(px, fvs);
+                        vr_flv_tag(&e, 9, fvs * 200u / 3u, "\x22", 1, px, 4);
+                        fvs++;
+                    }
+                    if (fas < na)
+                    {
+                        vr_idx_bytes(px, fas);
+                        vr_flv_tag(&e, 8, fas * 60u, "\x3F", 1, px, 4);
+                        fas++;
+                    }
+                    /* things that are neither a frame nor a packet */
+                    if (++step % 97u == 0u)
+                    {
+                        vr_flv_tag(&e, 18, 0, NULL, 0, "\x02\x00\x01x", 4);
+                        vr_flv_tag(&e, 9, 0, "\x52", 1, "\x00", 1);
+                        vr_flv_tag(&e, 9, 0, "\x22", 1, NULL, 0);
+                        vr_flv_tag(&e, 8, 0, "\x6F", 1, "nelly", 5);
+                    }
+                }
+                r = vr_write("/vr_long.flv", &e);
+            }
+            if (r == FM_OK) r = Video_Open("/vr_long.flv", &vid);
+            if (r == FM_OK)
+            {
+                FM_AudioTrackInfo ai;
+                const uint32_t edge = (uint32_t)FM_VIDEO_MAX_FRAMES;
+                const uint32_t aedge = (uint32_t)FM_VIDEO_MAX_AUDIO_FRAMES;
+
+                if (vid.info.frame_count != nv || vid.info.fps != 15u)
+                {
+                    printf("[%u frames, want %u; %u fps] ",
+                           (unsigned)vid.info.frame_count, (unsigned)nv,
+                           (unsigned)vid.info.fps);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                for (i = 0; i < nv && r == FM_OK; i++)
+                {
+                    r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                    if (r != FM_OK) printf("[frame %u] ", (unsigned)i);
+                }
+                if (r == FM_OK &&
+                    Video_ReadFrame(&vid, fb, sizeof(fb), &got) != FM_ERR_EOF)
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                if (r == FM_OK) r = Video_Seek(&vid, edge + 3u);
+                if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                if (r == FM_OK) r = vr_expect_idx(fb, got, edge + 3u);
+                if (r == FM_OK) r = Video_Seek(&vid, nv - 1u);
+                if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                if (r == FM_OK) r = vr_expect_idx(fb, got, nv - 1u);
+                if (r == FM_OK) r = Video_Seek(&vid, edge);
+                if (r == FM_OK) r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                if (r == FM_OK) r = vr_expect_idx(fb, got, edge);
+                if (r == FM_OK) r = Video_GetAudioInfo(&vid, &ai);
+                if (r == FM_OK && (ai.sample_count != na ||
+                                   ai.codec != FM_VIDEO_AUDIO_PCM ||
+                                   ai.sample_rate != 44100u ||
+                                   ai.channels != 2u ||
+                                   ai.bits_per_sample != 16u))
+                {
+                    printf("[%u packets, want %u; codec %d] ",
+                           (unsigned)ai.sample_count, (unsigned)na,
+                           (int)ai.codec);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                if (r == FM_OK) r = Video_SeekAudio(&vid, 0u);
+                for (i = 0; i < na && r == FM_OK; i++)
+                {
+                    r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                    if (r != FM_OK) printf("[packet %u] ", (unsigned)i);
+                }
+                if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 1u);
+                if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 1u);
+                (void)Video_Close(&vid);
+            }
+            (void)File_Delete("/vr_long.flv");
+            free(fbuf);
+        }
+        CHECK_RESULT(r, "flv long clip");
+
+        TEST("flv: sound formats (G.711 ids, 8-bit PCM, unusable ones)");
+        {
+            static const struct
+            {
+                uint8_t snd;
+                int codec;              /* -1: no audio track */
+                uint32_t rate;
+                uint16_t ch;
+                uint16_t bits;
+            } k_snd[] = {
+                { 0x70, FM_VIDEO_AUDIO_ALAW, 8000u, 1u, 16u },
+                { 0x80, FM_VIDEO_AUDIO_ULAW, 8000u, 1u, 16u },
+                { 0x2F, FM_VIDEO_AUDIO_MP3, 44100u, 2u, 0u },
+                { 0xE2, FM_VIDEO_AUDIO_MP3, 8000u, 1u, 0u },
+                { 0x0C, FM_VIDEO_AUDIO_PCM, 44100u, 1u, 8u },
+                { 0x3B, FM_VIDEO_AUDIO_PCM, 22050u, 2u, 16u },
+                { 0x1F, -1, 0u, 0u, 0u },       /* Flash ADPCM */
+                { 0x6F, -1, 0u, 0u, 0u },       /* Nellymoser  */
+                { 0xB2, -1, 0u, 0u, 0u },       /* Speex       */
+            };
+            static uint8_t fbuf[256];
+
+            r = FM_OK;
+            for (i = 0; i < (uint32_t)(sizeof(k_snd) / sizeof(k_snd[0])); i++)
+            {
+                FM_AudioTrackInfo ai;
+                FM_Result ro;
+                FM_Result ra = FM_ERR_INTERNAL;
+
+                memset(&e, 0, sizeof(e));
+                memset(&vid, 0, sizeof(vid));
+                memset(&ai, 0, sizeof(ai));
+                e.b = fbuf; e.cap = sizeof(fbuf);
+                vr_flv_head(&e);
+                vr_flv_tag(&e, 9, 0, "\x22", 1, "VVVV", 4);
+                vr_flv_tag(&e, 8, 0, &k_snd[i].snd, 1, "AAAA", 4);
+                vr_flv_tag(&e, 8, 20, &k_snd[i].snd, 1, "BBBB", 4);
+                ro = vr_write("/vr.flv", &e);
+                if (ro == FM_OK) ro = Video_Open("/vr.flv", &vid);
+                if (ro == FM_OK)
+                {
+                    ra = Video_GetAudioInfo(&vid, &ai);
+                    (void)Video_Close(&vid);
+                }
+                if (ro != FM_OK ||
+                    (k_snd[i].codec < 0 && ra == FM_OK) ||
+                    (k_snd[i].codec >= 0 &&
+                     (ra != FM_OK || (int)ai.codec != k_snd[i].codec ||
+                      ai.sample_rate != k_snd[i].rate ||
+                      ai.channels != k_snd[i].ch ||
+                      ai.bits_per_sample != k_snd[i].bits ||
+                      ai.sample_count != 2u)))
+                {
+                    printf("[0x%02X: open %d info %d codec %d %u Hz %u ch "
+                           "%u bit] ", (unsigned)k_snd[i].snd, (int)ro, (int)ra,
+                           (int)ai.codec, (unsigned)ai.sample_rate,
+                           (unsigned)ai.channels, (unsigned)ai.bits_per_sample);
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+            }
+        }
+        CHECK_RESULT(r, "flv sound formats");
+
+        TEST("flv: a recording cut inside its last tag keeps the rest");
+        {
+            static uint8_t fbuf[256];
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            e.b = fbuf; e.cap = sizeof(fbuf);
+            vr_flv_head(&e);
+            for (i = 0; i < 3u; i++)
+            {
+                uint8_t px[4];
+
+                vr_idx_bytes(px, i);
+                vr_flv_tag(&e, 9, i * 40u, "\x22", 1, px, 4);
+            }
+            e.n -= 6u;                  /* PreviousTagSize + 2 data bytes */
+            r = vr_write("/vr.flv", &e);
+            if (r == FM_OK) r = Video_Open("/vr.flv", &vid);
+            if (r == FM_OK)
+            {
+                if (vid.info.frame_count != 2u) r = FM_ERR_INVALID_FORMAT;
+                for (i = 0; i < 2u && r == FM_OK; i++)
+                {
+                    r = Video_ReadFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = vr_expect_idx(fb, got, i);
+                }
+                (void)Video_Close(&vid);
+            }
+            /* ...and the last tag without its PreviousTagSize is whole */
+            if (r == FM_OK)
+            {
+                e.n += 2u;
+                r = vr_write("/vr.flv", &e);
+                if (r == FM_OK) r = Video_Open("/vr.flv", &vid);
+                if (r == FM_OK)
+                {
+                    if (vid.info.frame_count != 3u) r = FM_ERR_CORRUPTED;
+                    (void)Video_Close(&vid);
+                }
+            }
+        }
+        CHECK_RESULT(r, "flv cut");
+        (void)File_Delete("/vr.flv");
         free(big);
     }
 

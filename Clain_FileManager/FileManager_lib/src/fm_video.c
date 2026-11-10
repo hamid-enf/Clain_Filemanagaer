@@ -191,6 +191,37 @@ typedef struct
 #define VIDEO_TAIL_NONE 0u
 #define VIDEO_TAIL_AVI  1u
 #define VIDEO_TAIL_MKV  2u
+#define VIDEO_TAIL_MP4  3u
+#define VIDEO_TAIL_FLV  4u
+
+/* A position in the sample tables of one MP4 track. */
+typedef struct
+{
+    uint32_t sample;     /* sample the cursor is on                     */
+    uint32_t chunk;      /* 0-based chunk that holds it                 */
+    uint32_t in_chunk;   /* samples of that chunk in front of it        */
+    uint32_t per_chunk;  /* samples per chunk in force (stsc)           */
+    uint32_t stsc_idx;   /* stsc entries already applied                */
+    uint64_t off;        /* file offset of the sample (when off_valid)  */
+    FM_Bool  off_valid;
+} Mp4Cursor;
+
+/* The sample tables of one MP4 track (stco/co64 + stsc + stsz).  They
+ * stay in the file: samples past the index table are located from them
+ * on demand. */
+typedef struct
+{
+    uint64_t stco_off;
+    uint32_t stco_count;
+    uint32_t stco_entry;     /* 4 (stco) or 8 (co64) bytes              */
+    uint64_t stsc_off;
+    uint32_t stsc_count;
+    uint64_t stsz_off;
+    uint32_t sample_size;    /* uniform size, 0 = per-sample table      */
+    uint32_t sample_count;
+    Mp4Cursor start;         /* on the last sample of the index table   */
+    Mp4Cursor cur;           /* streaming cursor                        */
+} Mp4Track;
 
 typedef struct
 {
@@ -223,11 +254,14 @@ typedef struct
     FM_VideoFrame audio_frames[FM_VIDEO_MAX_AUDIO_FRAMES];
     /* Streaming continuation: frames/packets that did not fit the two
      * fixed index tables are located on demand by walking the container
-     * from where the index stopped (AVI movi list, MKV clusters). */
+     * from where the index stopped (AVI movi list, MKV clusters, MP4
+     * sample tables). */
     uint8_t       tail_kind;         /* VIDEO_TAIL_*                  */
     uint64_t      tail_end;          /* end of the walkable region    */
     FM_VideoTail  vtail;             /* video frames past frames[]    */
     FM_VideoTail  atail;             /* audio packets past the index  */
+    Mp4Track      mp4v;              /* MP4 sample tables, video      */
+    Mp4Track      mp4a;              /* MP4 sample tables, audio      */
     uint32_t      mkv_vid_track;     /* MKV track numbers             */
     uint32_t      mkv_aud_track;
     uint32_t      mkv_bad_blocks;    /* blocks dropped while indexing */
@@ -284,18 +318,6 @@ static uint32_t video_rd32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint64_t video_rd64(const uint8_t *p)
-{
-    uint64_t v = 0;
-    uint32_t i;
-
-    for (i = 0; i < 8; i++)
-    {
-        v |= (uint64_t)p[i] << (8u * i);
-    }
-    return v;
 }
 
 static uint32_t video_be32(const uint8_t *p)
@@ -1157,7 +1179,7 @@ static FM_Result mp4_box_at(FM_Video *v, uint64_t pos, uint64_t end,
         {
             return FM_ERR_CORRUPTED;
         }
-        box->size = video_rd64(h);
+        box->size = video_be64(h);      /* big-endian like every MP4 field */
         box->data = pos + 16;
     }
     else if (box->size == 0)
@@ -1453,8 +1475,19 @@ static FM_Result mp4_trak_has_handler(FM_Video *v, const Mp4Box *trak,
     return (memcmp(ht, tag, 4) == 0) ? FM_OK : FM_ERR_NOT_FOUND;
 }
 
-/* Find the chunk-offset box of an stbl: 32-bit "stco" or 64-bit "co64".
- * *entry_bytes receives the per-entry size (4 or 8). */
+/* Entries a table box can really hold: `count` as declared, but never
+ * more than fit between the table start and the end of the box.  (A
+ * damaged count would otherwise be walked as if it were true.) */
+static uint32_t mp4_table_count(const Mp4Box *box, uint64_t table_off,
+                                uint32_t entry_bytes, uint32_t count)
+{
+    uint64_t end = box->start + box->size;
+    uint64_t room = (end > table_off) ? (end - table_off) / entry_bytes : 0u;
+
+    return (count > room) ? (uint32_t)room : count;
+}
+
+/* Find the chunk-offset box of an stbl: 32-bit "stco" or 64-bit "co64". */
 static FM_Result mp4_find_chunk_offsets(FM_Video *v, const Mp4Box *stbl,
                                         uint64_t *off, uint32_t *count,
                                         uint32_t *entry_bytes)
@@ -1467,9 +1500,9 @@ static FM_Result mp4_find_chunk_offsets(FM_Video *v, const Mp4Box *stbl,
         box.size >= 8 + 8 &&
         video_read_at(&v->file, box.data, h, 8) == FM_OK)
     {
-        *count = video_be32(h + 4);
         *off = box.data + 8;
         *entry_bytes = 4u;
+        *count = mp4_table_count(&box, *off, 4u, video_be32(h + 4));
         return FM_OK;
     }
     if (mp4_find_deep(v, stbl->data, stbl->start + stbl->size, "co64",
@@ -1477,89 +1510,224 @@ static FM_Result mp4_find_chunk_offsets(FM_Video *v, const Mp4Box *stbl,
         box.size >= 8 + 8 &&
         video_read_at(&v->file, box.data, h, 8) == FM_OK)
     {
-        *count = video_be32(h + 4);
         *off = box.data + 8;
         *entry_bytes = 8u;
+        *count = mp4_table_count(&box, *off, 8u, video_be32(h + 4));
         return FM_OK;
     }
     return FM_ERR_NOT_FOUND;
 }
 
-/* Build a per-sample (offset,size) index from an MP4 stbl (stsc+stco+stsz). */
-static FM_Result mp4_build_index(FM_Video *v, uint64_t stco_off,
-                                 uint32_t stco_count, uint32_t stco_entry,
-                                 uint64_t stsc_off,
-                                 uint32_t stsc_count, uint64_t stsz_off,
-                                 uint32_t sample_size, uint32_t sample_count,
-                                 FM_VideoFrame *frames, uint32_t max,
-                                 uint32_t *out_count)
+/* Samples-per-chunk for the chunk the cursor is entering: apply every
+ * stsc entry whose first_chunk (1-based) has been reached.  Chunks in
+ * front of the first entry, or a track without stsc, hold one sample. */
+static FM_Result mp4_cur_per_chunk(FM_Video *v, const Mp4Track *t,
+                                   Mp4Cursor *c)
 {
-    uint32_t chunk;
-    uint32_t sample = 0;
-
-    if (stco_entry != 4u && stco_entry != 8u)
+    while (c->stsc_idx < t->stsc_count)
     {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    *out_count = 0;
-    for (chunk = 0; chunk < stco_count && sample < sample_count; chunk++)
-    {
-        uint8_t h[8];
-        uint64_t chunk_off;
-        uint32_t per_chunk = 1;
-        uint32_t c;
+        uint8_t e[8];
 
-        if (video_read_at(&v->file, stco_off + (uint64_t)chunk * stco_entry,
-                          h, stco_entry) != FM_OK)
+        if (video_read_at(&v->file,
+                          t->stsc_off + (uint64_t)c->stsc_idx * 12u, e,
+                          8) != FM_OK)
         {
             return FM_ERR_CORRUPTED;
         }
-        chunk_off = (stco_entry == 8u) ? video_be64(h) : video_be32(h);
-
-        if (stsc_count > 0)
+        if (video_be32(e) > c->chunk + 1u)
         {
-            uint32_t s;
-
-            for (s = 0; s < stsc_count; s++)
-            {
-                uint8_t e[12];
-
-                if (video_read_at(&v->file, stsc_off + (uint64_t)s * 12, e, 12) != FM_OK)
-                {
-                    return FM_ERR_CORRUPTED;
-                }
-                if (video_be32(e + 0) <= chunk + 1)
-                {
-                    per_chunk = video_be32(e + 4);
-                }
-            }
+            break;
         }
-
-        for (c = 0; c < per_chunk && sample < sample_count; c++)
-        {
-            uint32_t sz = sample_size;
-
-            if (sample_size == 0)
-            {
-                uint8_t s[4];
-
-                if (video_read_at(&v->file, stsz_off + (uint64_t)sample * 4, s, 4) != FM_OK)
-                {
-                    return FM_ERR_CORRUPTED;
-                }
-                sz = video_be32(s);
-            }
-            if (*out_count < max)
-            {
-                frames[*out_count].offset = (uint64_t)chunk_off;
-                frames[*out_count].size = sz;
-                (*out_count)++;
-            }
-            chunk_off += sz;
-            sample++;
-        }
+        c->per_chunk = video_be32(e + 4);
+        c->stsc_idx++;
     }
-    return (*out_count > 0) ? FM_OK : FM_ERR_NOT_FOUND;
+    return FM_OK;
+}
+
+static FM_Result mp4_sample_size(FM_Video *v, const Mp4Track *t,
+                                 uint32_t sample, uint32_t *size)
+{
+    uint8_t s[4];
+
+    if (t->sample_size != 0u)
+    {
+        *size = t->sample_size;
+        return FM_OK;
+    }
+    if (video_read_at(&v->file, t->stsz_off + (uint64_t)sample * 4u, s,
+                      4) != FM_OK)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    *size = video_be32(s);
+    return FM_OK;
+}
+
+static void mp4_cur_reset(Mp4Cursor *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->per_chunk = 1u;
+}
+
+/* Move cursor `c` (which is on a sample <= idx) forward to sample `idx`
+ * and report where that sample is.  Whole chunks are stepped over from
+ * the stsc table alone; only the samples in front of `idx` inside its
+ * own chunk cost a size lookup, so sequential playback is one lookup
+ * per sample and a long forward seek is one step per chunk.
+ *
+ * FM_ERR_EOF when the tables hold no such sample. */
+static FM_Result mp4_cur_seek(FM_Video *v, const Mp4Track *t, Mp4Cursor *c,
+                              uint32_t idx, uint64_t *off, uint32_t *size)
+{
+    FM_Result r;
+
+    if (idx >= t->sample_count || idx < c->sample)
+    {
+        return FM_ERR_EOF;
+    }
+    for (;;)
+    {
+        uint32_t left;
+
+        if (c->chunk >= t->stco_count)
+        {
+            return FM_ERR_EOF;
+        }
+        if (c->in_chunk == 0u)
+        {
+            r = mp4_cur_per_chunk(v, t, c);
+            if (r != FM_OK)
+            {
+                return r;
+            }
+        }
+        left = (c->per_chunk > c->in_chunk) ? c->per_chunk - c->in_chunk : 0u;
+        if (idx - c->sample < left)
+        {
+            break;                      /* idx lives in this chunk */
+        }
+        c->sample += left;
+        c->chunk++;
+        c->in_chunk = 0u;
+        c->off_valid = FM_FALSE;
+    }
+    if (!c->off_valid)
+    {
+        uint8_t h[8];
+
+        if (video_read_at(&v->file,
+                          t->stco_off + (uint64_t)c->chunk * t->stco_entry,
+                          h, t->stco_entry) != FM_OK)
+        {
+            return FM_ERR_CORRUPTED;
+        }
+        c->off = (t->stco_entry == 8u) ? video_be64(h) : video_be32(h);
+        c->off_valid = FM_TRUE;
+    }
+    while (c->sample < idx)
+    {
+        uint32_t sz;
+
+        r = mp4_sample_size(v, t, c->sample, &sz);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        c->off += sz;
+        c->sample++;
+        c->in_chunk++;
+    }
+    r = mp4_sample_size(v, t, idx, size);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    *off = c->off;
+    return FM_OK;
+}
+
+/* Samples the chunk tables really describe (never more than stsz
+ * declares): the sum of samples-per-chunk over every chunk.  Reads the
+ * stsc table only. */
+static FM_Result mp4_count_samples(FM_Video *v, const Mp4Track *t,
+                                   uint32_t *total)
+{
+    Mp4Cursor c;
+    uint64_t sum = 0;
+
+    mp4_cur_reset(&c);
+    while (c.chunk < t->stco_count && sum < t->sample_count)
+    {
+        FM_Result r = mp4_cur_per_chunk(v, t, &c);
+
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (c.stsc_idx >= t->stsc_count)
+        {
+            /* no further change: the rest of the chunks in one go */
+            sum += (uint64_t)(t->stco_count - c.chunk) * c.per_chunk;
+            break;
+        }
+        sum += c.per_chunk;
+        c.chunk++;
+    }
+    *total = (sum > t->sample_count) ? t->sample_count : (uint32_t)sum;
+    return FM_OK;
+}
+
+/* Fill an index table with the first `max` samples of a track and leave
+ * the track ready to stream the rest: *out_count samples are in the
+ * table, *total exist. */
+static FM_Result mp4_build_index(FM_Video *v, Mp4Track *t,
+                                 FM_VideoFrame *frames, uint32_t max,
+                                 uint32_t *out_count, uint32_t *total)
+{
+    Mp4Cursor c;
+    FM_Result r;
+
+    if (t->stco_entry != 4u && t->stco_entry != 8u)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    mp4_cur_reset(&c);
+    *out_count = 0;
+    *total = 0;
+    while (*out_count < max)
+    {
+        uint64_t off = 0;
+        uint32_t sz = 0;
+
+        r = mp4_cur_seek(v, t, &c, *out_count, &off, &sz);
+        if (r == FM_ERR_EOF)
+        {
+            break;
+        }
+        if (r != FM_OK)
+        {
+            return FM_ERR_CORRUPTED;
+        }
+        frames[*out_count].offset = off;
+        frames[*out_count].size = sz;
+        (*out_count)++;
+    }
+    if (*out_count == 0u)
+    {
+        return FM_ERR_NOT_FOUND;
+    }
+    t->start = c;               /* on the last indexed sample */
+    t->cur = c;
+    r = mp4_count_samples(v, t, total);
+    if (r != FM_OK)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    if (*total < *out_count)
+    {
+        *total = *out_count;
+    }
+    return FM_OK;
 }
 
 /* Parse the audio properties of an MP4 'soun' track. */
@@ -1668,17 +1836,27 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                     priv->audio_codec = FM_VIDEO_AUDIO_VORBIS;
                     have_mp4a = FM_TRUE;
                 }
-                else if (memcmp(entry.type, "alac", 4) == 0 ||
-                         memcmp(entry.type, "ulaw", 4) == 0 ||
+                else if (memcmp(entry.type, "ulaw", 4) == 0 ||
                          memcmp(entry.type, "alaw", 4) == 0)
                 {
                     channels = video_be16(a + 16);
                     rate = video_be32(a + 24) >> 16;
-                    priv->audio_codec = (memcmp(entry.type, "alac", 4) == 0)
-                                            ? FM_VIDEO_AUDIO_PCM
-                                            : (memcmp(entry.type, "ulaw", 4) == 0
-                                                   ? FM_VIDEO_AUDIO_ULAW
-                                                   : FM_VIDEO_AUDIO_ALAW);
+                    priv->audio_codec = (memcmp(entry.type, "ulaw", 4) == 0)
+                                            ? FM_VIDEO_AUDIO_ULAW
+                                            : FM_VIDEO_AUDIO_ALAW;
+                    have_mp4a = FM_TRUE;
+                }
+                else if (memcmp(entry.type, "sowt", 4) == 0 &&
+                         video_be16(a + 18) == 16u)
+                {
+                    /* QuickTime little-endian 16-bit PCM: what the PCM
+                     * path hands out as it is.  ("alac" used to be
+                     * mapped here: Apple Lossless is a compressed
+                     * codec, and playing its packets as PCM is noise.
+                     * It is now reported as no usable audio track.) */
+                    channels = video_be16(a + 16);
+                    rate = video_be32(a + 24) >> 16;
+                    priv->audio_codec = FM_VIDEO_AUDIO_PCM;
                     have_mp4a = FM_TRUE;
                 }
             }
@@ -1695,13 +1873,19 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
         sample_size = video_be32(h + 4);
         sample_count = video_be32(h + 8);
         stsz_off = stsz.data + 12;
+        if (sample_size == 0u)
+        {
+            sample_count = mp4_table_count(&stsz, stsz_off, 4u,
+                                           sample_count);
+        }
     }
     if (mp4_find_deep(v, stbl.data, stbl.start + stbl.size, "stsc", &stsc) == FM_OK &&
         stsc.size >= 8 + 8 &&
         video_read_at(&v->file, stsc.data, h, 8) == FM_OK)
     {
-        stsc_count = video_be32(h + 4);
         stsc_off = stsc.data + 8;
+        stsc_count = mp4_table_count(&stsc, stsc_off, 12u,
+                                     video_be32(h + 4));
     }
     (void)stco;
     (void)mp4_find_chunk_offsets(v, &stbl, &stco_off, &stco_count,
@@ -1721,11 +1905,20 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                            ? 16u
                            : 0u;
     priv->audio_present = FM_TRUE;
-    return mp4_build_index(v, stco_off, stco_count, stco_entry,
-                           stsc_off, stsc_count,
-                           stsz_off, sample_size, sample_count,
-                           priv->audio_frames, FM_VIDEO_MAX_AUDIO_FRAMES,
-                           &priv->audio_count);
+    memset(&priv->mp4a, 0, sizeof(priv->mp4a));
+    priv->mp4a.stco_off = stco_off;
+    priv->mp4a.stco_count = stco_count;
+    priv->mp4a.stco_entry = stco_entry;
+    priv->mp4a.stsc_off = stsc_off;
+    priv->mp4a.stsc_count = stsc_count;
+    priv->mp4a.stsz_off = stsz_off;
+    priv->mp4a.sample_size = sample_size;
+    priv->mp4a.sample_count = sample_count;
+    /* Packets past the index table are streamed from the sample tables
+     * (video_tail_locate); the track used to go silent there. */
+    return mp4_build_index(v, &priv->mp4a, priv->audio_frames,
+                           FM_VIDEO_MAX_AUDIO_FRAMES, &priv->audio_count,
+                           &priv->atail.total);
 }
 
 static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
@@ -1983,6 +2176,11 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
                 sample_size = video_be32(h + 4);
                 sample_count = video_be32(h + 8);
                 stsz_off = stsz.data + 12;
+                if (sample_size == 0u)
+                {
+                    sample_count = mp4_table_count(&stsz, stsz_off, 4u,
+                                                   sample_count);
+                }
             }
         }
         /* stsc */
@@ -1994,8 +2192,9 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
                 stsc.size >= 8 + 8 &&
                 video_read_at(&v->file, stsc.data, h, 8) == FM_OK)
             {
-                stsc_count = video_be32(h + 4);
                 stsc_off = stsc.data + 8;
+                stsc_count = mp4_table_count(&stsc, stsc_off, 12u,
+                                             video_be32(h + 4));
             }
         }
         /* stco / co64 */
@@ -2019,22 +2218,26 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
     (void)strcpy(v->info.container, "MP4");
 
     /* Build the video frame index from stsc + stco + stsz. */
-    r = mp4_build_index(v, stco_off, stco_count, stco_entry,
-                        stsc_off, stsc_count,
-                        stsz_off, sample_size, sample_count,
-                        priv->frames, FM_VIDEO_MAX_FRAMES, &priv->count);
+    memset(&priv->mp4v, 0, sizeof(priv->mp4v));
+    priv->mp4v.stco_off = stco_off;
+    priv->mp4v.stco_count = stco_count;
+    priv->mp4v.stco_entry = stco_entry;
+    priv->mp4v.stsc_off = stsc_off;
+    priv->mp4v.stsc_count = stsc_count;
+    priv->mp4v.stsz_off = stsz_off;
+    priv->mp4v.sample_size = sample_size;
+    priv->mp4v.sample_count = sample_count;
+    r = mp4_build_index(v, &priv->mp4v, priv->frames, FM_VIDEO_MAX_FRAMES,
+                        &priv->count, &priv->vtail.total);
     if (r != FM_OK)
     {
         return FM_ERR_INVALID_FORMAT;
     }
-    if (sample_count > priv->count)
-    {
-        FM_ERR_LOG("mp4: %lu samples but index holds %u — playback "
-                   "truncated (raise FM_VIDEO_MAX_FRAMES)",
-                   (unsigned long)sample_count,
-                   (unsigned)FM_VIDEO_MAX_FRAMES);
-    }
-    v->info.frame_count = priv->count;
+    /* Frames past the index table are streamed from the sample tables
+     * (video_tail_locate): a clip longer than FM_VIDEO_MAX_FRAMES used
+     * to end there. */
+    priv->tail_kind = VIDEO_TAIL_MP4;
+    v->info.frame_count = priv->vtail.total;
     v->info.data_offset = priv->frames[0].offset;
     return Video_Seek(v, 0);
 }
@@ -3010,131 +3213,549 @@ static FM_Result mkv_parse(FM_Video *v, FM_VideoPriv *priv)
 }
 
 /* ------------------------------------------------------------------ */
-/* FLV — Flash Video (FLV1) minimal demux                             */
+/* FLV - Flash Video demux                                             */
 /* ------------------------------------------------------------------ */
+/* Header (9 bytes, "FLV"), then tags:
+ *   PreviousTagSize(4)  TagType(1) DataSize(3) Timestamp(3+1) StreamID(3)
+ *   payload(DataSize)
+ * Video payload: FrameType<<4 | CodecID, then for AVC (7) / HEVC (12,
+ * the pre-standard extension) AVCPacketType(1) + CompositionTime(3);
+ * or the Enhanced-FLV form 0x80 | FrameType<<4 | PacketType + FourCC.
+ * Audio payload: SoundFormat<<4 | rate<<2 | size<<1 | stereo, then for
+ * AAC (10) AACPacketType(1). */
+#define FLV_SKIP   0u   /* nothing to play in this tag                   */
+#define FLV_VFRAME 1u   /* one video frame                               */
+#define FLV_APKT   2u   /* one audio packet                              */
+#define FLV_VCONF  3u   /* avcC / hvcC record                            */
+#define FLV_ACONF  4u   /* AAC AudioSpecificConfig                       */
+#define FLV_SCRIPT 5u   /* AMF0 script data (onMetaData)                 */
+
+typedef struct
+{
+    uint8_t  kind;      /* FLV_*                                         */
+    uint8_t  vcodec;    /* FM_VideoCodec of a video tag                  */
+    uint8_t  snd;       /* first payload byte of an audio tag            */
+    uint32_t ts;        /* milliseconds                                  */
+    uint64_t off;       /* frame / packet / record, tag header stripped  */
+    uint32_t size;
+    uint64_t next;      /* where the following tag starts                */
+} FlvTag;
+
+/* SoundFormats this library can do something with.  1 (Flash ADPCM, not
+ * the IMA/MS ADPCM of AVI), 4-6 (Nellymoser) and 11 (Speex) are not. */
+static FM_Bool flv_audio_usable(uint8_t fmt)
+{
+    return (fmt == 0u || fmt == 2u || fmt == 3u || fmt == 7u || fmt == 8u ||
+            fmt == 10u || fmt == 14u) ? FM_TRUE : FM_FALSE;
+}
+
+/* Read and classify the tag at `pos`.  FM_ERR_EOF when there is no
+ * complete tag there (end of file, or a recording that was cut off). */
+static FM_Result flv_tag_at(FM_Video *v, uint64_t pos, uint64_t end,
+                            FlvTag *t)
+{
+    uint8_t h[16];
+    const uint8_t *p = h + 11;
+    uint32_t dsz;
+    uint32_t have;
+    uint32_t skip = 0;
+    uint64_t data = pos + 11u;
+    uint8_t type;
+
+    memset(t, 0, sizeof(*t));
+    if (data > end || video_read_at(&v->file, pos, h, 11) != FM_OK)
+    {
+        return FM_ERR_EOF;
+    }
+    dsz = ((uint32_t)h[1] << 16) | ((uint32_t)h[2] << 8) | (uint32_t)h[3];
+    if (dsz > end - data)
+    {
+        return FM_ERR_EOF;
+    }
+    /* the PreviousTagSize behind the last tag may be missing */
+    t->next = data + dsz + 4u;
+    t->ts = ((uint32_t)h[4] << 16) | ((uint32_t)h[5] << 8) | (uint32_t)h[6] |
+            ((uint32_t)h[7] << 24);
+    have = (dsz < 5u) ? dsz : 5u;
+    if (have != 0u && video_read_at(&v->file, data, h + 11, have) != FM_OK)
+    {
+        return FM_ERR_EOF;
+    }
+    type = h[0] & 0x1Fu;
+    if ((h[0] & 0x20u) != 0u || have == 0u)
+    {
+        return FM_OK;                   /* encrypted, or empty */
+    }
+    if (type == 9u)
+    {
+        if ((p[0] & 0x80u) != 0u)
+        {
+            /* Enhanced FLV: PacketType in the low nibble, FourCC next */
+            uint8_t pt = p[0] & 0x0Fu;
+
+            if (have < 5u)
+            {
+                return FM_OK;
+            }
+            if (memcmp(p + 1, "hvc1", 4) == 0) t->vcodec = FM_VIDEO_CODEC_HEVC;
+            else if (memcmp(p + 1, "avc1", 4) == 0) t->vcodec = FM_VIDEO_CODEC_H264;
+            else if (memcmp(p + 1, "av01", 4) == 0) t->vcodec = FM_VIDEO_CODEC_AV1;
+            else if (memcmp(p + 1, "vp09", 4) == 0) t->vcodec = FM_VIDEO_CODEC_VP9;
+            else if (memcmp(p + 1, "vp08", 4) == 0) t->vcodec = FM_VIDEO_CODEC_VP8;
+            else t->vcodec = FM_VIDEO_CODEC_UNKNOWN;
+            if (pt == 0u)
+            {
+                t->kind = FLV_VCONF;
+                skip = 5u;
+            }
+            else if (pt == 1u)
+            {
+                /* CodedFrames: AVC / HEVC carry a composition time */
+                t->kind = FLV_VFRAME;
+                skip = (t->vcodec == FM_VIDEO_CODEC_HEVC ||
+                        t->vcodec == FM_VIDEO_CODEC_H264) ? 8u : 5u;
+            }
+            else if (pt == 3u)
+            {
+                t->kind = FLV_VFRAME;   /* CodedFramesX: no time field */
+                skip = 5u;
+            }
+            else
+            {
+                return FM_OK;           /* sequence end, metadata, ... */
+            }
+        }
+        else
+        {
+            uint8_t cid = p[0] & 0x0Fu;
+
+            if ((p[0] >> 4) == 5u)
+            {
+                return FM_OK;           /* video info / command frame */
+            }
+            if (cid == 7u || cid == 12u)
+            {
+                if (have < 5u || p[1] > 1u)
+                {
+                    return FM_OK;       /* 2 = end of sequence */
+                }
+                t->vcodec = (cid == 7u) ? FM_VIDEO_CODEC_H264
+                                        : FM_VIDEO_CODEC_HEVC;
+                t->kind = (p[1] == 0u) ? FLV_VCONF : FLV_VFRAME;
+                skip = 5u;
+            }
+            else
+            {
+                /* 1 JPEG, 2 Sorenson H.263, 3 screen, 4/5 VP6 (one
+                 * extra adjustment byte), 6 screen v2: frames are
+                 * handed out for a user decoder */
+                t->vcodec = (cid == 1u) ? FM_VIDEO_CODEC_MJPEG
+                                        : FM_VIDEO_CODEC_UNKNOWN;
+                t->kind = FLV_VFRAME;
+                skip = (cid == 4u || cid == 5u) ? 2u : 1u;
+            }
+        }
+    }
+    else if (type == 8u)
+    {
+        uint8_t fmt = p[0] >> 4;
+
+        t->snd = p[0];
+        if (!flv_audio_usable(fmt))
+        {
+            return FM_OK;
+        }
+        if (fmt == 10u)
+        {
+            if (have < 2u || p[1] > 1u)
+            {
+                return FM_OK;
+            }
+            t->kind = (p[1] == 0u) ? FLV_ACONF : FLV_APKT;
+            skip = 2u;
+        }
+        else
+        {
+            t->kind = FLV_APKT;
+            skip = 1u;
+        }
+    }
+    else if (type == 18u)
+    {
+        t->kind = FLV_SCRIPT;
+    }
+    else
+    {
+        return FM_OK;
+    }
+    if (dsz <= skip)
+    {
+        t->kind = FLV_SKIP;             /* header only: nothing inside */
+        return FM_OK;
+    }
+    t->off = data + skip;
+    t->size = dsz - skip;
+    return FM_OK;
+}
+
+/* AMF0 Number (IEEE-754 double, big-endian) times `scale` (<= 1000),
+ * rounded to the nearest integer -- without touching floating point,
+ * which a soft-float target would pay for dearly. */
+static uint32_t flv_amf_number(const uint8_t *b, uint32_t scale)
+{
+    int32_t exp = (int32_t)((((uint32_t)b[0] & 0x7Fu) << 4) |
+                            ((uint32_t)b[1] >> 4)) - 1023;
+    uint64_t mant = ((uint64_t)(b[1] & 0x0Fu) << 48) |
+                    ((uint64_t)b[2] << 40) | ((uint64_t)b[3] << 32) |
+                    ((uint64_t)b[4] << 24) | ((uint64_t)b[5] << 16) |
+                    ((uint64_t)b[6] << 8) | (uint64_t)b[7];
+    uint32_t shift;
+
+    if ((b[0] & 0x80u) != 0u || exp < -11 || exp == 1024)
+    {
+        return 0u;                      /* negative, below 1/2048, NaN */
+    }
+    if (exp > 31)
+    {
+        return UINT32_MAX;
+    }
+    mant = (mant | ((uint64_t)1 << 52)) * scale;    /* < 2^63 */
+    shift = (uint32_t)(52 - exp);                   /* 21 .. 63 */
+    mant = (mant + ((uint64_t)1 << (shift - 1u))) >> shift;
+    return (mant > UINT32_MAX) ? UINT32_MAX : (uint32_t)mant;
+}
+
+/* onMetaData: picture size and frame rate.  Walks the top-level
+ * properties of the ECMA array / object; stops quietly at anything it
+ * does not need to understand. */
+static void flv_metadata(FM_Video *v, uint64_t off, uint32_t size,
+                         uint32_t *width, uint32_t *height,
+                         uint32_t *fps_milli)
+{
+    uint64_t pos = off;
+    uint64_t end = off + size;
+    uint8_t b[12];
+    uint32_t guard;
+
+    if (size < 4u || video_read_at(&v->file, pos, b, 3) != FM_OK ||
+        b[0] != 2u)
+    {
+        return;
+    }
+    pos += 3u + video_be16(b + 1);                  /* "onMetaData" */
+    if (pos >= end || video_read_at(&v->file, pos, b, 1) != FM_OK)
+    {
+        return;
+    }
+    if (b[0] == 8u)
+    {
+        pos += 5u;                                  /* ECMA array + count */
+    }
+    else if (b[0] == 3u)
+    {
+        pos += 1u;                                  /* object */
+    }
+    else
+    {
+        return;
+    }
+    for (guard = 0; guard < 64u; guard++)
+    {
+        char key[12];
+        uint32_t klen;
+        uint8_t type;
+
+        if (pos + 3u > end || video_read_at(&v->file, pos, b, 2) != FM_OK)
+        {
+            return;
+        }
+        klen = video_be16(b);
+        pos += 2u;
+        if (klen >= end - pos)
+        {
+            return;
+        }
+        memset(key, 0, sizeof(key));
+        if (klen != 0u && klen < sizeof(key) &&
+            video_read_at(&v->file, pos, key, klen) != FM_OK)
+        {
+            return;
+        }
+        pos += klen;
+        if (video_read_at(&v->file, pos, &type, 1) != FM_OK)
+        {
+            return;
+        }
+        pos += 1u;
+        switch (type)
+        {
+        case 0u:                                    /* number */
+            if (pos + 8u > end || video_read_at(&v->file, pos, b, 8) != FM_OK)
+            {
+                return;
+            }
+            if (klen == 5u && memcmp(key, "width", 5) == 0)
+            {
+                *width = flv_amf_number(b, 1u);
+            }
+            else if (klen == 6u && memcmp(key, "height", 6) == 0)
+            {
+                *height = flv_amf_number(b, 1u);
+            }
+            else if (klen == 9u && memcmp(key, "framerate", 9) == 0)
+            {
+                *fps_milli = flv_amf_number(b, 1000u);
+            }
+            pos += 8u;
+            break;
+        case 1u:                                    /* boolean */
+            pos += 1u;
+            break;
+        case 2u:                                    /* string */
+            if (pos + 2u > end || video_read_at(&v->file, pos, b, 2) != FM_OK)
+            {
+                return;
+            }
+            pos += 2u + video_be16(b);
+            break;
+        case 5u:                                    /* null */
+        case 6u:                                    /* undefined */
+            break;
+        case 11u:                                   /* date */
+            pos += 10u;
+            break;
+        case 12u:                                   /* long string */
+            if (pos + 4u > end || video_read_at(&v->file, pos, b, 4) != FM_OK)
+            {
+                return;
+            }
+            pos += 4u + (uint64_t)video_be32(b);
+            break;
+        default:                    /* nested value, end marker: stop */
+            return;
+        }
+    }
+}
+
 static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
 {
-    uint64_t file_size=0;
-    uint8_t hdr[13];
+    static const uint32_t k_rate[4] = { 5512u, 11025u, 22050u, 44100u };
+    uint64_t file_size = 0;
     uint64_t pos;
-    uint32_t width=0,height=0;
-    uint32_t fps = 25u;
+    uint8_t hdr[9];
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps_milli = 0;
+    uint32_t fps = 0;
+    uint32_t ts_first = 0;
+    uint32_t ts_last = 0;
     FM_VideoCodec vcodec = FM_VIDEO_CODEC_UNKNOWN;
-    uint32_t aud_codec = FM_VIDEO_AUDIO_NONE;
-    uint32_t aud_rate=44100u; uint16_t aud_ch=2u;
-    if (File_Size(&v->file,&file_size)!=FM_OK) return FM_ERR_IO;
-    if (video_read_at(&v->file,0,hdr,13)!=FM_OK) return FM_ERR_CORRUPTED;
-    if (memcmp(hdr,"FLV",3)!=0) return FM_ERR_INVALID_FORMAT;
-    pos = 13;
-    /* previousTagSize0 already in hdr[9..12], pos already after */
-    while (pos + 15 <= file_size && priv->count < FM_VIDEO_MAX_FRAMES)
+    FM_Bool have_vconf = FM_FALSE;
+    FM_Bool have_aconf = FM_FALSE;
+    FM_Bool have_meta = FM_FALSE;
+    uint8_t snd = 0;
+
+    if (File_Size(&v->file, &file_size) != FM_OK)
     {
-        uint8_t th[11];
-        uint32_t dsz, ts;
-        uint8_t type;
-        if (video_read_at(&v->file,pos,th,11)!=FM_OK) break;
-        type = th[0];
-        dsz = ((uint32_t)th[1]<<16)|((uint32_t)th[2]<<8)|th[3];
-        ts = ((uint32_t)th[4]<<16)|((uint32_t)th[5]<<8)|th[6]|((uint32_t)th[7]<<24);
-        (void)ts;
-        uint64_t data = pos+11;
-        uint64_t next = data + dsz + 4; /* + PreviousTagSize */
-        if (next > file_size) break;
-        if (type==9u) /* video */
-        {
-            uint8_t ftCodec;
-            if (dsz>=1 && video_read_at(&v->file,data,&ftCodec,1)==FM_OK)
-            {
-                uint8_t cid = ftCodec & 0x0Fu;
-                if (cid==7u) vcodec = FM_VIDEO_CODEC_H264;
-                else if (cid==12u) vcodec = FM_VIDEO_CODEC_HEVC;
-                else if (cid==2u||cid==3u) vcodec = FM_VIDEO_CODEC_MPEG4;
-                else if (cid==1u) vcodec = FM_VIDEO_CODEC_MJPEG;
-                else vcodec = FM_VIDEO_CODEC_UNKNOWN;
-                if (vcodec != FM_VIDEO_CODEC_UNKNOWN)
-                {
-                    uint8_t avcType=0;
-                    if (cid==7u && dsz>=2) video_read_at(&v->file,data+1,&avcType,1);
-                    if (!(cid==7u && avcType==0u)) /* skip sequence header */
-                    {
-                        /* data offset after FLV video tag header (1 + 1 +3) for AVC */
-                        uint64_t f_off = data + ((cid==7u)?5u:1u);
-                        uint32_t f_sz = dsz - ((cid==7u)?5u:1u);
-                        if (f_sz>0u)
-                        {
-                            priv->frames[priv->count].offset = f_off;
-                            priv->frames[priv->count].size = f_sz;
-                            priv->count++;
-                        }
-                    }
-                    else if (cid==7u && avcType==0u)
-                    {
-                        /* parse avcC to get SPS width/height: reuse mp4 logic quickly */
-                        /* avcC starts at data+5 */
-                        uint64_t avcOff = data+5;
-                        uint8_t avcHdr[6];
-                        if (dsz>= 11 && video_read_at(&v->file,avcOff,avcHdr,6)==FM_OK)
-                        {
-                            /* try to extract SPS like mp4_parse_avcc would but we just store */
-                            /* width/height unknown here, keep default */
-                        }
-                    }
-                }
-            }
-        }
-        else if (type==8u) /* audio */
-        {
-            uint8_t snd;
-            if (dsz>=1 && video_read_at(&v->file,data,&snd,1)==FM_OK)
-            {
-                uint8_t fmt = snd>>4;
-                uint8_t rateIdx = (snd>>2)&0x03u;
-                uint8_t isStereo = snd & 0x01u;
-                uint8_t aacType=0;
-                if (fmt==10u && dsz>=2) video_read_at(&v->file,data+1,&aacType,1);
-                if (fmt==2u) aud_codec=FM_VIDEO_AUDIO_MP3;
-                else if (fmt==10u) aud_codec=FM_VIDEO_AUDIO_AAC;
-                else if (fmt==0u) { aud_codec=FM_VIDEO_AUDIO_PCM; aud_ch = isStereo?2u:1u; }
-                else if (fmt==1u) aud_codec=FM_VIDEO_AUDIO_ADPCM;
-                else if (fmt==6u) aud_codec=FM_VIDEO_AUDIO_ALAW;
-                else if (fmt==7u) aud_codec=FM_VIDEO_AUDIO_ULAW;
-                static const uint32_t rates[4]={5500,11025,22050,44100};
-                aud_rate = rates[rateIdx &0x03u];
-                aud_ch = isStereo?2u:1u;
-                if (!(fmt==10u && aacType==0u))
-                {
-                    uint64_t f_off = data + ((fmt==10u)?2u:1u);
-                    uint32_t f_sz = dsz - ((fmt==10u)?2u:1u);
-                    if (f_sz>0u && priv->audio_count < FM_VIDEO_MAX_AUDIO_FRAMES)
-                    {
-                        priv->audio_frames[priv->audio_count].offset = f_off;
-                        priv->audio_frames[priv->audio_count].size = f_sz;
-                        priv->audio_count++;
-                    }
-                }
-            }
-        }
-        pos = next;
-        (void)fps;
+        return FM_ERR_IO;
     }
-    if (priv->count==0u) return FM_ERR_INVALID_FORMAT;
-    v->info.width = width? (uint16_t)width : 320u;
-    v->info.height = height? (uint16_t)height : 240u;
-    v->info.fps = fps;
-    v->info.codec = (vcodec==FM_VIDEO_CODEC_UNKNOWN)? FM_VIDEO_CODEC_H264 : vcodec;
-    (void)strcpy(v->info.container,"FLV");
-    v->info.frame_count = priv->count;
+    if (video_read_at(&v->file, 0, hdr, 9) != FM_OK)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    if (memcmp(hdr, "FLV", 3) != 0)
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    pos = video_be32(hdr + 5);          /* header size, 9 in version 1 */
+    if (pos < 9u || pos >= file_size)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    pos += 4u;                          /* PreviousTagSize0 */
+    priv->count = 0;
+    priv->audio_count = 0;
+    priv->tail_kind = VIDEO_TAIL_FLV;
+    priv->tail_end = file_size;
+    /* The whole file is walked once: every frame and packet is counted,
+     * the first FM_VIDEO_MAX_FRAMES / _AUDIO_FRAMES go into the tables,
+     * the rest are streamed (video_tail_locate).  The scan used to stop
+     * at the first full table -- picture and sound both ended there. */
+    for (;;)
+    {
+        FlvTag t;
+
+        if (flv_tag_at(v, pos, file_size, &t) != FM_OK)
+        {
+            break;
+        }
+        switch (t.kind)
+        {
+        case FLV_VFRAME:
+            if (priv->vtail.total == 0u)
+            {
+                vcodec = (FM_VideoCodec)t.vcodec;
+                ts_first = t.ts;
+            }
+            ts_last = t.ts;
+            video_index_add(priv->frames, FM_VIDEO_MAX_FRAMES, &priv->count,
+                            &priv->vtail, pos, 0u, t.off, t.size);
+            break;
+        case FLV_VCONF:
+            /* avcC / hvcC: without the parameter sets in front of the
+             * first picture no decoder can start (this record used to
+             * be skipped, and the length-prefixed NAL units were handed
+             * out as they are). */
+            if (!have_vconf)
+            {
+                FM_Result rc = FM_ERR_UNSUPPORTED;
+
+                if (t.vcodec == FM_VIDEO_CODEC_H264)
+                {
+                    rc = video_parse_avcc(v, t.off, t.size, priv);
+                }
+                else if (t.vcodec == FM_VIDEO_CODEC_HEVC)
+                {
+                    rc = video_parse_hvcc(v, t.off, t.size, priv);
+                }
+                if (rc == FM_OK)
+                {
+                    have_vconf = FM_TRUE;
+                }
+                else if (t.vcodec == FM_VIDEO_CODEC_H264 ||
+                         t.vcodec == FM_VIDEO_CODEC_HEVC)
+                {
+                    FM_ERR_LOG("flv: decoder configuration unusable (%s) "
+                               "-- frames will not decode",
+                               FM_ResultString(rc));
+                }
+            }
+            break;
+        case FLV_APKT:
+            if (priv->atail.total == 0u)
+            {
+                snd = t.snd;
+            }
+            video_index_add(priv->audio_frames, FM_VIDEO_MAX_AUDIO_FRAMES,
+                            &priv->audio_count, &priv->atail, pos, 0u,
+                            t.off, t.size);
+            break;
+        case FLV_ACONF:
+            if (!have_aconf && t.size <= sizeof(priv->audio_private) &&
+                video_read_at(&v->file, t.off, priv->audio_private,
+                              t.size) == FM_OK)
+            {
+                priv->audio_private_size = t.size;
+                have_aconf = FM_TRUE;
+            }
+            break;
+        case FLV_SCRIPT:
+            if (!have_meta)
+            {
+                flv_metadata(v, t.off, t.size, &width, &height, &fps_milli);
+                have_meta = (width != 0u || fps_milli != 0u) ? FM_TRUE
+                                                             : FM_FALSE;
+            }
+            break;
+        default:
+            break;
+        }
+        pos = t.next;
+    }
+    if (priv->count == 0u)
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    if (vcodec == FM_VIDEO_CODEC_H264 || vcodec == FM_VIDEO_CODEC_HEVC)
+    {
+        priv->avc1 = FM_TRUE;           /* length-prefixed NAL units */
+        if (priv->nal_len_size == 0u)
+        {
+            priv->nal_len_size = 4u;
+        }
+    }
+    /* Picture size: FLV only has it in onMetaData.  320x240 stays the
+     * placeholder when the file carries none (the decoder then knows
+     * better: H264_GetOutputSize). */
+    v->info.width = (width != 0u && width <= 0xFFFFu) ? (uint16_t)width : 320u;
+    v->info.height = (height != 0u && height <= 0xFFFFu) ? (uint16_t)height
+                                                         : 240u;
+    /* Frame rate: metadata, else the average over the tag timestamps
+     * (nearest integer), else 25. */
+    if (fps_milli != 0u && fps_milli != UINT32_MAX)
+    {
+        fps = (fps_milli + 500u) / 1000u;
+    }
+    if (fps == 0u && priv->vtail.total > 1u && ts_last > ts_first)
+    {
+        uint64_t span = (uint64_t)ts_last - ts_first;
+
+        fps = (uint32_t)(((uint64_t)(priv->vtail.total - 1u) * 1000u +
+                          span / 2u) / span);
+    }
+    v->info.fps = (fps != 0u) ? fps : 25u;
+    v->info.codec = vcodec;
+    (void)strcpy(v->info.container, "FLV");
+    v->info.frame_count = priv->vtail.total;
     v->info.data_offset = priv->frames[0].offset;
-    v->info.frame_size = 0; v->variable = 1;
-    if (priv->audio_count>0u)
+    v->info.frame_size = 0;
+    v->variable = 1;
+    if (priv->atail.total != 0u)
     {
+        uint8_t fmt = snd >> 4;
+
         priv->audio_present = FM_TRUE;
-        priv->audio_codec = aud_codec?aud_codec:FM_VIDEO_AUDIO_AAC;
-        priv->audio_rate = aud_rate;
-        priv->audio_channels = aud_ch;
-        priv->audio_bits = (aud_codec==FM_VIDEO_AUDIO_PCM || aud_codec==FM_VIDEO_AUDIO_ALAW || aud_codec==FM_VIDEO_AUDIO_ULAW || aud_codec==FM_VIDEO_AUDIO_ADPCM)?16u:0u;
+        priv->audio_rate = k_rate[(snd >> 2) & 0x03u];
+        priv->audio_channels = ((snd & 0x01u) != 0u) ? 2u : 1u;
+        priv->audio_bits = 0u;
+        if (fmt == 0u || fmt == 3u)
+        {
+            priv->audio_codec = FM_VIDEO_AUDIO_PCM;
+            priv->audio_bits = ((snd & 0x02u) != 0u) ? 16u : 8u;
+        }
+        else if (fmt == 2u || fmt == 14u)
+        {
+            priv->audio_codec = FM_VIDEO_AUDIO_MP3;
+            if (fmt == 14u)
+            {
+                priv->audio_rate = 8000u;
+            }
+        }
+        else if (fmt == 7u || fmt == 8u)
+        {
+            /* G.711: 7 is A-law, 8 is mu-law, always 8 kHz */
+            priv->audio_codec = (fmt == 7u) ? FM_VIDEO_AUDIO_ALAW
+                                            : FM_VIDEO_AUDIO_ULAW;
+            priv->audio_rate = 8000u;
+            priv->audio_bits = 16u;
+        }
+        else
+        {
+            priv->audio_codec = FM_VIDEO_AUDIO_AAC;
+            /* the tag header always says 44.1 kHz stereo for AAC; the
+             * truth is in the AudioSpecificConfig */
+            if (have_aconf && priv->audio_private_size >= 2u)
+            {
+                static const uint32_t k_aac_rate[13] = {
+                    96000u, 88200u, 64000u, 48000u, 44100u, 32000u, 24000u,
+                    22050u, 16000u, 12000u, 11025u, 8000u, 7350u };
+                const uint8_t *c = priv->audio_private;
+                uint32_t fidx = (((uint32_t)c[0] & 0x07u) << 1) |
+                                ((uint32_t)c[1] >> 7);
+                uint32_t chan = ((uint32_t)c[1] >> 3) & 0x0Fu;
+
+                if (fidx < 13u)
+                {
+                    priv->audio_rate = k_aac_rate[fidx];
+                }
+                if (chan >= 1u && chan <= 7u)
+                {
+                    priv->audio_channels = (chan == 7u) ? 8u : (uint16_t)chan;
+                }
+            }
+        }
     }
-    return Video_Seek(v,0);
+    return Video_Seek(v, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3387,7 +4008,8 @@ static uint32_t video_nal_len_size(const FM_VideoPriv *priv)
 /* ------------------------------------------------------------------ */
 /* Locate entry `idx` (a video frame, or an audio packet when `audio`)
  * that did not fit its index table, by walking the container from where
- * the table ended.  A cursor makes sequential playback O(1) per entry;
+ * the table ended (AVI: the movi list, MKV: the clusters, MP4: the
+ * sample tables, FLV: the tags).  A cursor makes sequential playback O(1) per entry;
  * a backward jump restarts from the end of the index.  The cursor is
  * left ON the element that holds the entry, so asking for the same
  * entry twice (size query, then read) costs one header re-read, not a
@@ -3402,6 +4024,29 @@ static FM_Result video_tail_locate(FM_Video *v, FM_VideoPriv *priv,
     uint32_t indexed = audio ? priv->audio_count : priv->count;
     uint64_t end = priv->tail_end;
 
+    if (priv->tail_kind == VIDEO_TAIL_MP4)
+    {
+        Mp4Track *m = audio ? &priv->mp4a : &priv->mp4v;
+        FM_Result r;
+
+        if (idx >= t->total || idx < indexed)
+        {
+            return FM_ERR_EOF;
+        }
+        /* cur_pos != 0 marks a live cursor here too (Video_SeekAudio
+         * clears it on a backward jump) */
+        if (t->cur_pos == 0u || idx < m->cur.sample)
+        {
+            m->cur = m->start;
+            t->cur_pos = 1u;
+        }
+        r = mp4_cur_seek(v, m, &m->cur, idx, off, size);
+        if (r != FM_OK)
+        {
+            t->cur_pos = 0u;
+        }
+        return r;
+    }
     if (priv->tail_kind == VIDEO_TAIL_NONE || t->scan_pos == 0u ||
         idx >= t->total || idx < indexed)
     {
@@ -3411,6 +4056,29 @@ static FM_Result video_tail_locate(FM_Video *v, FM_VideoPriv *priv,
     {
         t->cur_pos = t->scan_pos;
         t->cur_idx = indexed - t->scan_skip;
+    }
+    if (priv->tail_kind == VIDEO_TAIL_FLV)
+    {
+        for (;;)
+        {
+            FlvTag ft;
+
+            if (flv_tag_at(v, t->cur_pos, end, &ft) != FM_OK)
+            {
+                return FM_ERR_EOF;
+            }
+            if (ft.kind == (audio ? FLV_APKT : FLV_VFRAME))
+            {
+                if (t->cur_idx == idx)
+                {
+                    *off = ft.off;
+                    *size = ft.size;
+                    return FM_OK;
+                }
+                t->cur_idx++;
+            }
+            t->cur_pos = ft.next;
+        }
     }
     if (priv->tail_kind == VIDEO_TAIL_AVI)
     {

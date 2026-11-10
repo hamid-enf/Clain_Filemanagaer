@@ -10,7 +10,9 @@
  *   AVI   - RIFF container (MJPEG, H.264, MPEG-4, VP8/VP9)
  *   MP4/MOV - ISO BMFF container (H.264/HEVC/VP9/AV1 + AAC/MP3/FLAC/Opus)
  *   MKV/WebM - EBML container (H.264/HEVC/VP8/VP9/AV1 + Vorbis/Opus/FLAC)
- *   FLV   - Flash Video (H.264/AAC) stub, frame extraction only
+ *   FLV   - Flash Video: H.264 / HEVC (classic and Enhanced-FLV tags,
+ *           parameter sets prefixed like MP4), MP3 / AAC / PCM / G.711
+ *           audio, onMetaData size and frame rate
  *
  * Implemented codec plugins:
  *   RAW   - built-in (frame bytes are already uncompressed)
