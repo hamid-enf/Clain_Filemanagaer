@@ -114,24 +114,28 @@ static FM_Result file_write_exact(FM_File *f, const void *data, uint32_t size)
 /* ALAW/ULAW decode (G.711) — for WAV format 6/7 */
 static int16_t wav_alaw_decode(uint8_t a)
 {
+    int sign, exp, mant, sample;
+
     a ^= 0x55u;
-    int16_t sign = (a & 0x80u) ? -1 : 1;
-    int16_t exp = (a >> 4) & 0x07;
-    int16_t mant = a & 0x0F;
-    int16_t sample = (mant << 4) + 8;
+    sign = (a & 0x80u) ? -1 : 1;
+    exp = (a >> 4) & 0x07;
+    mant = a & 0x0F;
+    sample = (mant << 4) + 8;
     if (exp != 0) sample += 0x100;
     if (exp > 1) sample <<= (exp - 1);
-    return sign * sample;
+    return (int16_t)(sign * sample);          /* |sample| <= 32256 */
 }
 static int16_t wav_ulaw_decode(uint8_t u)
 {
-    u = ~u;
-    int16_t sign = (u & 0x80u) ? -1 : 1;
-    int16_t exp = (u >> 4) & 0x07;
-    int16_t mant = u & 0x0F;
-    int16_t sample = ((mant << 3) + 0x84) << exp;
+    int sign, exp, mant, sample;
+
+    u = (uint8_t)~u;
+    sign = (u & 0x80u) ? -1 : 1;
+    exp = (u >> 4) & 0x07;
+    mant = u & 0x0F;
+    sample = ((mant << 3) + 0x84) << exp;
     sample -= 0x84;
-    return sign * sample;
+    return (int16_t)(sign * sample);          /* |sample| <= 32124 */
 }
 static const int16_t wav_adpcm_step[89] = {
  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767
@@ -330,6 +334,10 @@ static FM_Result pcmbuf_seek(FM_Audio *a, double seconds) {
     a->frame_index = frame;
     return FM_OK;
 }
+#if FM_USE_FLAC || FM_USE_VORBIS
+/* FLAC / Vorbis are decoded whole at open: compressed-file size cap. */
+#define AUDIO_SLURP_MAX_BYTES (10u * 1024u * 1024u)
+#endif
 #if FM_USE_FLAC
 static FM_Result flac_file_open(FM_Audio *a) {
     uint64_t sz = 0;
@@ -338,7 +346,9 @@ static FM_Result flac_file_open(FM_Audio *a) {
     drflac *p = NULL;
     PcmBuffer *b = NULL;
     FM_Result r = File_Size(&a->file, &sz);
-    if (r != FM_OK || sz < 42 || sz > 10*1024*1024) return FM_ERR_CORRUPTED;
+    if (r != FM_OK) return r;
+    if (sz < 42u) return FM_ERR_CORRUPTED;
+    if (sz > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE;  /* valid, just too big */
     data = (uint8_t*)FM_Alloc((size_t)sz);
     if (!data) return FM_ERR_NO_MEMORY;
     (void)File_Seek(&a->file, 0, FM_SEEK_SET);
@@ -361,12 +371,30 @@ static FM_Result flac_file_open(FM_Audio *a) {
         FM_Free(data);
         return FM_ERR_TOO_LARGE;
     }
-    if (total_frames == 0)
+    FM_Bool unknown_len = (total_frames == 0) ? FM_TRUE : FM_FALSE;
+    if (unknown_len)
         total_frames = 1024*1024;   /* unknown length: generous upper bound */
+    if (p->channels == 0u || p->channels > 8u) {
+        drflac_close(p);
+        FM_Free(data);
+        return FM_ERR_UNSUPPORTED;
+    }
     size_t total_samples = (size_t)(total_frames * p->channels);
     int16_t *pcm = (int16_t*)FM_Alloc(total_samples * sizeof(int16_t));
     if (!pcm) { drflac_close(p); FM_Free(data); return FM_ERR_NO_MEMORY; }
     drflac_uint64 frames_read = drflac_read_pcm_frames_s16(p, total_frames, pcm);
+    if (unknown_len && frames_read == total_frames) {
+        /* STREAMINFO carried no length and the estimate was filled to the
+         * brim: if one more frame decodes, the track is longer than the
+         * buffer and returning FM_OK would silently cut its end off. */
+        int16_t probe[8];
+        if (drflac_read_pcm_frames_s16(p, 1, probe) > 0) {
+            drflac_close(p);
+            FM_Free(data);
+            FM_Free(pcm);
+            return FM_ERR_TOO_LARGE;
+        }
+    }
     drflac_close(p);
     FM_Free(data);
     if (frames_read == 0) { FM_Free(pcm); return FM_ERR_CORRUPTED; }
@@ -389,7 +417,9 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
     stb_vorbis *v = NULL;
     PcmBuffer *b = NULL;
     FM_Result r = File_Size(&a->file, &sz);
-    if (r != FM_OK || sz < 32 || sz > 10*1024*1024) return FM_ERR_CORRUPTED;
+    if (r != FM_OK) return r;
+    if (sz < 32u) return FM_ERR_CORRUPTED;
+    if (sz > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE;  /* valid, just too big */
     data = (uint8_t*)FM_Alloc((size_t)sz);
     if (!data) return FM_ERR_NO_MEMORY;
     (void)File_Seek(&a->file, 0, FM_SEEK_SET);
@@ -412,7 +442,8 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
         FM_Free(data);
         return FM_ERR_TOO_LARGE;   /* refuse silent truncation (bug #4) */
     }
-    if (total_frames <= 0)
+    FM_Bool unknown_len = (total_frames <= 0) ? FM_TRUE : FM_FALSE;
+    if (unknown_len)
         total_frames = 1024*256;   /* unknown length */
     size_t total_samples = (size_t)total_frames * (size_t)info.channels;
     int16_t *pcm = (int16_t*)FM_Alloc(total_samples * sizeof(int16_t));
@@ -425,6 +456,17 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
         int n = stb_vorbis_get_samples_short_interleaved(v, ch, pcm + pos, max_frames * ch);
         if (n == 0) break;
         pos += (size_t)n * (size_t)ch;
+    }
+    if (unknown_len && pos == total_samples) {
+        /* Estimate exhausted: more audio left means silent truncation. */
+        int16_t probe[2];
+        if (stb_vorbis_get_samples_short_interleaved(v, info.channels, probe,
+                                                     info.channels) > 0) {
+            stb_vorbis_close(v);
+            FM_Free(data);
+            FM_Free(pcm);
+            return FM_ERR_TOO_LARGE;
+        }
     }
     stb_vorbis_close(v);
     FM_Free(data);
@@ -465,9 +507,14 @@ static FM_Result opus_file_open(FM_Audio *a) {
     uint32_t got = 0;
     FM_Result r;
 
+    /* No decoder (built without libopus): say so before pulling the
+     * whole file into RAM. */
+    if (FM_Opus_GetOps() == NULL) return FM_ERR_UNSUPPORTED;
+
     r = File_Size(&a->file, &sz);
-    if (r != FM_OK || sz < 27 || sz > FM_OPUS_MAX_FILE_BYTES)
-        return FM_ERR_CORRUPTED;
+    if (r != FM_OK) return r;
+    if (sz < 27u) return FM_ERR_CORRUPTED;
+    if (sz > FM_OPUS_MAX_FILE_BYTES) return FM_ERR_TOO_LARGE;
     data = (uint8_t*)FM_Alloc((size_t)sz);
     if (!data) return FM_ERR_NO_MEMORY;
     (void)File_Seek(&a->file, 0, FM_SEEK_SET);
@@ -543,6 +590,7 @@ static FM_Result opus_file_open(FM_Audio *a) {
             size_t cap_samples;
             size_t off2 = 0;
             int truncated = 0;
+            int length_known = 1;
             int16_t *scratch = NULL;
             /* Max Opus packet group: 120 ms at 48 kHz, 2 ch. */
             enum { OPUS_SCRATCH_SAMPLES = 5760u * 2u };
@@ -558,14 +606,27 @@ static FM_Result opus_file_open(FM_Audio *a) {
              * samples/s/ch worst case; over-estimating is corrected after
              * the decode loop by shrinking b->total. */
             if (total48 == 0) {
+                length_known = 0;
                 total48 = (uint64_t)sz * 120u;      /* generous upper bound */
                 if (total48 > (uint64_t)48000u * 3600u) total48 = (uint64_t)48000u * 3600u;
             }
 
-            want = (size_t)(total48 * (uint64_t)channels) * sizeof(int16_t);
-            if (want > FM_OPUS_MAX_PCM_BYTES) {
-                want = FM_OPUS_MAX_PCM_BYTES;
-                truncated = 1;
+            {
+                /* 64-bit: total48 * channels * 2 wraps a 32-bit size_t. */
+                uint64_t want64 = total48 * (uint64_t)channels *
+                                  (uint64_t)sizeof(int16_t);
+                if (want64 > (uint64_t)FM_OPUS_MAX_PCM_BYTES) {
+                    if (length_known) {
+                        /* The stream itself says it does not fit: refuse
+                         * now instead of decoding the whole cap first. */
+                        FM_Free(data);
+                        return FM_ERR_TOO_LARGE;
+                    }
+                    want = (size_t)FM_OPUS_MAX_PCM_BYTES;
+                    truncated = 1;
+                } else {
+                    want = (size_t)want64;
+                }
             }
             pcm = (int16_t*)FM_Alloc(want);
             if (!pcm) { FM_Free(data); return FM_ERR_NO_MEMORY; }
@@ -1430,7 +1491,8 @@ typedef struct
     const FM_AudioDecoderOps *ops;
 } FM_AudioDecoderEntry;
 
-static FM_AudioDecoderEntry g_adec[4];
+#define AUDIO_DECODER_SLOTS 4u
+static FM_AudioDecoderEntry g_adec[AUDIO_DECODER_SLOTS];
 
 FM_Result Audio_RegisterDecoder(const char *codec,
                                 const FM_AudioDecoderOps *ops)
@@ -1447,10 +1509,23 @@ FM_Result Audio_RegisterDecoder(const char *codec,
         return FM_ERR_TOO_LARGE;
     }
     FM_Lock();
-    for (i = 0; i < 4; i++)
+    /* Pass 1: replace an existing entry of the same name.  Taking the
+     * first free slot first would leave a stale duplicate behind whenever
+     * an earlier slot had been unregistered in the meantime. */
+    for (i = 0; i < AUDIO_DECODER_SLOTS; i++)
     {
-        if (g_adec[i].codec[0] == '\0' ||
+        if (g_adec[i].codec[0] != '\0' &&
             strcmp(g_adec[i].codec, codec) == 0)
+        {
+            g_adec[i].ops = ops;
+            FM_Unlock();
+            return FM_OK;
+        }
+    }
+    /* Pass 2: first free slot. */
+    for (i = 0; i < AUDIO_DECODER_SLOTS; i++)
+    {
+        if (g_adec[i].codec[0] == '\0')
         {
             (void)strcpy(g_adec[i].codec, codec);
             g_adec[i].ops = ops;
@@ -1466,17 +1541,17 @@ FM_Result Audio_UnregisterDecoder(const char *codec)
 {
     uint32_t i;
 
-    if (codec == NULL)
+    if (codec == NULL || codec[0] == '\0')
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
     FM_Lock();
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < AUDIO_DECODER_SLOTS; i++)
     {
-        if (strcmp(g_adec[i].codec, codec) == 0)
+        if (g_adec[i].codec[0] != '\0' &&
+            strcmp(g_adec[i].codec, codec) == 0)
         {
-            g_adec[i].codec[0] = '\0';
-            g_adec[i].ops = NULL;
+            memset(&g_adec[i], 0, sizeof(g_adec[i]));
             FM_Unlock();
             return FM_OK;
         }
@@ -1485,18 +1560,29 @@ FM_Result Audio_UnregisterDecoder(const char *codec)
     return FM_ERR_NOT_FOUND;
 }
 
+/* The returned ops pointer is copied out under the lock.  Decoder tables
+ * must have static storage duration (every bundled codec does). */
 const FM_AudioDecoderOps *Audio_GetDecoder(const char *codec)
 {
+    const FM_AudioDecoderOps *ops = NULL;
     uint32_t i;
 
-    for (i = 0; i < 4; i++)
+    if (codec == NULL || codec[0] == '\0')
     {
-        if (strcmp(g_adec[i].codec, codec) == 0)
+        return NULL;
+    }
+    FM_Lock();
+    for (i = 0; i < AUDIO_DECODER_SLOTS; i++)
+    {
+        if (g_adec[i].codec[0] != '\0' &&
+            strcmp(g_adec[i].codec, codec) == 0)
         {
-            return g_adec[i].ops;
+            ops = g_adec[i].ops;
+            break;
         }
     }
-    return NULL;
+    FM_Unlock();
+    return ops;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1890,8 +1976,8 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
     }
     a->frame_index = 0;
     FM_EVENT_LOG("opened %s (%lu Hz, %u ch, %s)", path,
-                 (unsigned long)a->sample_rate, (unsigned)a->channels,
-                 a->codec_name);
+                 (unsigned long)a->info.sample_rate,
+                 (unsigned)a->info.channels, a->info.codec);
     return FM_OK;
 }
 
@@ -2888,6 +2974,31 @@ FM_Result AudioRecorder_Open(const char *folder, uint32_t sample_rate,
         return r;
     }
     return FM_ERR_EXISTS;
+}
+
+#else /* FM_USE_AUDIO == 0 */
+
+/* Link-compatible stubs with NO static state (0 bytes .data/.bss): code
+ * that still references the decoder registry keeps linking and gets a
+ * clean "unsupported" answer instead of an undefined symbol. */
+FM_Result Audio_RegisterDecoder(const char *codec,
+                                const FM_AudioDecoderOps *ops)
+{
+    (void)codec;
+    (void)ops;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_UnregisterDecoder(const char *codec)
+{
+    (void)codec;
+    return FM_ERR_UNSUPPORTED;
+}
+
+const FM_AudioDecoderOps *Audio_GetDecoder(const char *codec)
+{
+    (void)codec;
+    return NULL;
 }
 
 #endif /* FM_USE_AUDIO */

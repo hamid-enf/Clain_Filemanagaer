@@ -35,6 +35,41 @@ FM_USE_CRC         ?= 1
 FM_USE_STREAM      ?= 1
 FM_USE_PRINTF      ?= 1
 FM_USE_CACHE       ?= 1
+FM_USE_FLAC        ?= 1
+FM_USE_VORBIS      ?= 1
+FM_USE_OPUS        ?= 1
+# Real Opus decode via the vendored libopus (decoder-only vendor tree).
+# Off by default so plain host builds stay fast; `make FM_USE_OPUS_LIB=1`
+# compiles third_party/opus and enables src/fm_opus.c (mirrors what
+# STM32CubeIDE builds do, where the vendor tree is compiled
+# unconditionally).  Without it Opus is reported as FM_ERR_UNSUPPORTED.
+FM_USE_OPUS_LIB    ?= 0
+
+# ------------------------------------------------------------------
+# Effective feature set.  fm_config.h switches a codec off whenever its
+# parent subsystem is off; mirror exactly those rules here so the object
+# list and include paths follow the EFFECTIVE configuration.  Otherwise
+# e.g. `FM_USE_IMAGE=0 FM_USE_JPEG=1` or `FM_USE_VIDEO=0 FM_USE_MJPEG=1`
+# would still link picojpeg (and all of its static tables) into a build
+# that cannot use it.
+# ------------------------------------------------------------------
+ifeq ($(FM_USE_IMAGE),0)
+override FM_USE_JPEG := 0
+override FM_USE_PNG  := 0
+endif
+ifeq ($(FM_USE_VIDEO),0)
+override FM_USE_H264  := 0
+override FM_USE_MJPEG := 0
+endif
+ifeq ($(FM_USE_AUDIO),0)
+override FM_USE_MP3      := 0
+override FM_USE_FLAC     := 0
+override FM_USE_VORBIS   := 0
+override FM_USE_OPUS     := 0
+endif
+ifeq ($(FM_USE_OPUS),0)
+override FM_USE_OPUS_LIB := 0
+endif
 
 # Base flags first so that command-line CFLAGS overrides and the optional
 # blocks below always see the defaults defined.
@@ -66,7 +101,7 @@ CFLAGS  += -D_GNU_SOURCE -DFM_HOST_BUILD=1 \
             -DFM_USE_MEDIA_DETECT=$(FM_USE_MEDIA_DETECT) \
             -DFM_USE_SAFE_WRITE=$(FM_USE_SAFE_WRITE) -DFM_USE_CRC=$(FM_USE_CRC) \
             -DFM_USE_STREAM=$(FM_USE_STREAM) -DFM_USE_CACHE=$(FM_USE_CACHE) \
-            -DFM_USE_PRINTF=$(FM_USE_PRINTF) -DFM_DEBUG=1 \
+            -DFM_USE_PRINTF=$(FM_USE_PRINTF) -DFM_DEBUG=1
 # Tier-aware features: only pass -D if explicitly set on command line,
 # otherwise let fm_config.h decide based on FM_PORT_TIER (saves RAM on F1/G0)
 ifeq ($(origin FM_USE_IMAGE),command line)
@@ -102,8 +137,9 @@ endif
 ifeq ($(origin FM_USE_AAC),command line)
 CFLAGS += -DFM_USE_AAC=$(FM_USE_AAC)
 endif
+# Extra defines for matrix / CI runs, e.g. CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=3"
+CFLAGS  += $(CFLAGS_EXTRA)
 
-            -DFM_INTERNAL_BUFFER_SIZE=4096
 CFLAGS  += -Iinclude -Ibackends -Isrc
 ifeq ($(FM_USE_LITTLEFS),1)
 CFLAGS  += -Ithird_party/littlefs
@@ -121,16 +157,13 @@ ifeq ($(FM_USE_JPEG),1)
 CFLAGS  += -Ithird_party/picojpeg
 endif
 # FLAC via dr_flac (single header)
+ifeq ($(FM_USE_FLAC),1)
 CFLAGS  += -Ithird_party/dr_flac
+endif
 # Vorbis via stb_vorbis
+ifeq ($(FM_USE_VORBIS),1)
 CFLAGS  += -Ithird_party/stb
-
-# Real Opus decode via the vendored libopus (decoder-only vendor tree).
-# Off by default so plain host builds stay fast; `make FM_USE_OPUS_LIB=1`
-# compiles third_party/opus and switches src/fm_opus.c from the silence
-# fallback to real opus_decode() (mirrors what STM32CubeIDE builds do,
-# where the vendor tree is compiled unconditionally).
-FM_USE_OPUS_LIB ?= 0
+endif
 
 OBJS     = src/fm_core.o src/fm_crc.o src/fm_path.o \
            src/fm_transfer.o src/fm_qspi.o src/fm_spiflash.o src/fm_eeprom_chips.o \
@@ -146,8 +179,13 @@ OBJS     = src/fm_core.o src/fm_crc.o src/fm_path.o \
            src/fm_eeprom.o src/fm_usb_msc.o src/fm_device.o \
            src/fm_h264.o src/fm_mjpeg.o src/fm_flac.o src/fm_vorbis.o src/fm_opus.o src/fm_alloc.o \
            src/fm_hw.o src/fm_player.o src/fm_sd_hal.o \
-           third_party/stb/stb_vorbis.o \
            backends/fm_posix_fs.o backends/fm_ramdisk.o
+
+# stb_vorbis.c is vendored and has no FM_USE_* guard of its own: only
+# build it when the Vorbis decoder is really enabled.
+ifeq ($(FM_USE_VORBIS),1)
+OBJS     += third_party/stb/stb_vorbis.o
+endif
 
 ifeq ($(FM_USE_FATFS),1)
 OBJS     += backends/fm_fatfs.o
@@ -204,7 +242,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan ports check
+.PHONY: all clean test examples examples_run asan ports check matrix matrix-asan matrix-quick
 
 all: $(LIBS) fm_test
 
@@ -303,6 +341,18 @@ asan:
 ports:
 	@sh tools/check_ports.sh
 
+# matrix — every FM_USE_* combination must build (-Werror), pass its
+# tests and leave no static memory behind for a disabled subsystem.
+#   make matrix        plain build of all 27 configurations
+#   make matrix-asan   the same under ASan + UBSan + LeakSanitizer
+#   make matrix-quick  only the 8 IMAGE/VIDEO/AUDIO combinations
+matrix:
+	@sh tools/check_matrix.sh full
+matrix-asan:
+	@sh tools/check_matrix.sh asan
+matrix-quick:
+	@sh tools/check_matrix.sh quick
+
 # cachetest — cache maintenance must follow the real SCB register.
 # Separate from fm_test because it fakes the CMSIS headers.
 cachetest:
@@ -344,8 +394,8 @@ check: test cachetest videohooks ex33test tapstest asan ports
 
 clean:
 	rm -rf build-asan
-	rm -f $(OBJS) $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test $(EXAMPLES)
-	find third_party/opus -name "*.o" -delete
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest $(EXAMPLES)
+	find src backends third_party -name "*.o" -delete
 
 test: fm_test
 	./fm_test

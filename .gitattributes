@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings: `sh` treats the CR of a CRLF line as
+# part of the command ("set: Illegal option -") and the script dies on its
+# first line.  The C sources are CRLF (STM32CubeIDE on Windows) and are
+# stored as-is.
+*.sh text eol=lf

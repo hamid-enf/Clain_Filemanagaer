@@ -8,7 +8,7 @@
 #include "fm_alloc.h"
 #include <string.h>
 
-#if FM_USE_FLAC
+#if FM_USE_AUDIO && FM_USE_FLAC
 
 #define DR_FLAC_IMPLEMENTATION
 #include "../third_party/dr_flac/dr_flac.h"

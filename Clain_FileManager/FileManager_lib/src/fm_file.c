@@ -541,9 +541,20 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
 
 FM_File *File_Open(const char *path, uint32_t mode)
 {
-    FM_File *f = file_acquire();
+    FM_File *f;
     FM_Result r;
 
+    /* Validate BEFORE claiming a pool slot.  file_open_internal() rejects
+     * these too, but on that early path it returns without releasing the
+     * slot, so every File_Open(NULL, ...) / File_Open(p, 0) -- and every
+     * File_ReadAll/WriteAll/ReadText(NULL, ...) built on it -- leaked one
+     * of the FM_MAX_OPEN_FILES handles for good. */
+    if (path == NULL || (mode & (FM_OPEN_READ | FM_OPEN_WRITE)) == 0u)
+    {
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+    f = file_acquire();
     if (f == NULL)
     {
         FM_Core_SetLastError(FM_ERR_NO_MEMORY);

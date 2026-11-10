@@ -60,6 +60,8 @@ set(FM_SYNC_IMPL "freertos" CACHE STRING
 # codec sources that the public configuration will compile out.
 if(NOT FM_USE_AUDIO)
     set(FM_USE_MP3 OFF CACHE BOOL "MP3 decoding (vendored minimp3)" FORCE)
+    set(FM_USE_OPUS_LIB OFF CACHE BOOL
+        "Real Opus decode (vendored libopus, decoder-only)" FORCE)
 endif()
 if(NOT FM_USE_VIDEO)
     set(FM_USE_H264 OFF CACHE BOOL "H.264 decoding (vendored h264bsd)" FORCE)
@@ -91,7 +93,6 @@ set(FM_SOURCES
     src/fm_eeprom.c src/fm_usb_msc.c src/fm_device.c
     src/fm_h264.c src/fm_mjpeg.c src/fm_alloc.c
     src/fm_flac.c src/fm_vorbis.c src/fm_opus.c
-    third_party/stb/stb_vorbis.c
     src/fm_hw.c src/fm_player.c src/fm_sd_hal.c
     # نکته: fm_log.c هیچ وابستگی سخت‌افزاری ندارد و همه‌جا ساخته
     # می‌شود. پل UART در include/fm_log_uart_hal.h است که header-only
@@ -160,8 +161,16 @@ if(FM_USE_H264)
     file(GLOB FM_H264BSD_SRCS third_party/h264bsd/src/*.c)
     list(APPEND FM_SOURCES ${FM_H264BSD_SRCS})
 endif()
-if(FM_USE_MJPEG)
+# picojpeg serves two independent consumers: MJPEG video frames and
+# still-JPEG decode (Image_Load).  It used to be added for MJPEG only, so
+# FM_USE_JPEG=ON with FM_USE_MJPEG=OFF (or FM_USE_VIDEO=OFF) failed to link.
+if(FM_USE_MJPEG OR FM_USE_JPEG)
     list(APPEND FM_SOURCES third_party/picojpeg/picojpeg.c)
+endif()
+# stb_vorbis backs src/fm_vorbis.c, which fm_config.h compiles out whenever
+# audio is off: do not build its implementation (and tables) in that case.
+if(FM_USE_AUDIO)
+    list(APPEND FM_SOURCES third_party/stb/stb_vorbis.c)
 endif()
 if(FM_USE_OPUS_LIB)
     # Decoder-only vendor tree (see third_party/README.md).  No config

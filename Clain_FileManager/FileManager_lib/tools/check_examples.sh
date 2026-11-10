@@ -31,7 +31,9 @@ for f in examples/*.h; do
     # است. به‌جای رد کردنش، پیش‌نیازها را جلوتر include می‌کنیم تا
     # واقعاً کامپایل شود — وگرنه یک مثال بی‌صدا بی‌آزمون می‌ماند.
     : > "$TMP/t.c"
-    for dep in $(sed -n 's/.*FM-REQUIRES:[[:space:]]*//p' "$f"); do
+    # (منبع‌ها CRLF هستند: بدون حذف \r نام آخرین پیش‌نیاز «x.h\r» می‌شود
+    #  و include ساخته‌شده نامعتبر است.)
+    for dep in $(tr -d '\r' < "$f" | sed -n 's/.*FM-REQUIRES:[[:space:]]*//p'); do
         printf '#include "examples/%s"\n' "$dep" >> "$TMP/t.c"
     done
     printf '#include "%s"\nint main(void){return 0;}\n' "$f" >> "$TMP/t.c"

@@ -7,8 +7,9 @@
 #include "fm_audio.h"
 #include "fm_alloc.h"
 #include <string.h>
+#include <limits.h>
 
-#if FM_USE_VORBIS
+#if FM_USE_AUDIO && FM_USE_VORBIS
 
 /* stb_vorbis is a single-file library: the implementation normally gets
  * compiled wherever the .c is included with STB_VORBIS_IMPLEMENTATION.
@@ -65,14 +66,23 @@ static FM_Result fm_vorbis_do_decode(void *ctx, const uint8_t *in, size_t in_siz
             stb_vorbis_close(v);
             return FM_ERR_UNSUPPORTED;
         }
-        int max_frames = (int)(out_count / (size_t)channels);
-        if (max_frames <= 0) {
+        /* stb_vorbis takes the capacity in SHORTS (interleaved samples)
+         * and divides by `channels` itself; passing a frame count here
+         * halved every stereo decode and made a 1-frame stereo request
+         * report a false end-of-stream. */
+        size_t max_frames = out_count / (size_t)channels;
+        int num_shorts;
+        if (max_frames == 0u) {
             stb_vorbis_close(v);
             return FM_ERR_TOO_LARGE;
         }
-        frames = stb_vorbis_get_samples_short_interleaved(v, channels, out, max_frames);
+        if (max_frames > (size_t)(INT_MAX / channels)) {
+            max_frames = (size_t)(INT_MAX / channels);
+        }
+        num_shorts = (int)(max_frames * (size_t)channels);
+        frames = stb_vorbis_get_samples_short_interleaved(v, channels, out, num_shorts);
         if (frames < 0) frames = 0;
-        *out_samples = (size_t)(frames * channels);
+        *out_samples = (size_t)frames * (size_t)channels;
         stb_vorbis_close(v);
         if (*out_samples == 0) return FM_ERR_EOF;
         return FM_OK;

@@ -794,14 +794,54 @@ FM_Result Image_Save(const char *path, const FM_Image *img)
     }
     source_size = (uint64_t)img->width * img->height *
                   Image_BytesPerPixel(img->format);
-    if (source_size > img->data_capacity)
+    if (source_size > img->data_capacity ||
+        (img->data_size != 0u && source_size > img->data_size))
     {
+        /* data_size (when given) is the number of VALID pixel bytes: an
+         * image that claims more pixels than it holds would be encoded
+         * from bytes the caller never wrote. */
         return FM_ERR_TOO_LARGE;
     }
     ext[0] = '\0';
     (void)Path_GetExtension(path, ext, sizeof(ext));
+    {
+        /* "PHOTO.PNG" and "photo.png" are the same format (FAT upper-
+         * cases 8.3 names). */
+        size_t i;
+
+        for (i = 0; i < sizeof(ext) && ext[i] != '\0'; i++)
+        {
+            if (ext[i] >= 'A' && ext[i] <= 'Z')
+            {
+                ext[i] = (char)(ext[i] - 'A' + 'a');
+            }
+        }
+    }
     if (ext[0] != '\0' && strcmp(ext, "bmp") != 0)
     {
+        /* Pick the encoder BEFORE touching the file.  The file used to be
+         * created/truncated first, so saving to an unknown extension, or
+         * to a codec that is compiled out, wiped an existing file and
+         * left an empty one behind while reporting UNSUPPORTED. */
+        FM_Result (*encode)(FM_File *, const FM_Image *) = NULL;
+
+        if (strcmp(ext, "png") == 0)
+        {
+#if FM_USE_PNG
+            encode = FM_PNG_EncodeFile;
+#endif
+        }
+        else if (strcmp(ext, "jpg") == 0 || strcmp(ext, "jpeg") == 0 ||
+                 strcmp(ext, "jpe") == 0)
+        {
+#if FM_USE_JPEG
+            encode = FM_JPEG_EncodeFile;
+#endif
+        }
+        if (encode == NULL)
+        {
+            return FM_ERR_UNSUPPORTED;
+        }
         File_Init(&file);
         r = File_OpenEx(&file, path,
                         FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
@@ -809,33 +849,19 @@ FM_Result Image_Save(const char *path, const FM_Image *img)
         {
             return r;
         }
-        if (strcmp(ext, "png") == 0)
-        {
-#if FM_USE_PNG
-            r = FM_PNG_EncodeFile(&file, img);
-#else
-            r = FM_ERR_UNSUPPORTED;
-#endif
-        }
-        else if (strcmp(ext, "jpg") == 0 || strcmp(ext, "jpeg") == 0 ||
-                 strcmp(ext, "jpe") == 0)
-        {
-#if FM_USE_JPEG
-            r = FM_JPEG_EncodeFile(&file, img);
-#else
-            r = FM_ERR_UNSUPPORTED;
-#endif
-        }
-        else
-        {
-            r = FM_ERR_UNSUPPORTED;
-        }
+        r = encode(&file, img);
         {
             FM_Result c = File_Close(&file);
             if (r == FM_OK)
             {
                 r = c;
             }
+        }
+        if (r != FM_OK)
+        {
+            /* A half-written PNG/JPEG is worse than none: the next
+             * reader would get as far as the truncation and fail. */
+            (void)File_Delete(path);
         }
         return r;
     }
@@ -878,6 +904,10 @@ FM_Result Image_Save(const char *path, const FM_Image *img)
     {
         FM_Result c = File_Close(&file);
         if (r == FM_OK) r = c;
+    }
+    if (r != FM_OK)
+    {
+        (void)File_Delete(path);         /* no truncated BMP left behind */
     }
     return r;
 }

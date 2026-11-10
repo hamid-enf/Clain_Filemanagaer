@@ -111,14 +111,34 @@ typedef struct
     uint16_t channels;
     uint16_t bits_per_sample;     /* PCM only (0 for AAC)            */
     uint32_t sample_count;        /* number of audio samples/frames  */
+    FM_Bool  decodable;           /* FM_TRUE: Video_ReadAudioFrame returns
+                                   * playable 16-bit PCM for this track.
+                                   * FM_FALSE: no decoder is compiled in /
+                                   * registered (see Video_ReadAudioFrame). */
 } FM_AudioTrackInfo;
 
 /* True if the container has an audio track. */
 FM_Result Video_HasAudio(const FM_Video *v, FM_Bool *has);
 FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
-/* Read the next audio sample into buf.  For AAC the sample is prefixed
- * with a 7-byte ADTS header so it can be fed directly to an AAC decoder
- * or player; *size includes the header.  For PCM it is raw 16-bit samples. */
+/* Read the next audio packet into buf as interleaved 16-bit PCM.
+ *
+ *   PCM (8/16-bit), A-law, mu-law, ADPCM : decoded here, always available.
+ *   MP3                                  : decoded here when FM_USE_MP3=1.
+ *   AAC, FLAC, Opus, Vorbis              : decoded by the decoder registered
+ *       under "AAC" / "FLAC" / "OPUS" / "VORBIS" (Audio_RegisterDecoder;
+ *       FileManager_Init registers the built-in ones that are compiled in).
+ *       The decoder is opened on the first packet and kept until
+ *       Video_Close / Video_SeekAudio.
+ *
+ * When no decoder is registered:
+ *   AAC               -> the raw sample is returned prefixed with a 7-byte
+ *                        ADTS header (*size includes it): a valid .aac
+ *                        stream for extraction, NOT PCM.
+ *   FLAC/Opus/Vorbis  -> FM_ERR_UNSUPPORTED (nothing is written).
+ * FM_AudioTrackInfo.decodable tells the two situations apart up front.
+ *
+ * A packet the decoder rejects returns FM_ERR_CORRUPTED and is skipped, so
+ * the next call continues with the following packet. */
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size);
 FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index);

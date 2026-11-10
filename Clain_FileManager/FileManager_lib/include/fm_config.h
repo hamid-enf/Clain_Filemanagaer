@@ -138,6 +138,14 @@
 #ifndef FM_USE_PNG
 #define FM_USE_PNG FM_TIER1_FEAT_DEFAULT  /* still PNG decode / encode      */
 #endif
+#if FM_USE_IMAGE == 0
+/* Still JPEG / PNG are image codecs: with the image subsystem off they
+ * must not pull in picojpeg, the inflate window or any scratch RAM. */
+#undef FM_USE_JPEG
+#define FM_USE_JPEG 0
+#undef FM_USE_PNG
+#define FM_USE_PNG 0
+#endif
 /*
  * PNG decode scratch.  Deflate's matching window is 32 KB; two
  * reconstructed scanlines need FM_PNG_MAX_STRIDE bytes each.  16384
@@ -291,15 +299,16 @@
 #define FM_USE_OPUS FM_TIER1_CODEC_DEFAULT
 #endif
 #ifndef FM_OPUS_USE_LIBOPUS
-/* Decode Opus with the vendored libopus (third_party/opus) instead of the
- * built-in silence fallback.
+/* Decode Opus with the vendored libopus (third_party/opus).  Without it
+ * there is no Opus decoder at all: Opus files / tracks are reported as
+ * FM_ERR_UNSUPPORTED (never as silent "successful" playback).
  *
  * The vendored tree is always compiled by IDE projects that drop this
  * library into their source tree (STM32CubeIDE compiles every .c file
  * under FileManager_lib), so on-target builds default to real decoding.
  * The host Makefile/CMake only compiles libopus when asked for
  * (make FM_USE_OPUS_LIB=1), and tools/check_ports.sh compiles each port
- * with -DFM_HOST_BUILD, so the default resolves to the tiny fallback
+ * with -DFM_HOST_BUILD, so the default resolves to "no Opus decoder"
  * there.  Override explicitly in fm_board_config.h if you need to. */
 #if FM_USE_OPUS && !defined(FM_HOST_BUILD)
 #define FM_OPUS_USE_LIBOPUS 1
@@ -324,6 +333,25 @@
 #endif
 #ifndef FM_USE_AAC
 #define FM_USE_AAC FM_TIER1_CODEC_DEFAULT
+#endif
+#if FM_USE_AUDIO == 0
+/* Every audio codec is part of the audio subsystem.  With FM_USE_AUDIO
+ * off none of them may be compiled: no decoder tables, no codec
+ * statics, no references to the (compiled-out) decoder registry. */
+#undef FM_USE_MP3
+#define FM_USE_MP3 0
+#undef FM_USE_FLAC
+#define FM_USE_FLAC 0
+#undef FM_USE_VORBIS
+#define FM_USE_VORBIS 0
+#undef FM_USE_OPUS
+#define FM_USE_OPUS 0
+#undef FM_USE_AAC
+#define FM_USE_AAC 0
+#endif
+#if FM_USE_OPUS == 0
+#undef FM_OPUS_USE_LIBOPUS
+#define FM_OPUS_USE_LIBOPUS 0
 #endif
 #ifndef FM_VIDEO_MAX_FRAMES
 /* 4096 frames = 273 s at 15 fps, 136 s at 30 fps (was 1024 = 68 s).

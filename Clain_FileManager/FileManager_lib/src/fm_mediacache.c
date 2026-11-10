@@ -52,9 +52,29 @@ static const char *mc_basename(const char *path)
  * فایل هم‌نام از پوشه‌های مختلف، یک پیشوند کوتاه از CRC کل مسیر
  * اضافه می‌شود.
  */
+/* The tag only has to tell two same-named files from different folders
+ * apart; it is not an integrity check.  Use CRC-32 when the CRC module is
+ * built, a 32-bit FNV-1a otherwise, so the media cache does not drag the
+ * CRC module in (FM_USE_CRC=0 used to fail at link here). */
+static uint32_t mc_path_tag(const char *src)
+{
+#if FM_USE_CRC
+    return CRC_Compute32(src, strlen(src), 0u);
+#else
+    uint32_t h = 2166136261u;
+
+    while (*src != '\0')
+    {
+        h ^= (uint8_t)*src++;
+        h *= 16777619u;
+    }
+    return h;
+#endif
+}
+
 static FM_Result mc_cache_path(const char *src, char *out, size_t cap)
 {
-    uint32_t tag = CRC_Compute32(src, strlen(src), 0u);
+    uint32_t tag = mc_path_tag(src);
     const char *base = mc_basename(src);
     int n;
 

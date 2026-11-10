@@ -77,6 +77,16 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
     {
         memset(out_info, 0, sizeof(*out_info));
     }
+#if !FM_USE_CRC
+    /* verify re-reads the destination and compares CRC-32s; without the
+     * CRC module there is nothing to compare with.  Refuse up front --
+     * before anything is opened or truncated -- instead of copying and
+     * then reporting a check that never ran as passed. */
+    if (o->verify)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+#endif
 
     /* مقصد از قبل هست؟ */
     if (o->no_overwrite)
@@ -143,10 +153,12 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
             r = FM_ERR_NO_SPACE;
             break;
         }
+#if FM_USE_CRC
         if (o->verify)
         {
             crc_src = CRC_Compute32(g_xfer_buf, got, crc_src);
         }
+#endif
         done += got;
         if (!xfer_report(o, done, total))
         {
@@ -181,6 +193,7 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         out_info->crc_source = crc_src;
     }
 
+#if FM_USE_CRC
     /* بررسی صحت: مقصد را دوباره بخوان و CRC بگیر. */
     if (o->verify)
     {
@@ -225,6 +238,7 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
             return FM_ERR_CORRUPTED;
         }
     }
+#endif /* FM_USE_CRC */
     return FM_OK;
 }
 

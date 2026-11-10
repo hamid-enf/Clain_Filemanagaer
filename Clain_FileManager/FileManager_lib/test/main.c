@@ -11,6 +11,7 @@
 #include "file_manager.h"
 /* The negative tests below deliberately trigger error paths; keep the
  * log quiet so a passing run stays readable. */
+#undef  FM_DEBUG_LEVEL
 #define FM_DEBUG_LEVEL FM_DEBUG_OFF
 #include "fm_debug.h"
 #include "fm_transfer.h"
@@ -26,10 +27,21 @@
 #include "fm_alloc.h"
 #include "h264bsd_storage.h"
 #endif
+#if FM_USE_AUDIO
+#include "fm_opus.h"
+#endif
 
 extern FM_Result PosixFS_Init(FM_FS *fs);
 extern FM_Result RamDisk_Register(FM_Storage *s, const char *name,
                                   void *buffer, uint64_t capacity);
+
+/* Helpers shared by tests that are compiled only for some FM_USE_*
+ * combinations: keep -Werror builds of every combination warning-free. */
+#if defined(__GNUC__)
+#define TEST_MAYBE_UNUSED __attribute__((unused))
+#else
+#define TEST_MAYBE_UNUSED
+#endif
 
 static int  g_failures = 0;
 static int  g_tests = 0;
@@ -247,6 +259,24 @@ static void setup(void)
                              FM_ResultString(r)); exit(1); }
 
     printf("Setup: RAM disk + POSIX FS ready\n");
+}
+
+/* Several suites swap the filesystem mounted at "/" (FMFS, LittleFS, the
+ * cache fixtures).  Put the POSIX root back before every suite that reads
+ * test/vectors, so no suite depends on which optional suite ran before it
+ * (the MP3 suite used to be the only one that restored it: every build
+ * with FM_USE_MP3=0 then failed the transfer/media-cache/video suites). */
+static void restore_posix_root(void)
+{
+    FM_Result r;
+
+    (void)FS_Unmount("/");
+    r = Storage_Mount("ram");
+    if (r == FM_OK || r == FM_ERR_EXISTS) r = FS_Mount("/", &g_fs);
+    if (r != FM_OK && r != FM_ERR_EXISTS)
+    {
+        printf("  NOTE: POSIX root remount: %s\n", FM_ResultString(r));
+    }
 }
 
 /* ================================================================ */
@@ -2439,6 +2469,8 @@ static FM_Result build_avi(uint8_t *out, size_t *out_len)
     return FM_OK;
 }
 
+#endif /* FM_USE_VIDEO (builders) */
+
 static FM_Bool test_xfer_cancel_cb(uint64_t done, uint64_t total,
                                    void *user)
 {
@@ -2446,6 +2478,11 @@ static FM_Bool test_xfer_cancel_cb(uint64_t done, uint64_t total,
     (void)user;
     return (done < 4096u) ? FM_TRUE : FM_FALSE;
 }
+
+/* ---- The port / QSPI / SPI-flash / media-cache / crash-safety / log /
+ * board-config / transfer suites below are NOT video tests.  They used to
+ * sit inside the FM_USE_VIDEO block and were silently skipped whenever
+ * video was compiled out. ---- */
 
 /* Used by the FM_CHECK test: a function that validates its input the
  * way every public entry point in the library now does. */
@@ -3781,6 +3818,41 @@ static void test_crash_safety(void)
         PASS();          /* reaching here means nothing crashed */
     }
 
+    TEST("Crash safety: a rejected File_Open does not leak a pool handle");
+    {
+        /* File_Open claimed a pool slot first and validated afterwards;
+         * the early "bad argument" return forgot to give it back.  Eight
+         * such calls (FM_MAX_OPEN_FILES) and no file could be opened
+         * through the pool any more. */
+        uint32_t before = File_PoolUsed();
+        uint32_t i;
+        uint32_t n = 0;
+        FM_File *ok;
+
+        for (i = 0; i < (uint32_t)FM_MAX_OPEN_FILES * 2u; i++)
+        {
+            (void)File_Open(NULL, FM_OPEN_READ);
+            (void)File_Open("/leak_probe.txt", 0u);
+            (void)File_Open("/leak_probe.txt", FM_OPEN_CREATE);
+            (void)File_ReadAll(NULL, &n, sizeof(n), NULL);
+            (void)File_WriteAll(NULL, &n, sizeof(n));
+            (void)File_Open("/no/such/dir/leak_probe.txt", FM_OPEN_READ);
+        }
+        ok = File_Open("/leak_probe.txt",
+                       FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+        if (ok == NULL)
+        {
+            FAIL("pool exhausted by rejected opens");
+        }
+        else
+        {
+            (void)File_Close(ok);
+            (void)File_Delete("/leak_probe.txt");
+            if (File_PoolUsed() == before) PASS();
+            else FAIL("handle count changed");
+        }
+    }
+
     TEST("Crash safety: storage and filesystem API tolerate NULL");
     {
         FM_Storage *st = NULL;
@@ -4026,7 +4098,7 @@ static void test_logging(void)
 static FM_File *g_idle_thief_file;
 static int      g_idle_thief_hits;
 
-static void test_idle_cursor_thief(void)
+TEST_MAYBE_UNUSED static void test_idle_cursor_thief(void)
 {
     if (g_idle_thief_file != NULL)
     {
@@ -4059,6 +4131,7 @@ static void test_board_config(void)
         }
     }
 
+#if FM_USE_VIDEO
     TEST("Video: an idle hook that moves the cursor cannot corrupt a frame");
     {
         /* Regression: reading a frame in slices used to continue from
@@ -4138,6 +4211,38 @@ static void test_board_config(void)
             PASS();
         }
     }
+#else
+    TEST("Video compiled out: API links, reports UNSUPPORTED, owns no state");
+    {
+        FM_Video v;
+        FM_VideoWriter w;
+        FM_VideoInfo vi;
+        FM_Bool has = FM_TRUE;
+        size_t got = 123u;
+        uint8_t b[8];
+
+        memset(&v, 0, sizeof(v));
+        memset(&w, 0, sizeof(w));
+        if (Video_Open("/clip.avi", &v) == FM_ERR_UNSUPPORTED &&
+            Video_GetInfo(&v, &vi) == FM_ERR_UNSUPPORTED &&
+            Video_ReadFrame(&v, b, sizeof(b), &got) == FM_ERR_UNSUPPORTED &&
+            got == 0u &&
+            Video_DecodeFrame(&v, b, sizeof(b)) == FM_ERR_UNSUPPORTED &&
+            Video_HasAudio(&v, &has) == FM_ERR_UNSUPPORTED && !has &&
+            Video_ReadAudioFrame(&v, b, sizeof(b), &got) ==
+                FM_ERR_UNSUPPORTED &&
+            VideoWriter_Create("/o.fmrv", 2, 2, 1, 1, 12, &w) ==
+                FM_ERR_UNSUPPORTED &&
+            Video_Close(&v) == FM_ERR_UNSUPPORTED)
+        {
+            PASS();
+        }
+        else
+        {
+            FAIL("a disabled video entry point did not say UNSUPPORTED");
+        }
+    }
+#endif
 
     TEST("Board config: the library owns no addresses");
     {
@@ -4312,6 +4417,26 @@ static void test_transfer(void)
         (void)File_Delete("/xfer_e.bin");
         memset(&o, 0, sizeof(o));
         o.verify = FM_TRUE;
+#if !FM_USE_CRC
+        {
+            /* No CRC module: verify cannot run, so the copy must be
+             * refused BEFORE the destination is created -- not done and
+             * then reported as "verified". */
+            FM_Bool made = FM_TRUE;
+            FM_Result vr = FM_Transfer_CopyEx("/xfer_d.bin", "/xfer_e.bin",
+                                              &o, &info);
+
+            (void)File_Exists("/xfer_e.bin", &made);
+            if (vr == FM_ERR_UNSUPPORTED && !made && !info.verified)
+            {
+                PASS();
+            }
+            else
+            {
+                FAIL("verify without FM_USE_CRC was not refused up front");
+            }
+        }
+#else
         if (FM_Transfer_CopyEx("/xfer_d.bin", "/xfer_e.bin", &o,
                                &info) != FM_OK)
         {
@@ -4333,6 +4458,7 @@ static void test_transfer(void)
         {
             PASS();
         }
+#endif /* FM_USE_CRC */
     }
 
     TEST("Transfer_Copy overwrites by default, refuses with no_overwrite");
@@ -4512,6 +4638,7 @@ static void test_transfer(void)
     }
 }
 
+#if FM_USE_VIDEO
 static void test_video(void)
 {
     FM_Result r;
@@ -5560,14 +5687,14 @@ static void cnt_free(void *p, void *ctx)
     free(p);
 }
 
-static void *null_alloc(size_t size, void *ctx)
+TEST_MAYBE_UNUSED static void *null_alloc(size_t size, void *ctx)
 {
     (void)size;
     (void)ctx;
     return NULL;
 }
 
-static void null_free(void *p, void *ctx)
+TEST_MAYBE_UNUSED static void null_free(void *p, void *ctx)
 {
     (void)p;
     (void)ctx;
@@ -5599,9 +5726,10 @@ static void def_free(void *p, void *ctx)
 
 #if FM_USE_AUDIO
 /* Opus-in-Ogg decode.  With FM_OPUS_USE_LIBOPUS the vendored libopus is
- * exercised (assert non-silent PCM); otherwise the silence fallback is
- * exercised (assert sane durations/geometry only).  The asset lives in
- * test/vectors/test_opus.ogg and is opened through the POSIX backend. */
+ * exercised (assert non-silent PCM).  Without it there is no decoder and
+ * the library must say so (FM_ERR_UNSUPPORTED) instead of "playing"
+ * silence.  The asset lives in test/vectors/test_opus.ogg and is opened
+ * through the POSIX backend. */
 static void test_opus_ogg(void)
 {
     FM_Audio a;
@@ -5610,6 +5738,23 @@ static void test_opus_ogg(void)
     int16_t buf[2048];
     size_t n = 0, total = 0, peak = 0, i;
 
+#if !FM_OPUS_USE_LIBOPUS
+    TEST("Opus: no libopus -> FM_ERR_UNSUPPORTED, never silence");
+    r = Audio_Open("/test/vectors/test_opus.ogg", &a);
+    if (r == FM_OK) (void)Audio_Close(&a);
+    if (r == FM_ERR_UNSUPPORTED && FM_Opus_GetOps() == NULL &&
+        FM_Opus_Init() == FM_ERR_UNSUPPORTED &&
+        Audio_GetDecoder("OPUS") == NULL)
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL("Opus without libopus must be reported as unsupported");
+    }
+    (void)info; (void)buf; (void)n; (void)total; (void)peak; (void)i;
+    return;
+#else
     TEST("Opus: Ogg Opus decode (test_opus.ogg)");
     r = Audio_Open("/test/vectors/test_opus.ogg", &a);
     if (r == FM_OK) r = Audio_GetInfo(&a, &info);
@@ -5631,15 +5776,12 @@ static void test_opus_ogg(void)
     if (r == FM_ERR_EOF) r = FM_OK;              /* normal end of stream */
     /* The asset is a few seconds long: expect at least 1 s of 48 kHz. */
     if (r == FM_OK && total < 48000u) r = FM_ERR_CORRUPTED;
-#if FM_OPUS_USE_LIBOPUS
     if (r == FM_OK && peak < 1000u) r = FM_ERR_CORRUPTED;   /* not silence */
-#endif
-    (void)peak;
     Audio_Close(&a);
     if (r == FM_OK) printf("[%u samples, peak %u] ", (unsigned)total, (unsigned)peak);
     CHECK_RESULT(r, "opus ogg decode");
-}
 #endif
+}
 
 /* ADPCM WAV: small-chunk reads must not drop samples.  Regression for
  * the byte-overread fix in Audio_Read()'s IMA-ADPCM path: it used to
@@ -5657,7 +5799,7 @@ static void test_adpcm_small_chunks(void)
     size_t i;
 
     TEST("Regression: ADPCM WAV small-chunk reads keep samples");
-    r = Audio_Open("/audio_test/wav_adpcm_ima_22k.wav", &a);
+    r = Audio_Open("/test/vectors/wav_adpcm_ima_22k.wav", &a);
     if (r == FM_OK)
     {
         for (;;)
@@ -5674,7 +5816,7 @@ static void test_adpcm_small_chunks(void)
         if (r == FM_ERR_EOF) r = FM_OK;
         (void)Audio_Close(&a);
     }
-    if (r == FM_OK) r = Audio_Open("/audio_test/wav_adpcm_ima_22k.wav", &a);
+    if (r == FM_OK) r = Audio_Open("/test/vectors/wav_adpcm_ima_22k.wav", &a);
     if (r == FM_OK)
     {
         for (;;)
@@ -5702,6 +5844,7 @@ static void test_adpcm_small_chunks(void)
                total_small, total_big, peak_small, peak_big);
     CHECK_RESULT(r, "adpcm small chunks");
 }
+#endif /* FM_USE_AUDIO */
 
 static void test_allocator(void)
 {
@@ -5737,7 +5880,7 @@ static void test_allocator(void)
         if (r == FM_OK) r = ops->decode_frame(ctx, h264, rd, rgb, sizeof(rgb));
         if (ctx != NULL) ops->close(ctx);
 #else
-        (void)FM_Alloc(16);
+        FM_Free(FM_Alloc(16));
         FM_Free(FM_Alloc(16));
 #endif
     }
@@ -5864,6 +6007,7 @@ static void test_scale(void)
         }
     }
 
+#if FM_USE_JPEG
     TEST("JPEG still Image_Load (picojpeg)");
     {
         FM_Image img;
@@ -5887,7 +6031,34 @@ static void test_scale(void)
             FAIL("jpeg still decode");
         }
     }
+#else
+    TEST("JPEG compiled out: a .jpg is refused, not misdecoded");
+    {
+        FM_Image img;
+        FM_ImageInfo inf;
+        uint8_t pixels[16 * 16 * 3];
+        FM_Result ri;
 
+        memset(&img, 0, sizeof(img));
+        memset(pixels, 0xA5, sizeof(pixels));
+        ri = Image_GetInfo("/test/vectors/mjpeg_frame.jpg", &inf);
+        r = Image_Load("/test/vectors/mjpeg_frame.jpg", &img, pixels,
+                       sizeof(pixels));
+        if (r == FM_ERR_UNSUPPORTED && ri == FM_ERR_UNSUPPORTED &&
+            pixels[0] == 0xA5 && pixels[sizeof(pixels) - 1u] == 0xA5)
+        {
+            PASS();
+        }
+        else
+        {
+            printf("load=%s info=%s ", FM_ResultString(r),
+                   FM_ResultString(ri));
+            FAIL("disabled JPEG codec was not reported as UNSUPPORTED");
+        }
+    }
+#endif
+
+#if FM_USE_PNG && FM_USE_CRC
     TEST("PNG still Image_Load (built-in inflate)");
     {
         /* Build a 2x2 RGB PNG (filter None, stored zlib). */
@@ -5989,7 +6160,55 @@ static void test_scale(void)
         }
         (void)File_Delete("/tiny.png");
     }
+#endif
+#if !FM_USE_PNG
+    TEST("PNG compiled out: a .png is refused, not misdecoded");
+    {
+        static const uint8_t png_hdr[24] = {
+            137, 80, 78, 71, 13, 10, 26, 10,  0, 0, 0, 13,
+            'I', 'H', 'D', 'R',  0, 0, 0, 2,  0, 0, 0, 2
+        };
+        FM_Image img;
+        uint8_t pixels[2 * 2 * 3];
+        FM_Image src_img;
+        FM_Result rs;
+        FM_Bool left = FM_TRUE;
 
+        memset(&img, 0, sizeof(img));
+        memset(pixels, 0xA5, sizeof(pixels));
+        memset(&src_img, 0, sizeof(src_img));
+        src_img.width = 2;
+        src_img.height = 2;
+        src_img.format = FM_PIXEL_RGB888;
+        src_img.channels = 3;
+        src_img.bit_depth = 24;
+        src_img.data = pixels;
+        src_img.data_capacity = sizeof(pixels);
+        src_img.data_size = sizeof(pixels);
+        rs = Image_Save("/off.png", &src_img);
+        (void)File_Exists("/off.png", &left);
+        r = File_WriteAll("/hdr.png", png_hdr, sizeof(png_hdr));
+        if (r == FM_OK)
+        {
+            r = Image_Load("/hdr.png", &img, pixels, sizeof(pixels));
+        }
+        if (r == FM_ERR_UNSUPPORTED && rs == FM_ERR_UNSUPPORTED &&
+            pixels[0] == 0xA5 && !left)
+        {
+            PASS();
+        }
+        else
+        {
+            printf("load=%s save=%s ", FM_ResultString(r),
+                   FM_ResultString(rs));
+            FAIL("disabled PNG codec was not reported as UNSUPPORTED");
+        }
+        (void)File_Delete("/hdr.png");
+        (void)File_Delete("/off.png");
+    }
+#endif
+
+#if FM_USE_JPEG && FM_USE_PNG
     TEST("Image_Load JPEG/PNG without heap (no file slurp)");
     {
         FM_Allocator fail;
@@ -6053,7 +6272,9 @@ static void test_scale(void)
         }
         (void)FM_Allocator_Set(&keep);
     }
+#endif
 
+#if FM_USE_JPEG
     TEST("Image_Save JPEG roundtrip (lossy, size preserved)");
     {
         uint8_t px[8 * 8 * 3];
@@ -6111,6 +6332,7 @@ static void test_scale(void)
             FAIL("scale-to-fit");
         }
     }
+#endif /* FM_USE_JPEG */
 
     TEST("Image_Scale: bilinear 2x2 -> 2x2 identity");
     r = Image_Scale(src, 2, 2, FM_PIXEL_RGB888, dst, 2, 2,
@@ -6299,6 +6521,7 @@ static void test_scale(void)
 /* ================================================================ */
 /* Audio decoder hook + recorder                                     */
 /* ================================================================ */
+#if FM_USE_AUDIO
 static FM_Result fake_aac_init(void **ctx, const FM_AudioInfo *info)
 {
     (void)info;
@@ -6396,8 +6619,6 @@ static void build_adts(uint8_t *h, uint32_t rate, uint16_t ch,
     h[5] = (uint8_t)(((total & 7u) << 5) | 0x1Fu);
     h[6] = 0xFC;
 }
-
-#if FM_USE_AUDIO
 
 static void test_audio_hook(void)
 {
@@ -8683,7 +8904,7 @@ static void hotplug_cb(const char *name, FM_Bool inserted, void *user_data)
 static int g_eeprom_writes = 0;
 static int g_stream_calls = 0;
 
-static void stream_cb(const int16_t *samples, size_t count, void *ud)
+TEST_MAYBE_UNUSED static void stream_cb(const int16_t *samples, size_t count, void *ud)
 {
     (void)samples;
     (void)ud;
@@ -9240,6 +9461,33 @@ static void test_coverage(void)
 /* ================================================================ */
 /* Main                                                             */
 /* ================================================================ */
+/* ================================================================ */
+/* Per-suite resource sentinel                                       */
+/* ================================================================ */
+/* The file-handle pool is a fixed FM_MAX_OPEN_FILES array: one handle
+ * leaked by an error path is gone until reset, and the suites after it
+ * start failing for unrelated-looking reasons (this is how the leak in
+ * File_Open(NULL, ...) hid behind "Threads: concurrent registry stress").
+ * So every suite must give back everything it opened. */
+static uint32_t g_suite_pool_base = 0u;
+
+static void suite_leak_check(const char *suite)
+{
+    uint32_t used = File_PoolUsed();
+
+    if (used > g_suite_pool_base)
+    {
+        g_tests++;
+        printf("  TEST %-45s ... ", suite);
+        printf("%lu handle(s) still open ",
+               (unsigned long)(used - g_suite_pool_base));
+        FAIL("suite leaked file handles");
+    }
+    g_suite_pool_base = used;
+}
+
+#define RUN_SUITE(fn) do { fn(); suite_leak_check(#fn); } while (0)
+
 int main(void)
 {
     printf("\nFileManager Host Test Suite\n");
@@ -9247,82 +9495,84 @@ int main(void)
 
     setup();
 
-    test_path();
-    test_file_create();
-    test_file_write_read();
-    test_file_append();
-    test_file_copy();
-    test_file_move_delete();
-    test_file_seek();
-    test_directory();
+    RUN_SUITE(test_path);
+    RUN_SUITE(test_file_create);
+    RUN_SUITE(test_file_write_read);
+    RUN_SUITE(test_file_append);
+    RUN_SUITE(test_file_copy);
+    RUN_SUITE(test_file_move_delete);
+    RUN_SUITE(test_file_seek);
+    RUN_SUITE(test_directory);
 #if FM_USE_JSON
-    test_json();
+    RUN_SUITE(test_json);
 #endif
 #if FM_USE_DATA_LOGGER
-    test_logger();
+    RUN_SUITE(test_logger);
 #endif
 #if FM_USE_MEDIA_DETECT
-    test_media();
+    RUN_SUITE(test_media);
 #endif
 #if FM_USE_ASYNC || FM_USE_AUDIO || FM_USE_IMAGE || FM_USE_VIDEO
-    test_async_and_codecs();
+    RUN_SUITE(test_async_and_codecs);
 #endif
 #if FM_USE_EEPROM && FM_USE_USB_MSC
-    test_eeprom_usb();
+    RUN_SUITE(test_eeprom_usb);
 #endif
 #if FM_USE_DEVICE_ADAPTERS
-    test_standard_device_adapters();
+    RUN_SUITE(test_standard_device_adapters);
 #endif
 #if FM_USE_FMFS
-    test_memory_fs();
+    RUN_SUITE(test_memory_fs);
 #endif
 #if FM_USE_LITTLEFS
-    test_littlefs();
+    RUN_SUITE(test_littlefs);
 #endif
 #if FM_USE_CACHE && FM_USE_FMFS
-    test_cache();
+    RUN_SUITE(test_cache);
 #endif
+    restore_posix_root();
 #if FM_USE_MP3
-    test_mp3();
-    test_mp3_readahead();
+    RUN_SUITE(test_mp3);
+    RUN_SUITE(test_mp3_readahead);
 #endif
+    restore_posix_root();
+    RUN_SUITE(test_port_and_debug);
+    RUN_SUITE(test_qspi);
+    RUN_SUITE(test_spiflash);
+    RUN_SUITE(test_mediacache);
+    RUN_SUITE(test_crash_safety);
+    RUN_SUITE(test_logging);
+    RUN_SUITE(test_board_config);
+    RUN_SUITE(test_transfer);
 #if FM_USE_VIDEO
-    test_port_and_debug();
-    test_qspi();
-    test_spiflash();
-    test_mediacache();
-    test_crash_safety();
-    test_logging();
-    test_board_config();
-    test_transfer();
-    test_video();
+    RUN_SUITE(test_video);
 #endif
 #if FM_USE_MJPEG
-    test_mjpeg();
+    RUN_SUITE(test_mjpeg);
 #endif
 #if FM_USE_IMAGE
-    test_scale();
+    RUN_SUITE(test_scale);
 #endif
 #if FM_USE_AUDIO
-    test_audio_hook();
+    RUN_SUITE(test_audio_hook);
 #endif
 #if FM_USE_AUDIO || FM_USE_VIDEO
-    test_player();
+    RUN_SUITE(test_player);
 #endif
 #if FM_USE_AUDIO
-    test_ex13_options();
-    test_opus_ogg();
-    test_adpcm_small_chunks();
+    RUN_SUITE(test_ex13_options);
+    RUN_SUITE(test_opus_ogg);
+    RUN_SUITE(test_adpcm_small_chunks);
 #endif
 #if FM_USE_AUDIO && FM_USE_MP3
-    test_simple_audio_track_change();
-    test_wav_truncated_board_geometry();
+    RUN_SUITE(test_simple_audio_track_change);
+    RUN_SUITE(test_wav_truncated_board_geometry);
 #endif
-    test_allocator();
-    test_regressions();
-    test_coverage();
+    RUN_SUITE(test_allocator);
+    RUN_SUITE(test_regressions);
+    RUN_SUITE(test_coverage);
 #if FM_USE_THREADS && FM_HOST_BUILD
-    test_threads();
+    RUN_SUITE(test_threads);
 #endif
 
     printf("\n  Results: %d/%d passed, %d failures\n",
