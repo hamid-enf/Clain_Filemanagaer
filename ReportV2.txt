@@ -1,0 +1,1589 @@
+# External audit — files, storage and filesystems
+
+**Library:** `Clain_FileManager/FileManager_lib/` of `hamid-enf/Clain_Filemanagaer` (C99, STM32)
+**Mode:** read-only audit. Nothing was committed, pushed or sent upstream. All work was done on a
+local copy; the harnesses and the diffs below are attached in `audit/` next to this file.
+**Date:** 2026-11-10
+
+---
+
+## 1. خلاصهٔ فارسی
+
+در این ممیزی، بخش «فایل، حافظه و فایل‌سیستم» کتابخانه بررسی شد و **۷ نقص تأییدشده** (بازتولیدشده) یافت شد: ۲ مورد S1، ۲ مورد S2، ۲ مورد S3 و ۱ مورد S4؛ به‌علاوه ۴ مورد ظنّی که فقط از راه خواندن کد به دست آمده‌اند.
+مهم‌ترین نقص **FILE-01** است: `File_Truncate()` روی یک هندلِ فقط‌خواندنی هیچ بررسی‌ای نمی‌کند و در بک‌اند LittleFS به `LFS_ASSERT` و در نتیجه `abort()` می‌رسد؛ یعنی یک فراخوانی معمولی و ظاهراً بی‌خطر، کل دستگاه را متوقف می‌کند و هیچ مقدار خطایی برنمی‌گرداند. دومین نقص جدی **FILE-02** است: `File_Append()` با «اندازهٔ کهنهٔ» ثبت‌شده در هندل می‌نویسد، پس اگر فایل از راه هندل دیگری رشد کرده باشد، داده‌های موجود بی‌صدا بازنویسی می‌شوند و تابع `FM_OK` برمی‌گرداند (در آزمون، ۹ بایت انتظاری به ۸ بایت با یک بایت از‌دست‌رفته تبدیل شد).
+دو نقص S2 عبارت‌اند از جابه‌جایی موقعیت فایل پس از `truncate` در آداپتر FatFS (خواندن‌های بعدی اشتباه می‌شوند) و حذف همهٔ کاراکترهای CR در `Text_ReadLine()` که چون `Text_Replace()` همیشه فایل را بازنویسی می‌کند، به از‌دست‌رفتن دائمی داده در فایل‌های CRLF/Mac منجر می‌شود.
+روش‌ها: آزمون واحد خودِ پروژه (۳۵۸/۳۵۸ در دو پیکربندی)، ۸۰۰٬۰۰۰ تصویر تصادفی FMFS برای مسیر mount، ۱۴٬۴۰۰ عملیات مدل‌گردان روی ۳۶ پیکربندی، ۱٫۲ میلیون ورودی JSON، و اجرای یکسان یک سناریو روی سه بک‌اند برای یافتن اختلاف رفتار.
+بررسی‌نشده ماند: راننده‌های سخت‌افزاری (سطح ۳، فقط خواندنی)، ساخت ۳۲بیتی (multilib در محیط موجود نبود)، و آزمون هم‌زمانی واقعی (کتابخانه با `FM_USE_THREADS=0` ساخته شد).
+
+---
+
+## 2. Audit record
+
+### 2.1 Target and commit
+
+| Item | Value |
+|---|---|
+| Repository | `https://github.com/hamid-enf/Clain_Filemanagaer` |
+| Branch in the brief | `arena/ba6a87b3-clain-filemanagaer`, commit **`8dd0f25`** |
+| Commit actually present in the clone | **`8dd0f25` does not exist** here (`git cat-file -t 8dd0f25` fails; `git log --all` has exactly two commits, `de9abca` and `2ba7864`) |
+| Audited revision | `2ba7864` (HEAD of the clone), library tree `1607cd61b8b30117675bb0573a8fd34a0be072bb` |
+| How the library arrived | `de9abca` adds only `Clain_FileManager.zip`; `2ba7864` unzips it into the tree and adds `audit_prompts/` — the audited sources are that extraction |
+| Fingerprints | `src/fm_file.c` md5 `a673dfdbafc82fc32dc37c738d66e8a8`, `src/fm_fmfs.c` `1762811c40f7032d82c1bf4ba9e75a3c`, `src/fm_stream.c` `eeab7e7a7f7ea08cef2e371b03eb9eeb` |
+
+All line numbers in this report are line numbers of that tree (files use CRLF line endings).
+
+### 2.2 Machine and compiler
+
+```
+Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
+gcc (Debian 12.2.0-14+deb12u1) 12.2.0
+Mem: 3939 MB, nproc = 2
+```
+
+No `clang`, no `afl-fuzz`, no `libFuzzer`, no `cppcheck`/`clang-tidy`, no `valgrind`, and **no 32-bit
+multilib** (`gcc -m32` links fail for want of `libc6-dev-i386`). Consequence: no 32-bit run, no
+coverage-guided fuzzing, no dynamic race detector. Everything below was produced with
+`gcc -fsanitize=address,undefined`, hand-written mutational loops, `gcc -fanalyzer`
+(no report on `src/`+`backends/` beyond what is listed) and `-fstack-usage`.
+
+### 2.3 Builds performed
+
+| # | Build | Result |
+|---|---|---|
+| B1 | `make test` (project default flags) | **358/358 passed**, 0 failures, 42.7 s |
+| B2 | `make asan` (project's own ASan profile) | **358/358 passed**, 0 failures |
+| B3 | custom `libfilemanager.a` with ASan+UBSan, every `FM_USE_*` on except FatFS | builds clean, used for all harnesses |
+| B4 | `make libfilemanager.a CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=0 -Werror"` | **fails**, rc=2 → finding FILE-07 |
+| B5 | `make libfilemanager.a CFLAGS_EXTRA="-Werror"` (default debug level) | clean, 0 warnings |
+| B6 | `gcc -fstack-usage` over all of `src/` + `backends/` | produced `su/all.txt`, used for SUSP-01 |
+| B7 | FatFS host build: `backends/fm_fatfs.c` + `test/fatfs_mock/ff_mock.c` + library, `-DFM_USE_FATFS=1 -DFM_FATFS_PROVIDE_DISKIO=0 -DFM_USE_CACHE=0` | builds and runs → finding FILE-03 |
+
+### 2.4 Methods and effort
+
+| Method | What it exercised | Volume / duration |
+|---|---|---|
+| Random-image mount fuzz (`fmfs_mount_fuzz`) | FMFS `mount` + random op sequences on a 256 KiB bounds-checked RAM driver; any access outside the volume is flagged and the driver is checked after **every** driver callback | 8 seeds × 4 modes × 25 000 images = **800 000 images**, 32 process runs under ASan, 0 out-of-range accesses |
+| Model-based FMFS test (`fmfs_model`) | after **every** operation the file size, the full content, the listing and (after remount) the on-disk state are compared against an in-memory model | 36 configurations × 400 operations = **14 400 operations**, 0 mismatches |
+| Same-scenario differential (`diff_backends`) | 36 identical API sequences run on FMFS, POSIX and LittleFS, one line of output per check | 3 runs, 36 checks each (LittleFS aborts at check 8 — see FILE-01) |
+| JSON fuzz (`json_fuzz`) | mutation of a seed corpus + random byte soup + 200-deep nesting + `FM_JsonWriter` round trips with random buffer caps | 4 seeds × 300 000 = **1 200 000 inputs** (~26 600 accepted parses), no sanitizer report, no hang |
+| Stack measurement | `-fstack-usage` for every TU; painted-stack measurement of real calls; `pthread_attr_setstacksize` bisection | see SUSP-01 |
+| Reading | `fm_fmfs.c`, `fm_path.c`, `fm_directory.c`, `fm_filesystem.c`, `fm_explorer.c`, `fm_alloc.c`, `fm_stream.c`, `fm_text.c`, `fm_safe.c` in full; `fm_file.c`, `fm_storage.c`, `fm_logger.c`, `fm_json.c`, `fm_littlefs.c`, `fm_fatfs.c`, `fm_posix_fs.c`, `lfs.c`, `ff_mock.c` in the parts that matter | ~240 KB of C read in detail |
+
+The project's own suite already covers power-cut-at-every-write for FMFS, so no second power-fail
+campaign was written (the README claim "45 configurations" was not re-run in full; B1/B2 were).
+
+### 2.5 Coverage
+
+The project's own suite (B1) rebuilt with `--coverage`, `-O0`, gcov line coverage of the modules in
+scope:
+
+| File | Lines executed | File | Lines executed |
+|---|---|---|---|
+| `src/fm_fmfs.c` | 92.70 % of 1369 | `src/fm_filesystem.c` | 76.49 % of 370 |
+| `src/fm_posix_fs.c` | 85.65 % of 237 | `src/fm_directory.c` | 74.63 % of 544 |
+| `src/fm_file.c` | 82.96 % of 945 | `src/fm_storage.c` | 70.76 % of 342 |
+| `src/fm_stream.c` | 68.00 % of 250 | `src/fm_path.c` | 65.70 % of 207 |
+| `backends/fm_littlefs.c` | 65.29 % of 461 | `src/fm_safe.c` | 61.54 % of 104 |
+| **`src/fm_text.c`** | **28.94 % of 273** | | |
+
+The FMFS campaign (mount fuzz + model test, run separately) adds the random-image paths of
+`src/fm_fmfs.c` on top of that; `src/fm_text.c` is the weakest-covered module in scope, which is
+consistent with FILE-04 having survived the suite (nothing in `test/main.c` writes a CR that is not
+part of a CRLF pair).
+
+### 2.6 32-bit
+
+Not possible in this environment (no multilib, no cross compiler, no QEMU). All sizes in this report
+are therefore 64-bit host measurements; where a finding depends on `size_t`/`int` being 32-bit this is
+said explicitly. No confirmed finding here depends on pointer width.
+
+### 2.7 Scope progress
+
+| Tier | Modules | Status |
+|---|---|---|
+| 1 (core) | `fm_file.c`, `fm_filesystem.c`, `fm_directory.c`, `fm_path.c`, `fm_storage.c`, `fm_fmfs.c`, backends littlefs/fatfs/posix/ramdisk | **done** (read + harness) — 5 confirmed defects |
+| 2 (utilities) | `fm_stream.c`, `fm_text.c`, `fm_explorer.c`, `fm_safe.c`, `fm_alloc.c`, `fm_logger.c`, `fm_json.c` | **partly done** — stream, text, explorer, safe, alloc, logger read; `fm_binary.c`, `fm_crc.c`, `fm_async.c`, `fm_transfer.c`, `fm_log.c` read only in outline |
+| 3 (drivers) | `fm_device.c`, `fm_eeprom*.c`, `fm_qspi.c`, `fm_spiflash.c`, `fm_sd_hal.c`, `fm_usb_msc.c` | **not examined** (time) |
+
+---
+
+## 3. Findings — summary table
+
+| ID | Sev | Title | Where | Status |
+|---|---|---|---|---|
+| FILE-01 | **S1** | `File_Truncate()` on a read-only handle aborts the process on LittleFS | `src/fm_file.c:1319`, `third_party/littlefs/lfs.c:3762` | confirmed |
+| FILE-02 | **S1** | `File_Append()` writes at a stale size → silently overwrites existing data | `src/fm_file.c:1247` | confirmed |
+| FILE-03 | S2 | FatFS adapter leaves the file position at the truncate size | `backends/fm_fatfs.c:526` | confirmed (host FatFS mock) |
+| FILE-04 | S2 | `Text_ReadLine()` deletes every CR; `Text_Replace()` then rewrites the file → permanent data loss | `src/fm_text.c:58` | confirmed |
+| FILE-05 | S3 | `Stream_InitFile()` leaks a file-pool slot and the stream never becomes readable | `src/fm_stream.c:146` | confirmed |
+| FILE-06 | S3 | POSIX adapter opens a directory as a file | `backends/fm_posix_fs.c:119` | confirmed |
+| FILE-07 | S4 | `FM_DEBUG_LEVEL=0` does not compile under the project's own `-Werror` profile | `src/fm_storage.c:329`, `src/fm_file.c:756` | confirmed |
+
+Severity key: S1 = memory-safety crash, hang/abort, or silent data loss in normal use;
+S2 = wrong data or wrong result without a crash; S3 = resource leak / contract violation with
+limited reach; S4 = build/packaging defect without runtime effect.
+
+Every confirmed finding was reproduced with the unmodified library, then the proposed diff was
+applied to a *copy* and the reproducer re-run (and the full suite re-run — see §4.8).
+
+---
+
+## 4. Findings in detail
+
+### 4.1 FILE-01 — `File_Truncate()` on a read-only handle aborts the process (LittleFS)
+
+**Severity:** S1 (abort = crash; a return value cannot be recovered)
+
+**Where:** `src/fm_file.c:1319-1341` (`File_Truncate`, no mode check) →
+`backends/fm_littlefs.c` (`lfs_fs_file_truncate`) → `third_party/littlefs/lfs.c:3762`
+
+```c
+static int lfs_file_truncate_(lfs_t *lfs, lfs_file_t *file, lfs_off_t size) {
+    LFS_ASSERT((file->flags & LFS_O_WRONLY) == LFS_O_WRONLY);
+```
+
+**How to reproduce** (`audit/harness/lfs_trunc_crash.c`, full source in Appendix B.1):
+
+```sh
+cd FileManager_lib && make clean && make -j2 libfilemanager.a CFLAGS="$CFLAGS_ASAN"   # Appendix A
+gcc -std=gnu99 -O1 -g -fsanitize=address,undefined -DFM_USE_LITTLEFS=1 \
+    -Iinclude -Ibackends -Isrc -o /tmp/lfs_trunc_crash \
+    audit/harness/lfs_trunc_crash.c libfilemanager.a -lm
+/tmp/lfs_trunc_crash
+```
+
+**Output:**
+
+```
+opened read-only; calling File_Truncate(f, 5)
+lfs_trunc_crash: /home/user/audit/lib/third_party/littlefs/lfs.c:3762:
+    lfs_file_truncate_: Assertion `(file->flags & LFS_O_WRONLY) == LFS_O_WRONLY' failed.
+Aborted (core dumped)          [exit status 134]
+```
+
+**Expected:** `FM_ERR_ACCESS` (-4), the error every other backend returns and the error the API
+already has for exactly this case. `FMFS` returns `-4`, `POSIX` returns `-6` (see the table in
+Appendix D) — so the same program has three different outcomes depending on the mount.
+
+**Observed:** the assertion fires inside littlefs, `abort()` runs, the device stops. There is no way
+for the caller to see an error code, and on an MCU this is a reset (or a hang in the fault handler).
+
+**Root cause:** truncation is a write. `File_Write` and `File_Append` check
+`!(f->mode & FM_OPEN_WRITE)` (`src/fm_file.c:1199` and `:1242`), `File_Truncate` does not, so the
+handle's flags reach `lfs_file_truncate()`. littlefs keeps `LFS_ASSERT` enabled by default (the
+project does not define `LFS_NO_ASSERT` in its build) and uses the assertion to enforce a
+precondition that the API layer was supposed to enforce. Reading or writing a read-only handle into
+littlefs has the same shape (`lfs.c:3563` for read, `lfs.c:3666` for write); they are unreachable
+because `File_Read`/`File_Write` check the mode first — truncate is the one that was missed.
+
+**Proposed fix** — check the mode in the generic layer, before the adapter is called:
+
+```diff
+--- a/src/fm_file.c
++++ b/src/fm_file.c
+@@ -1324,6 +1324,13 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
+     {
+         return FM_ERR_INVALID_ARGUMENT;
+     }
++    /* Truncating is a write: refuse it before the adapter sees it.  The
++     * adapters disagree otherwise (FMFS: FM_ERR_ACCESS, POSIX: FM_ERR_IO
++     * from ftruncate(EINVAL), littlefs: LFS_ASSERT -> abort). */
++    if (!(f->mode & FM_OPEN_WRITE))
++    {
++        return FM_ERR_ACCESS;
++    }
+     if (f->fs->ops.file_truncate == NULL)
+     {
+         return FM_ERR_UNSUPPORTED;
+```
+
+An adapter-side belt-and-braces variant (`if (!(mode & FM_OPEN_WRITE)) return FM_ERR_ACCESS;` inside
+`lfs_fs_file_truncate`) is also worth having for callers that use `FS_*` directly; the generic check
+alone fixes the public API.
+
+**Tested?** yes. With the patch: `File_Truncate returned -4 (access denied)`, exit 0, no assertion.
+Full suite: 358/358 (see §4.8).
+
+**Affected configurations:** every build with `FM_USE_LITTLEFS=1` (i.e. every real target, since LittleFS
+is the persistent backend) — any caller that opens `FM_OPEN_READ` and truncates.
+
+---
+
+### 4.2 FILE-02 — `File_Append()` uses a stale size and overwrites data
+
+**Severity:** S1 (silent data loss in normal multi-handle use)
+
+**Where:** `src/fm_file.c:1233-1255`
+
+```c
+FM_Result File_Append(FM_File *f, const void *buf, uint32_t len, uint32_t *written)
+{
+    ...
+    if (f->fs->ops.file_seek != NULL)
+    {
+        r = fop_seek(f, (int64_t)f->size, FM_SEEK_SET);   /* line 1248 */
+        if (r != FM_OK) { return r; }
+        f->pos = f->size;
+    }
+    return File_Write(f, buf, len, written);
+}
+```
+
+`f->size` is a **handle-local snapshot**, refreshed only at open, at `File_Size`, at `File_Write`
+and at `File_Truncate`. Anything that grows the file through *another* handle is invisible.
+
+**How to reproduce** (`audit/harness/append_clobber.c`, Appendix B.2): write `"AAAA"`, open the file
+`FM_OPEN_WRITE|FM_OPEN_APPEND` (the handle records size 4), grow the file to 8 bytes through
+`File_WriteAll("AAAAAAAA", 8)`, then `File_Append(h, "B", 1)`.
+
+**Output (unmodified library):**
+
+```
+other handle grew the file -> OK
+File_Append("B") -> OK, written=1
+size=8 read=8 bytes: 41 41 41 41 42 41 41 41
+  expected 9 bytes: 41 41 41 41 41 41 41 41 42  ("AAAAAAAAB")
+```
+
+**Expected:** 9 bytes, `"AAAAAAAAB"`, size 9.
+**Observed:** `FM_OK`, `written = 1`, file still 8 bytes, the new byte written at offset 4 and the
+byte that was there destroyed. The caller has no way to know.
+
+The same defect appears twice in the differential run (Appendix D), which makes it a property of the
+API layer, not of one backend:
+
+* two handles appending 4 bytes each: FMFS ends with **8** bytes `3131313133333333` — the second
+  handle's `"2222"` was overwritten; POSIX ends with **12** bytes `31313131313232323233333333`
+  (correct), because `O_APPEND` makes the `lseek` irrelevant;
+* `File_Append` after an external grow: FMFS 8 bytes `4141414142414141` (wrong), POSIX 9 bytes
+  (correct).
+
+So the bug is *masked* on POSIX by `O_APPEND` and *visible* on FMFS and LittleFS (whose append flag
+only positions the handle at open). It is exactly the "works on the host, loses data on the target"
+class.
+
+**Root cause:** `File_Append` computes the append offset itself instead of asking the backend where
+the end of file is; `f->size` is not a cache of the file's real size (nothing invalidates it when
+another handle writes), so the seek lands in the middle of the file.
+
+**Proposed fix:**
+
+```diff
+--- a/src/fm_file.c
++++ b/src/fm_file.c
+@@ -1245,6 +1245,22 @@ FM_Result File_Append(FM_File *f, const void *buf, uint32_t len,
+     }
+     if (f->fs->ops.file_seek != NULL)
+     {
++        /* f->size is only the snapshot taken when the handle was opened
++         * (or the last File_Size/File_Write).  Another handle -- a second
++         * task, the logger, File_AppendAll -- may have grown the file
++         * since; appending at the stale offset would overwrite its data
++         * and still return FM_OK.  Ask the backend, and use its
++         * end-of-file position as the anchor. */
++        if (f->fs->ops.file_size != NULL)
++        {
++            uint64_t size = 0;
++            FM_Result rs = fop_size(f, &size);
++
++            if (rs == FM_OK)
++            {
++                f->size = size;
++            }
++        }
+         r = fop_seek(f, (int64_t)f->size,
+                                  FM_SEEK_SET);
+         if (r != FM_OK)
+```
+
+(A stronger variant is to stop seeking at all and let the adapter honour its append flag; that
+requires every adapter to implement `O_APPEND` semantics, which today only POSIX does. The
+refresh-and-seek fix keeps one code path and makes all backends agree.)
+
+**Tested?** yes. With the patch the reproducer prints `size=9 read=9 bytes: 41 41 41 41 41 41 41 41 42`;
+suite 358/358.
+
+**Affected configurations:** all. Reachable whenever a file is open with `FM_OPEN_APPEND` while
+something else grows it — two tasks, a logger plus an application write, or `File_SafeAppend` on a
+file that `File_AppendAll` also touches.
+
+---
+
+### 4.3 FILE-03 — FatFS adapter moves the file position on `truncate`
+
+**Severity:** S2 (wrong reads after a truncate; no crash, no data loss)
+
+**Where:** `backends/fm_fatfs.c:526-539`
+
+```c
+static FM_Result fatfs_file_truncate(FM_FS *fs, void *fh, uint64_t size)
+{
+    FatFSFileHandle *h = (FatFSFileHandle *)fh;
+    FRESULT fr;
+
+    if (fh == NULL || !h->used) return FM_ERR_NOT_OPEN;
+    fr = f_lseek(ctx->files[h->index], (FSIZE_t)size);
+    if (fr != FR_OK) return fatfs_map_err(fr);
+    return fatfs_map_err(f_truncate(ctx->files[h->index]));
+}
+```
+
+`f_lseek()` **moves the file position** (and, on a writable handle, extends the file), then
+`f_truncate()` cuts at that position. The position is never restored, and
+`File_Truncate` (`src/fm_file.c:1336-1340`) only clamps `f->pos` downwards — it never re-reads the
+backend position — so the two views stay out of step.
+
+**How to reproduce** (`audit/harness/fatfs_trunc_pos.c`, Appendix B.3) — the shipped FatFS host
+mock (`test/fatfs_mock/ff_mock.c`) reproduces FatFS's documented behaviour:
+
+```sh
+gcc -std=gnu99 -O1 -g -fsanitize=address,undefined -D_GNU_SOURCE -DFM_HOST_BUILD=1 \
+    -DFM_USE_FATFS=1 -DFM_FATFS_PROVIDE_DISKIO=0 -DFM_USE_CACHE=0 \
+    -DFM_USE_POSIX=0 -DFM_USE_LITTLEFS=0 -DFM_INTERNAL_BUFFER_SIZE=4096 \
+    -I. -Iinclude -Ibackends -Isrc -Itest/fatfs_mock -o /tmp/fatfs_trunc_pos \
+    audit/harness/fatfs_trunc_pos.c backends/fm_fatfs.c test/fatfs_mock/ff_mock.c \
+    libfilemanager.a -lm
+/tmp/fatfs_trunc_pos
+```
+
+**Output (unmodified library):**
+
+```
+truncate(16) from pos 4 -> OK
+File_Tell          = 16 (expected 4)
+File_Read 6        -> end of file, got=0, bytes='' (expected '456789')
+```
+
+**Expected:** position 4 after the truncate (POSIX `ftruncate()` does not move the file offset, and
+the RAM-disk/FMFS/LittleFS adapters do not either); the next read returns `"456789"`.
+**Observed:** position 16, the next read returns `FM_ERR_EOF` and 0 bytes — data the caller has not
+read yet becomes unreachable without any error.
+
+**Root cause:** the adapter implements truncate as "seek to the new size, then truncate" (the standard
+FatFS idiom) but forgets that `f_lseek` has a side effect on the file pointer. The generic layer does
+not compensate: `File_Truncate` clamps `f->pos` but `File_Tell`/`File_Read` go to the backend, so the
+two disagree.
+
+**Proposed fix** (save and restore the position, and do not restore it past the new EOF):
+
+```diff
+--- a/backends/fm_fatfs.c
++++ b/backends/fm_fatfs.c
+@@ -529,10 +529,21 @@ static FM_Result fatfs_file_truncate(FM_FS *fs, void *fh, uint64_t size)
+     FatFSFileHandle *h = (FatFSFileHandle *)fh;
+     FRESULT fr;
+ 
++    FSIZE_t back;
++
+     if (fh == NULL || !h->used) return FM_ERR_NOT_OPEN;
++    /* f_lseek() moves the file position (and, in write mode, extends the
++     * file); ftruncate() then cuts at that position.  Restore the
++     * position afterwards: a truncate must not move it (POSIX ftruncate
++     * does not, and neither do the other adapters). */
++    back = f_tell(ctx->files[h->index]);
+     fr = f_lseek(ctx->files[h->index], (FSIZE_t)size);
+     if (fr != FR_OK) return fatfs_map_err(fr);
+-    return fatfs_map_err(f_truncate(ctx->files[h->index]));
++    fr = f_truncate(ctx->files[h->index]);
++    if (fr != FR_OK) return fatfs_map_err(fr);
++    if (back > (FSIZE_t)size) back = (FSIZE_t)size;
++    fr = f_lseek(ctx->files[h->index], back);
++    return fatfs_map_err(fr);
+ }
+```
+
+**Tested?** yes. With the patch: `File_Tell = 4`, `File_Read 6 -> OK, got=6, bytes='456789'`.
+
+**Affected configurations:** `FM_USE_FATFS=1`. (The other adapters were checked for the same
+mistake: FMFS and littlefs keep the position in the handle and `posix` uses `ftruncate(2)`, which
+leaves it alone — no equivalent defect there.)
+
+---
+
+### 4.4 FILE-04 — `Text_ReadLine()` deletes every CR, and `Text_Replace()` makes that permanent
+
+**Severity:** S2 (silent, irreversible corruption of files that contain a CR not followed by LF)
+
+**Where:** `src/fm_text.c:58-61` in `Text_ReadLine()`; the rewrite happens in `Text_Replace()`
+(and `Text_InsertLine`, `Text_DeleteLine`, which use the same temp-file-and-rename path)
+
+```c
+        if (c == '\r')
+        {
+            continue; /* strip CR (CRLF files) */
+        }
+```
+
+**How to reproduce** (`audit/harness/text_cr.c`, Appendix B.4): a 22-byte file
+`one\r\ntwo\rXthree\nfour\r\n` — note the CR in the middle of line 2 (a legacy-Mac line ending, or
+binary-ish text) — read the lines, then call `Text_Replace()` with a needle that does **not** occur.
+
+**Output (unmodified library):**
+
+```
+line (3): 'one'
+line (9): 'twoXthree'          <- the CR in the middle is gone
+line (4): 'four'
+Text_Replace (no match) -> OK
+file after the rewrite (19 bytes): 6F 6E 65 0A 74 77 6F 58 74 68 72 65 65 0A 66 6F 75 72 0A
+```
+
+Original 22 bytes were `6F 6E 65 0D 0A 74 77 6F 0D 58 74 68 72 65 65 0A 66 6F 75 72 0D 0A` — the
+call that changed nothing replaced the file with a 19-byte version in which the middle CR is gone.
+
+**Expected:** only the CR of a CRLF pair is stripped (that is what the header documents and what the
+comment claims); a CR anywhere else is data and survives. After the "no match" replace the file must
+be semantically unchanged.
+**Observed:** every CR is deleted on read, and because `Text_Replace` always writes a new
+`<path>.fm_tmp` and renames it over the original — even when `old_sub` was never found — the deleted
+bytes are gone from the file on disk. A CRLF file is normalised to LF (documented), but a file that
+uses lone CR as a line separator (classic Mac) is turned into one long line, and a text file with an
+embedded CR (e.g. a Word/RTF fragment, a config value containing a control character) is silently
+modified.
+
+**Root cause:** the filter is applied to the character stream instead of to the line terminator. The
+loop is "read a byte, drop it if it is CR", so the position of the CR relative to the LF is never
+considered. The write side has no way to restore the byte, because the line buffer no longer
+contains it.
+
+**Proposed fix** (a CR is dropped only when it is the last byte of the line):
+
+```diff
+--- a/src/fm_text.c
++++ b/src/fm_text.c
+@@ -20,6 +20,7 @@ FM_Result Text_ReadLine(FM_File *f, char *line, size_t line_size,
+     size_t n = 0;
+     FM_Bool overflow = FM_FALSE;
+     FM_Bool had_data = FM_FALSE;
++    FM_Bool pending_cr = FM_FALSE;
+@@ -57,7 +58,20 @@ FM_Result Text_ReadLine(FM_File *f, char *line, size_t line_size,
+         }
+         if (c == '\r')
+         {
++            /* A CR is dropped only as the last character of the line
++             * (CRLF); one in the middle is data and must survive -- a
++             * rewrite of the file (Text_Replace / Text_InsertLine) would
++             * otherwise silently delete it. */
++            pending_cr = FM_TRUE;
+             continue;
+         }
++        if (pending_cr)
++        {
++            if (n + 1 < line_size)
++            {
++                line[n++] = '\r';
++            }
++            pending_cr = FM_FALSE;
++        }
+         if (n + 1 < line_size)
+         {
+             line[n++] = c;
+@@ -68,6 +82,8 @@ FM_Result Text_ReadLine(FM_File *f, char *line, size_t line_size,
+             overflow = FM_TRUE;
+         }
+     }
++    /* a CR that is still pending here ended the line: CRLF, or a lone
++     * CR at EOF -- that is the trailing one the header says is stripped */
+     line[n] = '\0';
+```
+
+**Tested?** yes. With the patch the lines read back as `'one'`, `'two\rXthree'`, `'four'` and the
+no-match replace rewrites 20 bytes (`6F 6E 65 0A 74 77 6F 0D 58 74 68 72 65 65 0A 66 6F 75 72 0A`) —
+only the documented CRLF→LF normalisation, the embedded CR is intact.
+
+**Affected configurations:** every build with `FM_USE_TEXT=1`; any file whose lines contain a CR that
+is not immediately before an LF.
+
+Side observation, same area, not counted separately: `Text_Replace()` retypes the whole file even
+when nothing matched, which is what turns a read-side quirk into on-disk corruption. Making the
+rewrite skip the rename when `replaced == 0` would remove the amplification, but it is not required
+by this finding.
+
+---
+
+### 4.5 FILE-05 — `Stream_InitFile()` leaks a file-pool slot; the stream is never readable
+
+**Severity:** S3 (4 file-streams per boot, then `FM_ERR_NO_MEMORY`; none of them is ever readable)
+
+**Where:** `src/fm_stream.c:126-165` (`Stream_InitFile`), helpers `stream_find` / `stream_is_bound`
+
+```c
+FM_Result Stream_InitFile(FM_Stream *s, FM_File *f)
+{
+    ...
+    if (stream_is_bound(s))            /* dead for file streams: nothing ever */
+    {                                  /* writes the pointer it checks       */
+        return FM_ERR_BUSY;
+    }
+    ...
+    for (i = 0; i < FM_STREAM_POOL; i++)          /* FM_STREAM_POOL == 4 */
+    {
+        if (!g_file_pool[i].busy)
+        {
+            ctx = &g_file_pool[i];
+            ctx->busy = FM_TRUE;
+                    break;                 /* ctx->stream is never set */
+        }
+    }
+```
+
+**How to reproduce** (`audit/harness/stream_leak.c`, Appendix B.5): six
+`Stream_InitFile(&s, f)` calls on the *same* `FM_Stream` object around one open file, a `Stream_Read`,
+then one `Stream_Close` and one more init.
+
+**Output (unmodified library):**
+
+```
+Stream_InitFile #1 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #2 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #3 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #4 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #5 on the same FM_Stream -> -14 (out of memory)
+read after the 5th init: -1, 0 bytes
+init after one Stream_Close: -14 (out of memory)
+```
+
+**Expected:** the slot is bound to the stream, `Stream_Read` returns data, and a close gives the slot
+back (the pool has `FM_STREAM_POOL` = 4 entries and only one was used).
+**Observed:** slot 0 is marked busy with `ctx->stream == NULL`, so `stream_find()` never finds the
+stream — every `Stream_Read`/`Stream_Write` on it fails with `FM_ERR_INVALID_ARGUMENT` — and
+`stream_release()` never matches, so the slot is gone for the rest of the boot. Four init attempts
+exhaust the pool, and closing does not give anything back.
+
+**Root cause:** the slot allocation in `Stream_InitFile` sets `busy` but never writes the
+back-pointer the rest of the module keys on:
+
+```c
+            ctx = &g_file_pool[i];
+            ctx->busy = FM_TRUE;
+                    break;
+```
+
+while the release side clears exactly that field, so it can never find the slot again:
+
+```c
+static void fs_close(FM_Stream *s)
+{
+    ...
+    c->stream = NULL;
+    c->file = NULL;
+    c->owner = FM_FALSE;
+    c->busy = FM_FALSE;          /* never reached for a slot with stream == NULL */
+```
+
+`stream_is_bound()`/`stream_find()` compare `ctx->stream == s`, which can never be true. The module
+was written to rely on that pointer — `Stream_InitFile` itself guards against double init with
+"`Re-initializing an open stream would leak the occupied context slot` → `FM_ERR_BUSY`", and the
+memory-stream twin does it correctly just below:
+
+```c
+static FM_MemStreamCtx *mem_acquire(FM_Stream *s)
+{
+    ...
+        g_mem_pool[i].busy = FM_TRUE;
+        g_mem_pool[i].stream = s;          /* file streams: this line is missing */
+```
+
+so the guard is dead code for file streams and the `break` that should follow the assignment has
+kept its odd indentation — the line was most likely lost in an edit.
+
+**Proposed fix:**
+
+```diff
+--- a/src/fm_stream.c
++++ b/src/fm_stream.c
+@@ -146,7 +146,8 @@ FM_Result Stream_InitFile(FM_Stream *s, FM_File *f)
+         {
+             ctx = &g_file_pool[i];
+             ctx->busy = FM_TRUE;
+-                    break;
++            ctx->stream = s;    /* what stream_is_bound() looks for */
++            break;
+         }
+     }
+```
+
+**Tested?** yes. With the patch: init #2 on the *same* stream returns `-8 busy` (correct), the read
+returns 5 bytes, and an init after `Stream_Close` succeeds again — the slot is released.
+
+**Affected configurations:** `FM_USE_STREAM=1`; every stream in the program, from the first one.
+
+---
+
+### 4.6 FILE-06 — the POSIX adapter opens a directory as a file
+
+**Severity:** S3 (contract violation, host backend only — but it makes the host backend a bad oracle)
+
+**Where:** `backends/fm_posix_fs.c:112-121` (`posix_file_open`)
+
+```c
+    path = strip_slash(path);
+    fd = open(path, open_flags(mode), 0644);
+    if (fd < 0) { return sys2fm(errno); }
+```
+
+**How to reproduce:** the differential harness, `diff_backends posix` (Appendix B.6), check
+"open(read) directory" after `mkdir /d`:
+
+```
+FMFS   : open(read) directory    -22  is a directory
+POSIX  : open(read) directory      0  OK
+```
+
+**Expected:** `FM_ERR_IS_DIRECTORY` (-22) — `open(2)` on a directory succeeds on Linux and
+`File_Open` then hands out a handle whose reads fail with `EISDIR`, i.e. an error at the wrong layer.
+**Observed:** `FM_OK` and a live handle for a directory; the following `File_Read` returns `-6`
+instead of the documented `-22` at open time.
+
+**Root cause:** `open()` is used as the existence/type test; POSIX `open()` does not refuse
+directories in read mode. Every other backend rejects a directory in `file_open`.
+
+**Proposed fix:**
+
+```diff
+--- a/backends/fm_posix_fs.c
++++ b/backends/fm_posix_fs.c
+@@ -118,6 +118,17 @@ static FM_Result posix_file_open(FM_FS *fs, void *fh, const char *path,
+     path = strip_slash(path);
+     fd = open(path, open_flags(mode), 0644);
+     if (fd < 0) { return sys2fm(errno); }
++    /* open(2) on a directory succeeds; every backend must report a
++     * directory as FM_ERR_IS_DIRECTORY (the file API never opens one). */
++    {
++        struct stat sb;
++
++        if (fstat(fd, &sb) == 0 && S_ISDIR(sb.st_mode))
++        {
++            (void)close(fd);
++            return FM_ERR_IS_DIRECTORY;
++        }
++    }
+     pf->fd = fd;
+```
+
+**Tested?** yes — the check now reports `-22 is a directory` on POSIX, matching FMFS.
+
+**Affected configurations:** `FM_USE_POSIX=1` (host/test builds).
+
+---
+
+### 4.7 FILE-07 — `FM_DEBUG_LEVEL=0` does not compile
+
+**Severity:** S4 (build defect; no runtime effect, but it breaks a documented configuration)
+
+**Where:** `src/fm_storage.c:329` (`storage_mount_locked`: `name` is used only in an `FM_ERR_LOG`
+that expands to nothing at `FM_DEBUG_OFF`), `src/fm_file.c:756` (`File_PoolDump` calls `FM_Log`,
+whose prototype is only pulled in by `fm_debug.h` when `FM_DEBUG_LEVEL > FM_DEBUG_OFF`)
+
+**How to reproduce:**
+
+```sh
+cd FileManager_lib && make clean
+make libfilemanager.a CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=0 -Werror"
+```
+
+**Output:**
+
+```
+src/fm_storage.c:329:66: error: unused parameter 'name' [-Werror=unused-parameter]
+src/fm_file.c:756:5: error: implicit declaration of function 'FM_Log' [-Werror=implicit-function-declaration]
+src/fm_file.c:756:5: error: incompatible implicit declaration of function 'FM_Log'
+make: *** [Makefile:...: ...] Error 2            [rc=2]
+```
+
+**Expected:** the library builds with logging compiled out — `fm_debug.h` documents `FM_DEBUG_OFF`
+as "nothing at all is logged, the logging code is not compiled" and the project's own build matrix
+uses `-Werror`.
+
+**Observed:** two errors. Without `-Werror` they are warnings on GCC 12, but
+`-Wimplicit-function-declaration` is an *error* by default from GCC 14 / C23 on, so the defect
+becomes fatal for every user on a newer toolchain as well.
+
+**Root cause:** the logging macros are configuration-dependent, but two call sites are not:
+`FM_ERR_LOG` disappears with its only use of `name`, and `FM_Log` (`src/fm_logger.c`) is a public
+function whose declaration is only reachable through the debug header's conditional include.
+
+**Proposed fix:**
+
+```diff
+--- a/src/fm_storage.c
++++ b/src/fm_storage.c
+@@ -330,6 +330,9 @@ static FM_Result storage_mount_locked(FM_Storage *s, const char *name)
+ {
+     FM_Result r;
+ 
++    (void)name;     /* used only by the FM_ERR_LOG below, compiled out at
++                     * FM_DEBUG_LEVEL == FM_DEBUG_OFF */
++
+     if (!FM_Storage_IsPresent(s))
+
+--- a/src/fm_file.c
++++ b/src/fm_file.c
+@@ -5,6 +5,7 @@
+ #define FM_DEBUG_TAG "file"
+ #include "fm_debug.h"
++#include "fm_log.h"     /* FM_Log is called even when logging is off */
+ #include "fm_internal.h"
+ #include "fm_cache.h"
+```
+
+**Tested?** yes — `make libfilemanager.a CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=0 -Werror"` now returns 0,
+and the default build still passes 358/358.
+
+**Affected configurations:** any build that sets `FM_DEBUG_LEVEL=0`.
+
+---
+
+### 4.8 Verification of the proposed diffs together
+
+All seven patches were applied to a copy of the tree (`audit/libfix`, `audit/libdbg`) and the
+suite was re-run:
+
+```
+make clean && make -j2 fm_test && ./fm_test
+  Results: 358/358 passed, 0 failures
+```
+
+Each reproducer was re-run against the patched build and now prints the "expected" result quoted in
+its section above (FILE-01: `-4`; FILE-02: 9 bytes; FILE-03: position 4, `456789`; FILE-04: embedded
+CR kept; FILE-05: `-8` then a working stream; FILE-06: `-22`; FILE-07: rc=0).
+
+---
+
+## 5. Suspicions (read-only, not reproduced)
+
+These are beliefs from reading the code. They are **not** counted as findings and no severity is
+claimed for them.
+
+**SUSP-01 — the worst-case stack of the recursive tree walks is far above a typical 2–4 KB task stack.**
+`-fstack-usage` on the shipping flags gives `dir_copy_recursive` 1632 B, `scan_recursive`
+(→ `Directory_Size`) 1184 B and `delete_recursive` 848 B per level, and `FM_DIR_MAX_DEPTH` is 16, so
+`Directory_Copy` of a 16-deep tree needs ≈26 KB of stack by the static numbers, and `Directory_Copy`
+also holds a second `FM_Dir`/`FM_Path` per level. `Path_Normalize` alone is 1368 B and is on the
+open/create path of every call.
+*What I could measure:* a 16-deep tree on the POSIX backend really is 16 levels deep
+(`audit/harness/depth_check.c` shows `count /d -> 1`, `/d/d/d` exists, and
+`Directory_DeleteRecursive` removes it), and `pthread_attr_setstacksize` bisection showed that 16 KiB
+is enough on x86-64 at `-O2` for all three walks (8 KiB is refused by glibc, so smaller stacks could
+not be tested). A painted-stack measurement (`audit/harness/stack_measure.c`) reported ~9 KB for both
+depth 1 and depth 16, which contradicts the `-fstack-usage` numbers and my own control experiment —
+I could not reconcile the two, so I do not claim a crash. **This needs a target measurement, not a
+host one.** If the numbers hold, `Directory_Copy`/`Directory_Size`/`Directory_DeleteRecursive` on a
+deep `USB`/`SD` tree overrun a 2 KB FreeRTOS task stack.
+
+**SUSP-02 — `File_SafeReplace()` ignores the close error and renames anyway.**
+`src/fm_safe.c`: the temp file is written, then `( void)File_Close(tmp)`, then
+`File_Rename(tmp, path)`. On FatFS `f_close()` is where dirty data is flushed and where a media error
+(`FR_DISK_ERR`) is reported; discarding it means a half-written temp can replace a good file and the
+call still returns `FM_OK`. Unreachable on the in-memory/posix backends (their close cannot fail),
+which is why it stays a suspicion — it needs a real card.
+
+**SUSP-03 — `Explorer_Load()` truncates a directory listing silently.**
+`src/fm_explorer.c`: the loop `break`s when `item_count == FM_MAX_EXPLORER_ITEMS` and returns
+`FM_OK`; the caller cannot tell a full directory from a 200-entry one, and `Explorer_Up`/scroll then
+work on a partial listing. Not a crash, but a UI that lies; a `FM_ERR_TOO_LARGE` (or a "truncated"
+flag) is the usual fix. Also in the same file: `Explorer_Enter()` pushes a history entry only while
+`depth < FM_EXPLORER_MAX_DEPTH` but still enters the directory, so at the limit `Explorer_Back()`
+cannot return where it came from.
+
+**SUSP-04 — `File_Transaction()` deletes the backup after a failed rollback.**
+`src/fm_safe.c`: on failure it copies `.fm_tmp.bak` back and then deletes the backup unconditionally
+(`(void)File_Delete(bak)`); if the restore copy itself fails (full volume, card removed) the backup —
+the only remaining copy — is deleted. Low likelihood, high cost.
+
+---
+
+## 6. Examined and found sound
+
+Things I looked at hard and could not break. Recorded so the next auditor does not repeat them.
+
+* **FMFS on-disk handling.** 800 000 random images through `mount` and subsequent operations, with
+  the RAM driver bounds-checked after every callback: no access outside the volume, no hang, no
+  sanitizer report. Header/record/journal parsing (`FMJ1`, CRC-32, v1 32-byte and v2 64-byte
+  headers, `FM_PATH_MAX+20`-byte records) survives truncation, garbage, and all-`0xFF`/all-zero
+  volumes.
+* **FMFS state machine.** 36 configurations × 400 operations with a model checked after every
+  operation and after remount: sizes, contents, listings and on-disk state all matched, including
+  delete-while-open, rename-into/near, repack and nearly-full volumes.
+* **Read cache.** `cache_invalidate_same_file` / `cache_invalidate_path` are keyed
+  (mount, relative path, case-insensitive) and are called from every mutating path I found
+  (delete, rename, truncate, open-with-truncate, write-through); `cache_fill` invalidates on EOF and
+  on hard errors. No stale-data case could be constructed.
+* **Path handling.** `Path_Normalize`/`Path_Join` bound every component by `FM_PATH_MAX`, reject
+  `.`/`..` escapes, and never leave an unterminated buffer; the 16-deep limit is enforced
+  consistently in `Directory_*`, `File_*` and the backends.
+* **Directory listing.** Names are copied with bounded lengths in every backend; `Directory_Read`
+  cannot leak a pool slot (the suite has a dedicated test for `Directory_Open(NULL)`).
+* **JSON.** 1.2 M mutated/adversarial inputs (random bytes, truncated tokens, 200-deep nesting,
+  random buffer caps for the writer): strict rejection of malformed input, no stack overflow, no
+  crash. The parser's recursion is bounded by the nesting check, unlike the
+  directory walks.
+* **Allocator.** `FM_Alloc_FailureCount`, `FM_ReallocSized` without a realloc hook, and the "free
+  after failure" paths behave; the suite's allocator tests cover the exhaustion cases.
+* **Mount registry.** `FM_MAX_FS` bounds are checked everywhere; `FS_Unmount` with open handles
+  returns `FM_ERR_BUSY`, mounting an already-mounted storage is idempotent, and the "init'd but never
+  mounted" case is the documented limit (not counted).
+* **FatFS adapter flags mapping** (`fatfs_flags`): create/truncate/append map to `FA_*` correctly,
+  and `fatfs_file_read`'s `FM_ERR_EOF` on `rd==0` matches the API contract.
+
+---
+
+## 7. Not examined
+
+* `fm_binary.c`, `fm_crc.c`, `fm_async.c`, `fm_transfer.c`, `fm_log.c`, and the remaining half of
+  `fm_json.c`, `fm_logger.c` and `fm_storage.c` — read only in outline, no harness.
+* Concurrency: everything was built with `FM_USE_THREADS=0`, so no lock, pin or re-entry path was
+  exercised. The library's own TSan claim was not re-run.
+* Power-fail behaviour beyond the existing suite (no second campaign was written, see §2.4).
+* LittleFS internals beyond the truncate/read/write asserts and the directory-pool glue.
+* `test/vectors/` media decoders (images/audio) — outside the files/storage scope.
+
+## 8. Outside my scope (one line each)
+
+* Image/audio/video decoders (`picojpeg`, `minimp3`, `dr_flac`, `h264bsd`) — media, not storage.
+* Tier-3 hardware drivers (`fm_eeprom*`, `fm_qspi`, `fm_spiflash`, `fm_sd_hal`, `fm_usb_msc`) — no
+  hardware, and the brief asks for reading only; I did not get to them.
+* The build system, CI workflows and the `audit_prompts/` texts.
+* Performance, footprint and wear-levelling characteristics (documented limits, not defects).
+* The Persian/English documentation's accuracy, except where a header's documented behaviour was the
+  "expected" side of a finding (FILE-04).
+
+---
+
+## Appendix A — build recipe
+
+The abbreviated `$CFLAGS_ASAN` used everywhere below (one line per `-I`, one per `-D`):
+
+```sh
+CFLAGS_ASAN="-Iinclude -Ibackends -Isrc -Ithird_party/littlefs -Ithird_party/h264bsd/src \
+ -Ithird_party/minimp3 -Ithird_party/picojpeg -Ithird_party/dr_flac -Ithird_party/stb \
+ -D_GNU_SOURCE -DFM_HOST_BUILD=1 -DFM_USE_POSIX=1 -DFM_USE_RAMDISK=1 -DFM_USE_FMFS=1 \
+ -DFM_USE_FATFS=0 -DFM_USE_LITTLEFS=1 -DFM_USE_MP3=1 -DFM_USE_EEPROM=1 -DFM_USE_USB_MSC=1 \
+ -DFM_USE_DEVICE_ADAPTERS=1 -DFM_USE_THREADS=0 -DFM_USE_JSON=1 -DFM_USE_TEXT=1 \
+ -DFM_USE_BINARY=1 -DFM_USE_DATA_LOGGER=1 -DFM_USE_EXPLORER=1 -DFM_USE_ASYNC=1 \
+ -DFM_USE_MEDIA_DETECT=1 -DFM_USE_SAFE_WRITE=1 -DFM_USE_CRC=1 -DFM_USE_STREAM=1 \
+ -DFM_USE_CACHE=1 -DFM_USE_PRINTF=1 -DFM_DEBUG=1 -std=c99 -O1 -g \
+ -fsanitize=address,undefined -fno-omit-frame-pointer"
+
+cd FileManager_lib && make clean && make -j2 libfilemanager.a CFLAGS="$CFLAGS_ASAN"
+
+# generic harness link line
+gcc -std=gnu99 -O1 -g -fsanitize=address,undefined -Iinclude -Ibackends -Isrc \
+    -o /tmp/harness harness.c libfilemanager.a -lm
+```
+
+`FM_DEBUG_LEVEL=0` must **not** be added to this line (see FILE-07), and `CFLAGS=` must never be
+passed without the full `-I` list.
+
+## Appendix B — harnesses
+
+All sources are attached next to this report in `audit/harness/`; the five longer ones (`fuzz_common.h`,
+`fmfs_mount_fuzz.c`, `fmfs_model.c`, `diff_backends.c`, `json_fuzz.c`) are listed with their build and
+run commands in `audit/harness/README.md`.
+
+### B.1 `lfs_trunc_crash.c` (FILE-01)
+
+```c
+/* Audit reproducer: File_Truncate on a read-only handle on LittleFS.
+ * Build:  see the report; links libfilemanager.a built with FM_USE_LITTLEFS=1. */
+#include <stdio.h>
+#include <string.h>
+#include "file_manager.h"
+#include "fm_littlefs.h"
+
+static uint8_t mem[256 * 1024];
+static FM_Storage st;
+static FM_FS fs;
+
+static FM_Result rd(FM_Storage *s, uint64_t off, void *buf, uint32_t len)
+{ (void)s; if (off > sizeof(mem) || len > sizeof(mem) - off) return FM_ERR_IO;
+  memcpy(buf, mem + off, len); return FM_OK; }
+static FM_Result wr(FM_Storage *s, uint64_t off, const void *buf, uint32_t len)
+{ (void)s; if (off > sizeof(mem) || len > sizeof(mem) - off) return FM_ERR_IO;
+  memcpy(mem + off, buf, len); return FM_OK; }
+static FM_Result er(FM_Storage *s, uint64_t off, uint32_t len)
+{ (void)s; if (off > sizeof(mem) || len > sizeof(mem) - off) return FM_ERR_IO;
+  memset(mem + off, 0xFF, len); return FM_OK; }
+static FM_Result sy(FM_Storage *s) { (void)s; return FM_OK; }
+
+int main(void)
+{
+    FM_File *f;
+    FM_Result r;
+
+    memset(mem, 0xFF, sizeof(mem));
+    if (FileManager_Init() != FM_OK) return 1;
+    memset(&st, 0, sizeof(st));
+    strcpy(st.name, "LFS");
+    st.type = FM_STORAGE_RAM;
+    st.capacity = sizeof(mem);
+    st.present = 1;
+    st.read = rd; st.write = wr; st.erase = er; st.sync = sy;
+    if (Storage_Register(&st) != FM_OK) return 1;
+    if (Storage_Mount("LFS") != FM_OK) return 1;
+    if (LittleFS_Init(&fs) != FM_OK) return 1;
+    r = FS_Mount("/", &fs);
+    if (r != FM_OK) { printf("mount: %s\n", FM_ResultString(r)); return 1; }
+
+    if (File_WriteAll("/x.txt", "0123456789", 10) != FM_OK)
+    { printf("write failed\n"); return 1; }
+
+    f = File_Open("/x.txt", FM_OPEN_READ);
+    if (f == NULL) { printf("open: %s\n", FM_ResultString(File_GetLastError())); return 1; }
+    printf("opened read-only; calling File_Truncate(f, 5)\n");
+    fflush(stdout);
+    r = File_Truncate(f, 5);
+    printf("File_Truncate returned %d (%s)\n", (int)r, FM_ResultString(r));
+    (void)File_Close(f);
+    return 0;
+}
+```
+
+Build/run as in §4.1. Unmodified: assertion + `Aborted (core dumped)`, exit 134.
+
+### B.2 `append_clobber.c` (FILE-02)
+
+```c
+/* Audit reproducer: File_Append() writes at the size the handle saw when it
+ * was opened, not at the current end of file.  If the file grew through
+ * another handle in the meantime, the append silently overwrites existing
+ * bytes and returns FM_OK.  Reproduced on FMFS (the backend's append flag
+ * only positions the handle at open). */
+#include "fuzz_common.h"
+
+static FM_FS g_fs;
+
+int main(void)
+{
+    FM_File *h;
+    uint8_t buf[32];
+    size_t got = 0, i;
+    uint32_t wr = 0;
+    uint64_t size = 0;
+    FM_Result r;
+
+    drv_reset(65536, 0, 0, FM_STORAGE_RAM);
+    memset(g_drv.mem, 0, 65536);
+    if (FileManager_Init() != FM_OK) return 1;
+    drv_register(); drv_mount();
+    if (FMFS_Init(&g_fs) != FM_OK || FS_Mount("/DRV", &g_fs) != FM_OK) return 1;
+
+    File_WriteAll("/DRV/ap2", "AAAA", 4);
+    h = File_Open("/DRV/ap2", FM_OPEN_WRITE | FM_OPEN_APPEND);
+    if (h == NULL) return 1;
+
+    /* the same file grows by 4 bytes through another handle */
+    r = File_WriteAll("/DRV/ap2", "AAAAAAAA", 8);
+    printf("other handle grew the file -> %s\n", FM_ResultString(r));
+
+    r = File_Append(h, "B", 1, &wr);
+    printf("File_Append(\"B\") -> %s, written=%u\n", FM_ResultString(r),
+           (unsigned)wr);
+    (void)File_Close(h);
+
+    (void)File_SizeOf("/DRV/ap2", &size);
+    r = File_ReadAll("/DRV/ap2", buf, sizeof(buf), &got);
+    printf("size=%llu read=%u bytes: ", (unsigned long long)size, (unsigned)got);
+    for (i = 0; i < got; i++) printf("%02X ", buf[i]);
+    printf("\n  expected 9 bytes: 41 41 41 41 41 41 41 41 42  (\"AAAAAAAAB\")\n");
+    return 0;
+}
+```
+
+`fuzz_common.h` is the 60-line helper header attached with the harnesses: a 256 KiB RAM
+driver (`g_drv`) that flags any access outside the volume, a fault-injection shim, and
+`drv_reset` / `drv_register` / `drv_mount` for FMFS.
+
+### B.3 `fatfs_trunc_pos.c` (FILE-03)
+
+Mounts the shipped mock (`test/fatfs_mock/ff_mock.c`) with `FatFS_Init(&fs, 0)` +
+`FS_Mount("/", &fs)` (the `FS_MountDefault` path returns `-11` in the mock), writes 10 bytes, seeks
+to 4, calls `File_Truncate(f, 16)`, then prints `File_Tell` and reads 6 bytes. Full source in
+`audit/harness/fatfs_trunc_pos.c`.
+
+### B.4 `text_cr.c` (FILE-04)
+
+Writes `"one\r\ntwo\rXthree\nfour\r\n"` (22 bytes), calls `Text_ReadLine` three times printing each
+line and its hex, then `Text_Replace("/t.txt", "ZZZ", "Y")` (a needle that does not occur) and dumps
+the file. Full source in `audit/harness/text_cr.c`.
+
+### B.5 `stream_leak.c` (FILE-05)
+
+Six `Stream_InitFile(&s, f)` calls on the same `FM_Stream` around one open file, a `Stream_Read`,
+one `Stream_Close`, one more init. Full source in `audit/harness/stream_leak.c`.
+
+### B.6 `diff_backends.c` (differential table)
+
+`./diff_backends {fmfs|lfs|posix}` — 36 identical API checks, one output line each
+(`<check> <code> <error string> <detail>`). The POSIX build must run in its own scratch directory
+(the adapter writes into the cwd). Full source in `audit/harness/diff_backends.c`; the raw tables are
+reproduced in Appendix D.
+
+## Appendix C — verbatim outputs
+
+```
+$ ./lfs_trunc_crash                       # unmodified
+opened read-only; calling File_Truncate(f, 5)
+lfs_trunc_crash: .../third_party/littlefs/lfs.c:3762: lfs_file_truncate_:
+    Assertion `(file->flags & LFS_O_WRONLY) == LFS_O_WRONLY' failed.
+Aborted (core dumped)                                             [134]
+
+$ ./append_clobber                        # unmodified
+other handle grew the file -> OK
+File_Append("B") -> OK, written=1
+size=8 read=8 bytes: 41 41 41 41 42 41 41 41
+  expected 9 bytes: 41 41 41 41 41 41 41 41 42  ("AAAAAAAAB")
+
+$ ./fatfs_trunc_pos                       # unmodified
+truncate(16) from pos 4 -> OK
+File_Tell          = 16 (expected 4)
+File_Read 6        -> end of file, got=0, bytes='' (expected '456789')
+
+$ ./text_cr                               # unmodified
+line (3): 'one'  hex=6F 6E 65
+line (9): 'twoXthree'  hex=74 77 6F 58 74 68 72 65 65
+line (4): 'four'  hex=66 6F 75 72
+Text_Replace (no match) -> OK
+file after the rewrite (19 bytes): 6F 6E 65 0A 74 77 6F 58 74 68 72 65 65 0A 66 6F 75 72 0A
+
+$ ./stream_leak                           # unmodified
+Stream_InitFile #1 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #2 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #3 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #4 on the same FM_Stream -> 0 (OK)
+Stream_InitFile #5 on the same FM_Stream -> -14 (out of memory)
+read after the 5th init: -1, 0 bytes
+init after one Stream_Close: -14 (out of memory)
+
+$ diff_backends posix | grep directory
+open(read) directory                       0   OK
+
+$ make libfilemanager.a CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=0 -Werror"
+src/fm_storage.c:329:66: error: unused parameter 'name' [-Werror=unused-parameter]
+src/fm_file.c:756:5: error: implicit declaration of function 'FM_Log' [-Werror=implicit-function-declaration]
+make: *** [Makefile:...] Error 2                                   [rc=2]
+```
+
+## Appendix D — differential table (raw, `diff_backends`)
+
+Only the rows where the backends disagree are shown; the full output is in `audit/harness/` run logs.
+
+| Check | FMFS | POSIX | LittleFS |
+|---|---|---|---|
+| truncate on read handle | `-4` access denied | `-6` I/O error | **assert → abort** (FILE-01) |
+| open(read) directory | `-22` is a directory | `0` OK (FILE-06) | not reached |
+| seek −1 SET | `-1` invalid argument | `-6` I/O error | not reached |
+| write after seek in append mode | `[5A6263]` (seek wins) | `[6162635A]` (append wins) | not reached |
+| two handles appending 4+4 bytes | 8 bytes, second lost (FILE-02) | 12 bytes (correct) | not reached |
+| `File_Append` after external grow | 8 bytes, byte lost (FILE-02) | 9 bytes (correct) | not reached |
+| read after delete of an open file | `-3` not found | `0`, returns stale data | not reached |
+| `File_Truncate` position after the call | unchanged | unchanged | n/a (aborts) |
+| `File_Truncate` on FatFS | — | — | position moves (FILE-03) |
+
+Two rows of the harness are **not** findings: "open until exhaustion" reports `opened=0` and
+"valid open after 20 000 failing opens" reports `-14` on all three backends, but both are artefacts
+of the harness leaving a handle open in an earlier check — the project's own suite covers exhaustion
+correctly. They are listed here so nobody re-reads them as defects.
+
+
+# Video-library audit
+
+## خلاصه به فارسی
+
+در commit `8dd0f25888a0ee2ae5157ebd4ef8285deb4fbded` یک نقص تأییدشده پیدا شد: parser فایل MP4 برای پیمایش boxهای تو‌در‌تو از بازگشت نامحدود استفاده می‌کند.
+ورودی MP4 خراب با nesting عمیق باعث تمام‌شدن stack و crash می‌شود؛ روی MCU با stack چندکیلوبایتی عمق بسیار کمتری برای وقوع آن کافی است.
+شدت: یک مورد S1 (crash)، و مورد تأییدشده دیگری گزارش نمی‌شود.
+برای بازتولید، یک فایل ۶٬۰۱۲ بایتی با ۷۵۰ box تو‌در‌توی `moov` و stack محدودشده به ۶۴ KiB ساخته شد؛ `Video_Open` با segmentation fault خاتمه یافت.
+تست پایه `make test` در host با ۳۵۸/۳۵۸ تست موفق اجرا شد، اما آن تست‌ها این ورودی nesting را ندارند.
+فاز fuzzing، مقایسهٔ مرجع و آزمون جامع کانتینرها/کدک‌ها انجام نشد؛ این گزارش ادعای پوشش آن‌ها را ندارد.
+ساخت ۳۲بیتی ممکن نبود، چون کتابخانه‌ها و startup objectهای multilib در محیط نصب نیستند.
+
+## Audit record
+
+- **Commit audited:** `8dd0f25888a0ee2ae5157ebd4ef8285deb4fbded` (requested short form: `8dd0f25`). The target commit was fetched read-only and extracted to a temporary directory; the repository's tracked files were not changed for the experiments. The video source files are unchanged from the target's parent commit.
+- **Host:** Linux `x86_64`, kernel `6.1.158`, 64-bit userspace.
+- **Compiler:** Debian GCC `12.2.0`.
+- **Build/test:** `cd Clain_FileManager/FileManager_lib && make test`; result: `358/358 passed, 0 failures`. The existing suite run is only a baseline, not evidence of parser fuzz coverage.
+- **Methods and time:** targeted source review of MP4 recursive box traversal and video parser entry points, plus a generated malformed-MP4 reproducer with a constrained process stack. Approximately 45 minutes of targeted audit and reproduction work; no fuzzer or differential tool was run.
+- **32-bit:** not possible. `cc -m32 /tmp/bit32.c -o /tmp/bit32` failed at link time because `Scrt1.o`, `crti.o`, `libgcc`, and `libgcc_s.so.1` were unavailable.
+- **Repository changes:** only this report is delivered. The test harness modification and generated input were local to the temporary audit checkout and are reproduced by the appendix below.
+
+## Findings table
+
+| ID | Severity | Title | Location | Status |
+|---|---|---|---|---|
+| VID-01 | S1 | Deeply nested MP4 container boxes exhaust the call stack in `Video_Open` | `src/fm_video.c:1383–1410` | Confirmed |
+
+## VID-01 — Unbounded recursive MP4 container traversal exhausts stack
+
+- **Severity:** S1 — crash / stack exhaustion.
+- **Where:** `Clain_FileManager/FileManager_lib/src/fm_video.c`, `mp4_find_deep()`, lines 1383–1410 at the audited commit. Line 1410 recursively calls the same function for every recognized container, including `moov` nested inside another `moov`.
+- **Status:** Confirmed.
+
+### How to reproduce
+
+The input is an MP4-shaped file consisting of a 12-byte `ftyp` box followed by 750 nested `moov` boxes. Each `moov` contains exactly one child `moov`; the innermost one has no payload. The generated file is 6,012 bytes. `Video_Open()` recognizes the `ftyp`, locates the outer `moov`, then descends through the nested boxes while looking for `trak`.
+
+The following is the `main()` used in the repository's existing host integration test harness. Replace the existing `main()` in `test/main.c` with it (the harness already defines `setup()`, and its normal includes define the FileManager/video APIs), then run the commands below. `depth` is an argument so a smaller, non-crashing control can also be tested.
+
+```c
+int main(int argc, char **argv)
+{
+    uint8_t *buf;
+    size_t n = 8;
+    uint32_t depth = (argc > 1) ? (uint32_t)atoi(argv[1]) : 750u;
+    uint32_t i;
+    FM_Video v;
+    FM_Result r;
+
+    setup();
+    buf = (uint8_t *)malloc((size_t)depth * 8u);
+    if (buf == NULL) return 2;
+    memset(buf, 0, (size_t)depth * 8u);
+    memcpy(buf + 4, "moov", 4);
+    for (i = 1; i < depth; ++i)
+    {
+        memmove(buf + 8, buf, n);
+        buf[0] = (uint8_t)((n + 8u) >> 24);
+        buf[1] = (uint8_t)((n + 8u) >> 16);
+        buf[2] = (uint8_t)((n + 8u) >> 8);
+        buf[3] = (uint8_t)(n + 8u);
+        memcpy(buf + 4, "moov", 4);
+        n += 8u;
+    }
+    {
+        uint8_t *full = (uint8_t *)malloc(n + 12u);
+        if (full == NULL) { free(buf); return 2; }
+        full[0] = 0; full[1] = 0; full[2] = 0; full[3] = 12;
+        memcpy(full + 4, "ftyp", 4);
+        memcpy(full + 8, "isom", 4);
+        memcpy(full + 12, buf, n);
+        r = File_WriteAll("/nested.mp4", full, n + 12u);
+        free(full);
+    }
+    printf("write=%d bytes=%lu\n", (int)r, (unsigned long)(n + 12u));
+    r = Video_Open("/nested.mp4", &v);
+    printf("open=%d\n", (int)r);
+    if (r == FM_OK) (void)Video_Close(&v);
+    free(buf);
+    return 0;
+}
+```
+
+Exact build and run (from `Clain_FileManager/FileManager_lib` in the temporary target checkout):
+
+```sh
+make fm_test
+(ulimit -s 64; ./fm_test 750)
+```
+
+Observed output from the constrained-stack run:
+
+```text
+Segmentation fault
+exit status: 139
+```
+
+Control: with `./fm_test 500` and the same 64 KiB stack limit, `Video_Open` returned `-17` (`FM_ERR_INVALID_FORMAT`) instead of crashing. At depth 750, it crashed during parsing. With an unconstrained host stack, depth 5,000 returned a normal invalid-format error; the reproduced failure therefore depends on stack capacity, as expected for MCU tasks with only a few kilobytes. This is a stack exhaustion, not an out-of-bounds memory access.
+
+### Expected and observed
+
+- **Expected:** reject excessive or structurally invalid nesting with an error and bounded stack use.
+- **Observed:** a small file with nested container boxes drives unbounded recursion and terminates the process with a segmentation fault when the stack is constrained. The same input is attacker-controlled when read from SD/USB.
+
+### Root cause
+
+`mp4_find_deep()` descends recursively at line 1410 whenever a box type is in the container allowlist. There is no depth limit or iterative traversal. MP4 box sizes bound the file reads but do not bound recursion depth: a file can contain thousands of tiny, valid-size `moov` boxes nested inside one another. Each level consumes another C stack frame. The embedded target's small task/exception stack makes this reachable with less nesting than the host reproducer.
+
+### Proposed fix (not tested)
+
+Bound traversal depth (and return `FM_ERR_CORRUPTED` when exceeded), or replace recursion with an explicitly bounded traversal stack. A depth cap of 16 is safely above the standard MP4 container hierarchy and prevents file-controlled stack growth. This proposed patch was **not** applied or tested.
+
+```diff
+--- a/src/fm_video.c
++++ b/src/fm_video.c
+@@
+-static FM_Result mp4_find_deep(FM_Video *v, uint64_t start, uint64_t end,
+-                               const char *wanted, Mp4Box *out)
++static FM_Result mp4_find_deep_at_depth(FM_Video *v, uint64_t start,
++                                        uint64_t end, const char *wanted,
++                                        Mp4Box *out, uint32_t depth)
+ {
+     uint64_t pos = start;
++
++    /* Container nesting comes from an untrusted file; bound stack use. */
++    if (depth > 16u)
++    {
++        return FM_ERR_CORRUPTED;
++    }
+@@
+-            r = mp4_find_deep(v, box.data, box.start + box.size, wanted, out);
++            r = mp4_find_deep_at_depth(v, box.data, box.start + box.size,
++                                       wanted, out, depth + 1u);
+@@
+     return FM_ERR_NOT_FOUND;
+ }
++
++static FM_Result mp4_find_deep(FM_Video *v, uint64_t start, uint64_t end,
++                               const char *wanted, Mp4Box *out)
++{
++    return mp4_find_deep_at_depth(v, start, end, wanted, out, 0u);
++}
+```
+
+- **Affected configurations:** all builds with `FM_USE_VIDEO` enabled that parse MP4/MOV. The issue is independent of decoder selection, operating system, and threading mode.
+
+## Suspicions
+
+None reported. I did not promote untriggered code-reading concerns to findings.
+
+## Examined and found sound
+
+- **MP4 recursive lookup:** inspected the container allowlist and reproduced unbounded nesting at `mp4_find_deep`; this is VID-01, not a sound result.
+- **Baseline public video tests:** the repository's regular host suite, including its existing video/MJPEG/player tests, passed 358/358. These tests establish a baseline only; they do not exercise the malformed deep-nesting case.
+- **32-bit behavior:** not examined through a 32-bit build because multilib linking is unavailable.
+
+## Not examined
+
+- No libFuzzer/AFL campaign, differential comparison, fuzz coverage measurement, or exhaustive truncation/fault-injection campaign.
+- The complete AVI, MP4/MOV, MKV/WebM, FLV, and FMRV malformed-input matrices; including timing and seeking comparisons against ffprobe/reference decoders.
+- H.264 allocation-failure matrix, profile/resolution-change cases, and pixel-format/capacity tests beyond the existing suite.
+- MJPEG truncation/variable-size/hardware-hook campaign beyond the existing suite.
+- Audio-in-video demux timing and seeking across long files; WAV/MP3/AAC/etc. decoder internals remain outside this audit scope.
+- Media-cache eviction/copy fault injection and the full player lifecycle/playlist failure matrix.
+- Target MCU stack usage under its actual compiler/linker configuration; host stack limiting demonstrated the recursive failure, but no STM32 build was available here.
+
+## Outside my scope
+
+- General file APIs and filesystem/backend correctness are assigned to the files/filesystems auditor; no finding is made here.
+- Still-image decoders and formats are assigned to the image auditor; no finding is made here.
+- Standalone audio decoders are assigned to the audio auditor; this audit covers only in-container audio demux, which was not exhaustively examined.
+
+
+
+
+
+
+# Audio subsystem audit — FileManager_lib
+Audited commit: `8dd0f25888a0ee2ae5157ebd4ef8285deb4fbded` (branch `arena/ba6a87b3-clain-filemanagaer`).
+Files in scope: `src/fm_audio.c`, `src/fm_flac.c`, `src/fm_vorbis.c`, `src/fm_opus.c`, `src/fm_player.c`, `src/fm_media.c`, `examples/audio_dma_player.h`, and the vendored decoders as they are reached through `Audio_Open`.
+Line numbers refer to that commit. The repository itself was not modified; every fix is a patch file.
+## خلاصه (فارسی)
+- **۳۰ یافته** ثبت شد؛ همه با اجرای واقعی بازتولید شده‌اند، نه فقط با خواندن کد.
+- **جدی‌ترین:** باز کردن یک فایل `.ogg` دست‌کاری‌شده (تغییر یک فیلد ۴ بایتی) باعث نوشتن خارج از بافر heap و کرش در `Audio_Open` می‌شود (F1). این را fuzzer پیدا کرد.
+- **پراثرترین در استفادهٔ عادی:** `Audio_Seek` روی فایل‌های MP3 معمولی (CBR 128k) همیشه خطای ‎−15‎ می‌دهد و یک فریم خراب، بقیهٔ آهنگ را قطع می‌کند (F2).
+- برای ۲۴ یافته وصلهٔ آزمایش‌شده آماده است: `fixes/all_fixes.patch`. با این وصله `make test` همچنان ‎358/358‎ است و خروجی فایل‌های سالم بیت‌به‌بیت تغییر نکرده.
+- ۶ یافته وصله ندارند (فقط پیشنهاد)؛ در جدول با «none» مشخص شده‌اند.
+- محدودیت: همه‌چیز روی x86 (۶۴ و ۳۲ بیتی) اجرا شد؛ روی ARM یا سخت‌افزار واقعی چیزی اجرا نشده است.
+## 1. Result
+- 30 findings, all reproduced by running code. 24 have a tested fix in `fixes/all_fixes.patch`; 6 have a proposal only.
+- With the full patch applied, `make test FM_USE_OPUS_LIB=1` still passes 358/358, and every valid test file decodes to the same bytes as before, except the three formats whose output the patch changes on purpose (A-law, stereo IMA ADPCM, MS ADPCM).
+- The patch applies cleanly with `git apply` both to `8dd0f25` and to the current checkout (`2ba7864`).
+Not covered: nothing was run on ARM or on real hardware (no ARM toolchain or emulator on the audit machine). Timings are x86 host timings. AAC was exercised with a stub decoder, so AAC framing was tested but AAC decoding quality was not. Storage was an in-memory backend and the POSIX backend, not FatFS.
+## 2. Findings at a glance
+| ID | Severity | Finding | Fix |
+|----|----------|---------|-----|
+| F1 | Critical | Crafted Ogg Vorbis comment header: heap overflow write, invalid `free`, NULL dereference in `Audio_Open` | tested |
+| F2 | High | MP3: seek fails on ordinary files; one damaged frame ends the track; non-MP3 data takes seconds to reject | tested |
+| F3 | High | WAV: stereo IMA ADPCM and MS ADPCM are accepted and decoded to noise | tested (now refused) |
+| F4 | High | Threads: static `g_wav_raw` shared by all streams without a lock; streams receive each other's samples | none (proposal) |
+| F5 | Medium | AAC: sample count from the decoder plug-in is not clamped; library memory is copied to the caller | tested |
+| F6 | Medium | MP3/AAC: I/O errors and decoder errors are reported as end of track | tested |
+| F7 | Medium | Opus 5.1 (multistream) is opened as stereo and decodes to noise | tested (now refused) |
+| F8 | Medium | `Player_GetDuration` is wrong for A-law, µ-law, IMA ADPCM, FLAC, Vorbis, Opus | tested |
+| F9 | Medium | `Audio_Seek` with NaN/infinity; 32-bit wrap sends a far seek back to the start | tested |
+| F10 | Medium | A-law decoder output has inverted polarity | tested |
+| F11 | Medium | `Audio_ReadMono` on more than 2 channels returns 3× the data, mislabelled | tested (now refused) |
+| F12 | Medium | `Audio_Read(count < channels)` reports end of file with data left; `Audio_Stream(chunk_samples=1)` returns OK and delivers nothing | tested |
+| F13 | Medium | Example DMA player: an odd half-buffer size ends a stereo track after one buffer | tested |
+| F14 | Medium | FLAC: allocation size is taken from the header (38 KB file → 160 MB request) | none (proposal) |
+| F15 | Low | IMA ADPCM: `*read` not written at end of data; `Audio_ReadFrame` returns an uninitialised count | tested |
+| F16 | Low | AAC: the decoder receives 7 zero bytes in place of the ADTS header | tested |
+| F17 | Low | AAC: decoder context leaks when a seek fails during open | tested |
+| F18 | Low | Vorbis: memory leak when the setup header is corrupt or truncated | tested |
+| F19 | Low | Opus: header output gain is ignored | none (proposal) |
+| F20 | Low | Chained Ogg (Vorbis and Opus): only the first link plays, no error | none (proposal) |
+| F21 | Low | MP3: Xing/Info frame decoded as audio; VBR without Xing has wrong duration and seek | none (proposal) |
+| F22 | Low | MP3 after the F2 fix: seek lands 45–118 ms late while `frame_index` reports the exact target | none (noted) |
+| F23 | Low | Recorder: a too-small `path_out` buffer leaves an empty `rec_NNNNNN.wav` on every call | tested |
+| F24 | Low | `Player_ScanFolder` lists `.m4a` (cannot be opened) and skips `.opus` | tested |
+| F25 | Low | Example DMA player: the "pre-gain" tap receives samples after the gain | tested |
+| F26 | Low | Media detection: UTF-16 text is detected as MP3; `.m4a`, `.opus`, `.oga`, `.wave` handling is inconsistent | none (proposal) |
+| F27 | Low | Seek accuracy on VBR MP3 with Xing: 38–56 ms late | none (noted) |
+| F28 | Info | README says "Dynamic allocation in the core: None"; FLAC/Vorbis/Opus call libc `malloc` directly, bypassing `FM_Allocator_Set` | doc |
+| F29 | Info | Stack use: 19 KB for MP3, 24–28 KB for Opus open | doc |
+| F30 | Info | Undefined behaviour (signed overflow, negative shift) in `dr_flac.h` and `stb_vorbis.c` on corrupt input | none |
+"tested" means: the reproducer shows the defect on the unpatched build, shows the corrected behaviour on the patched build, and the 358 unit tests still pass. Before/after output of every reproducer is in `results/unfixed.txt` and `results/fixed.txt`.
+## 3. Findings
+### F1 — Vorbis comment header: memory corruption at open (Critical)
+Opening a crafted `.ogg` corrupts the heap or crashes. Three variants, all in `third_party/stb/stb_vorbis.c` (v1.22) `start_decoder`, reached from `vorbis_file_open` (`src/fm_audio.c` L428):
+| Input (one field changed in a valid file) | Unpatched result |
+|---|---|
+| comment count `0x20000001` (64-bit) or `0x40000003` (32-bit) | ASan: heap-buffer-overflow, WRITE of size 8 at L3686, 0 bytes past an 8-byte block. Plain build: SIGSEGV |
+| comment count `0x10000000` | NULL dereference in `vorbis_deinit` L4230. Plain build: SIGSEGV |
+| comment count 3, first comment length `0xFFFFFFFF` | `free()` of an uninitialised pointer, L4230. Plain build: glibc abort |
+Cause:
+- L3680: `sizeof(char*) * comment_list_length` is passed to `setup_malloc(vorb*, int sz)`. The byte count wraps to a few bytes, the allocation succeeds, and the loop at L3684–3693 writes pointers past it.
+- L3681 and L3687: on failure the function returns with `comment_list_length` still set and the list not zeroed. `vorbis_deinit` (L4229–4232) then walks the list.
+- stb_vorbis does not verify page CRCs while opening, so no checksum has to be repaired to build such a file.
+The same class of defect has been reported publicly against stb_vorbis 1.22. I could not reach the advisory pages from the audit machine, so I cite no CVE number.
+How it was found: the Vorbis fuzzer crashed 30 times in 7 minutes, every time with one of two signatures (16× invalid free, 14× NULL dereference). The overflow variant came from reading the code around them.
+Reproduce:
+```
+python3 inputs/vorbis_comment.py st_8k.ogg out.ogg count 0x20000001
+audtool_asan decode inputs/vorbis_count_wrap64.ogg /dev/null      # heap-buffer-overflow
+audtool      decode inputs/vorbis_count_null.ogg   /dev/null      # exit 139
+audtool32    decode inputs/vorbis_count_wrap32.ogg /dev/null      # 32-bit build, exit 139
+```
+Fix (tested): bound the count by the stream size and by what fits `int`, zero the list, clear the count on failure, reject negative and oversized lengths. All four crafted files and all 30 fuzzer crash inputs then return `FM_ERR_CORRUPTED` under ASan; valid Vorbis files decode to identical bytes. A further 20-minute fuzz run on the patched build found no crash (section 4).
+```diff
+    if (f->comment_list_length > 0)
+    {
++      if ((uint32) f->comment_list_length > 0x7fffffffu / sizeof(char*) ||
++          (f->stream_len && (uint32) f->comment_list_length > f->stream_len / 4)) {
++         f->comment_list_length = 0;
++         return error(f, VORBIS_invalid_setup);
++      }
+       f->comment_list = (char**) setup_malloc(f, sizeof(char*) * (f->comment_list_length));
+-      if (f->comment_list == NULL)                  return error(f, VORBIS_outofmem);
++      if (f->comment_list == NULL) {
++         f->comment_list_length = 0;
++         return error(f, VORBIS_outofmem);
++      }
++      memset(f->comment_list, 0, sizeof(char*) * f->comment_list_length);
+    }
+```
+### F2 — MP3: resync advances one byte at a time (High)
+One root cause, three visible effects. `mp3_decode_one` (`src/fm_audio.c` L1151–1155) advances the input by one byte whenever minimp3 returns no samples. minimp3 also returns no samples for a valid frame whose bit reservoir it does not have yet (the first frames after a seek or after a gap). Stepping one byte makes minimp3 reset itself, so decoding only restarts at a frame that needs no reservoir, and such frames are rare in normal encodes.
+| Effect | Unpatched | Patched |
+|---|---|---|
+| `Audio_Seek` on `cbr128.mp3` (12 s, 128 kbit/s CBR) to 0.5 / 6.0 / 11.0 s | −15 every time; later reads also −15 | OK, `frame_index` 22050 / 264600 / 485100 |
+| Same on `m2_22k.mp3` (MPEG-2, 22 kHz): seek to 1.0 and 3.0 s | both return OK and both land at 4.47 s; 9.0 s → −15 | OK |
+| 4 header bytes zeroed at offset 96130 (`cbr128_1bad.mp3`) | plays 5.982 s of 12.042 s, then "end of file" | plays 11.938 s |
+| `Audio_Open` on 2 MiB of `0x00` | −17 after about 4 s (8.4 s for `0xFF`) | −17 in under 0.01 s |
+| `Audio_Open` on a 195 KB `.m4a` | −17 after 0.42 s | 0.001 s |
+The slow open is CPU time, not I/O: the file is read once, but every one-byte step rescans the 4 KB buffer. The times are from an x86 host; an MCU will be much slower (not measured).
+Reproduce: `repro seek_dump cbr128.mp3 6.0 out.raw`, `audtool decode cbr128_1bad.mp3 out.raw`, `repro open_time 2097152 0`.
+Fix (tested, also provided alone as `fixes/01_mp3_resync.patch`):
+- when minimp3 parsed a frame but produced nothing (`dec.header[0] == 0xFF`), consume exactly `info.frame_bytes`;
+- otherwise jump to the next position that can be a frame header (`hdr_valid`) instead of one byte;
+- refill the buffer also when it is full but partly consumed.
+A simpler fix, always skipping `info.frame_bytes`, is wrong: when no frame is found minimp3 reports `available − 4`, which skips a frame cut off by the buffer end. That variant failed the unit test "MP3 read-ahead: resyncs past corrupt bytes" (357/358).
+### F3 — WAV: unsupported ADPCM variants decode to noise (High)
+`audio_parse_wav` (L885) accepts format `0x11` with any channel count and format `0x02` (Microsoft ADPCM), and sends both to the mono IMA block decoder (L144–175).
+- `ima_stereo.wav` and `ms_mono.wav`, both written by ffmpeg, open without error. Compared with ffmpeg's decode, every frame differs (mean absolute difference 23485 and 26857 of 32768).
+- Minimal cases: `repro ima_stereo` returns 25 samples where 9 frames are expected; `repro ms_adpcm` returns `4096 4100 …` where `1000 1000 …` is expected.
+Fix (tested): accept only mono IMA at open; the other two now return `FM_ERR_UNSUPPORTED`, the same answer 24-bit and float WAV already get. Decoding them properly would need two new block decoders; that is a feature, not part of this patch.
+### F4 — Threads: `g_wav_raw` is shared without a lock (High, `FM_USE_THREADS=1`)
+The PCM read path decodes through one static scratch buffer (`g_wav_raw`, L2166 write, L2177 read). Two tasks reading two different WAV streams overwrite each other's data between those two lines.
+- `repro_thr race`: one stream received 2048 samples that belong to the other file.
+- ThreadSanitizer reports the data race at L2166 against L2177.
+Reproduce: `repro_thr race`, `repro_tsan race`.
+No patch. Two options: a dedicated `FM_Mutex` held across the read and the conversion (blocks the second stream during I/O), or a scratch buffer per stream slot (costs `FM_MAX_AUDIO` × buffer size of RAM). The choice depends on the RAM budget, so I left it to you.
+### F5 — AAC: decoder sample count is not clamped (Medium)
+`aac_decode_frame` stores the plug-in's `out_samples` without checking it against the capacity it passed (L1814–1820). `aac_read` then copies that many samples out of `s->pcm` (L1850).
+- `repro aac_overread`: a decoder that claims 6000 samples makes `Audio_Read` return 6000 samples from a 2048-sample buffer; samples 2048 onwards are other library memory.
+- ASan stays silent because the bytes that follow are in the same static object.
+A correct decoder never does this, so it needs a faulty plug-in. Fix (tested): a count above the capacity returns `FM_ERR_INTERNAL` (−26).
+### F6 — MP3/AAC: errors are reported as end of track (Medium)
+- MP3 (L1287) and AAC (L1837–1839, L1866): any error from the frame decoder ends the read loop, and the function returns `FM_ERR_EOF` if nothing was read.
+- `repro io_as_eof`: with `FM_ERR_IO` injected on backend read 4, `cbr128.mp3` delivers 73728 of 1062144 samples and then `FM_ERR_EOF`. `lc.aac` behaves the same. A player cannot tell a card error from the end of the song.
+- `aac_read_header` and the payload read also turn every failure into `FM_ERR_EOF` (L1701, L1810–1813).
+- Related: for AAC, `FM_ERR_EOF` is not final. The fuzzer recorded `Read → −15` followed by `Read → OK, 255 samples` with no seek in between (`FUZZ_TRACE=1 fuzz_audio -r abort-2c78bd8b.bin`).
+Fix (tested): the first error other than EOF is kept and returned once the samples already decoded have been delivered. After the fix both files return −6 (`FM_ERR_IO`). PCM and A-law WAV already did this correctly.
+### F7 — Opus 5.1 is decoded as stereo noise (Medium)
+`opus_file_open` L555: `if (channels == 0 || channels > 2) channels = 2;`. A 6-channel file is multistream (mapping family 1); its packets are then given to a single-stream decoder.
+- `inputs/opus_5_1.ogg` opens as 2 channels with no error. Output RMS is 11301 with samples clipped at 32767; libopus gives RMS 7410 for the same file.
+Fix (tested): `FM_ERR_UNSUPPORTED` when the channel count is above 2 or the mapping family is not 0. Mono and stereo files decode to identical bytes.
+### F8 — `Player_GetDuration` is wrong for six formats (Medium)
+`Player_GetDuration` (`src/fm_player.c` L483–494) computes `data_size / (channels × bits/8) / rate`. That is only right for PCM. For G.711 `bits_per_sample` is reported as 16 while the file holds 8-bit samples; for IMA ADPCM the data is 4 bits per sample; for FLAC, Vorbis and Opus `data_size` is the compressed file size.
+| 12-second file | Reported | Patched |
+|---|---|---|
+| A-law / µ-law | 6.000 s | 12.000 s |
+| IMA ADPCM mono | 3.019 s | 12.033 s |
+| FLAC stereo | 12.128 s | 12.000 s |
+| FLAC 6 channels | 5.202 s | 12.000 s |
+| Vorbis (three files) | 0.877 / 1.239 / 1.753 s | 12.000 s |
+| Opus (two files) | 0.939 / 0.679 s | 12.000 s |
+The comment at L481–482 says MP3 and AAC report 0.0; MP3 in fact reports an estimate.
+Reproduce: `repro2 duration_files <files>`. Fix (tested): the three whole-file decoders set `data_size` to the decoded PCM size, and `Player_GetDuration` handles G.711 and IMA separately.
+### F9 — `Audio_Seek` with non-finite or very large times (Medium)
+- NaN: WAV returns −16 and MP3 −15, but FLAC and Vorbis return OK and set `frame_index` to 9223372036854775840.
+- `INFINITY` and `1e30`: every format returns OK and continues from the start of the file.
+- 32-bit build: `Audio_Seek(48695.77 s)` on FLAC or Vorbis returns OK and plays from the first sample again. `pcmbuf_seek` (L326–336) multiplies the frame number by the channel count and narrows it to `size_t` before clamping.
+Reproduce: `repro seek_nan <files>`, `repro32 seek32 s16_stereo.flac`.
+Fix (tested, 64-bit and 32-bit): NaN returns `FM_ERR_INVALID_ARGUMENT`; times past the end clamp to the end, so the next read reports EOF; the clamp happens in 64 bits.
+### F10 — A-law polarity is inverted (Medium)
+`wav_alaw_decode` L120 has the sign test reversed. `repro alaw` gives `-8 8 -32256 32256` where G.711, ffmpeg and libsndfile give `8 -8 32256 -32256`.
+Inverted polarity is inaudible on a single stream but cancels when mixed with a correct source. Fix (tested): after the one-line change a 12 s stereo A-law file matches ffmpeg exactly (maximum difference 0 over 96000 frames). µ-law was already correct.
+### F11 — `Audio_ReadMono` on multichannel audio (Medium)
+`Audio_ReadMono` (L2300–2330) only knows 1 and 2 channels. On a 6-channel FLAC it returns 1587600 "mono" samples for 529200 frames, which is interleaved channel data, not a downmix. `Audio_ReadStereo` on the same file already returns `FM_ERR_UNSUPPORTED`.
+Fix (tested): `Audio_ReadMono` returns `FM_ERR_UNSUPPORTED` above 2 channels. `pcmbuf_read` now also returns whole frames for any channel count; before, it only did so for stereo (L317).
+### F12 — Reads smaller than one frame (Medium)
+- `Audio_Read(count=1)` on a stereo stream with 1000 frames left returns `FM_ERR_EOF`. A caller that stops on EOF drops the rest of the track.
+- `Audio_Stream(chunk_samples=1)` returns `FM_OK` and delivers 0 of 2000 samples.
+Reproduce: `repro small_read`. Fix (tested): both return `FM_ERR_INVALID_ARGUMENT`.
+### F13 — Example DMA player: odd half-buffer size (Medium)
+With `half_samples = 255` and a stereo source, the last slot of each half can never be filled. The fill loop asks for one sample, gets EOF (F12), and treats it as the end of the track.
+- `repro2 odd_half 255`: a 16000-sample track stops after 1 half-buffer (510 samples). With 256 it plays 63 half-buffers.
+Fix (tested): `ex13_audio_fill_half` asks for whole frames only and pads the last slot with silence. After the fix 255 also plays 63 half-buffers.
+### F14 — FLAC: allocation size comes from the header (Medium)
+`flac_file_open` (L366–383) allocates `totalPCMFrameCount × channels × 2` bytes before decoding. The only limit is 10 Mi frames, and it is not configurable.
+- `inputs/flac_8ch_total_overstated.flac` (38295 bytes, frame count patched to the limit): one `FM_Alloc` of 167772160 bytes, kept for as long as the stream is open, for 176400 bytes of audio.
+- `inputs/flac_total_unknown.flac` (frame count 0): 4194304 bytes for 44100 bytes of audio.
+On an MCU the first case fails with `FM_ERR_NO_MEMORY`, which is harmless. The second matters: every FLAC with an unknown length needs a 4 MiB block (8 MiB for stereo), so such files will not open on a small heap.
+Reproduce: `repro flac_alloc <files>`. No patch. Proposal: a configurable `FM_FLAC_MAX_PCM_BYTES`, as Opus already has, and for unknown length grow the buffer while decoding.
+Decoding the whole file at open is a documented design limit (`docs/OPUS_CUBEIDE.md` L82–88) and is not counted as a finding.
+### F15 — Output counts not written (Low)
+- `wav_adpcm_serve` (L224) does not write `*read` at end of data. `repro adpcm_read_unset` shows `*read = 0xdeadbeef` after the call; the PCM, MP3 and FLAC paths write 0.
+- `Audio_ReadFrame` (L2205–2213) copies an uninitialised local to `*channels_read` on the same path (`0xabababababababab` in the test).
+Fix (tested): both are set to 0 on entry.
+### F16 — AAC: the decoder gets zeros in place of the ADTS header (Low)
+`aac_read_header` reads the 7 header bytes into a local array (L1699–1701). The payload is read to `s->frame + 7` (L1810) and the decoder is called with `s->frame` (L1814). The first 7 bytes of `s->frame` are never written.
+- `repro aac_header`: the file starts `ff f1 4c 80 01 7f fc`, the decoder receives `00 00 00 00 00 00 00`.
+README L479–480 says frames are passed "with ADTS headers". A decoder that parses the header itself will reject every frame. Fix (tested): the header is read straight into `s->frame`.
+### F17 — AAC: decoder context leak (Low)
+`aac_release` (L1650–1658) frees the slot and never calls `ops->close`. If a seek fails during open after `ops->init` succeeded, the decoder context is lost.
+- `repro aac_leak`: 4 injected open failures, 1 leaks (init calls 1, close calls 0). LeakSanitizer confirms 8 bytes from the stub's `init`.
+Fix (tested): the failing path calls `ops->close`. After the fix 0 of 4 leak.
+### F18 — Vorbis: leak on a corrupt setup header (Low)
+In `start_decoder`, the temporary `lengths` block of a sparse codebook (L3756) is not freed on the error returns at L3781 and L3837. A file truncated in the setup header leaks it on every open attempt.
+- `inputs/vorbis_truncated_800.ogg` under LeakSanitizer: 128 bytes from `setup_temp_malloc`. The size is the codebook entry count, a 24-bit field in the file.
+- Found by a truncation sweep: 20+ cut points on every seed file of every format under ASan. These two Vorbis leaks were the only reports.
+Fix (tested): free the block on both paths. Other error returns between L3760 and L3850 may leak in the same way; I patched the two I could trigger.
+### F19 — Opus: header output gain is ignored (Low)
+`OpusHead` carries an output gain that RFC 7845 says a player must apply. `opus_file_open` reads only the channel count and pre-skip (L552–560).
+- A file with a −6 dB header gain decodes with RMS 12828.8; libopus gives 6429.6.
+No patch. With libopus, `opus_decoder_ctl(dec, OPUS_SET_GAIN(gain))` is enough; the built-in decoder path would need a scale step.
+### F20 — Chained Ogg streams (Low)
+- `vorbis_chain.ogg` (two 12 s streams concatenated): 12.000 s decoded, no error.
+- `opus_chain.ogg`: first link only.
+No patch. Chained files are rare outside internet radio captures; documenting the limit may be enough.
+### F21 — MP3 details (Low)
+- The Xing/Info header frame is decoded as audio: `cbr128_info.mp3` gives 532224 frames against 531072 for the same audio without the header, i.e. 1152 frames of silence at the start.
+- VBR without a Xing header (`vbr_noxing.mp3`, 12.04 s): duration reported as 6.577 s; seek to 3.0 s lands at 5.56 s; seek to 9.0 s returns EOF. The estimate uses the bitrate of the first frame.
+No patch. Skipping a first frame that carries a `Xing`/`Info` tag fixes the first point. The second needs either a scan at open or a documented limit.
+### F22 — MP3 seek offset that remains after the F2 fix (Low)
+After a seek the first frames are used to prime the bit reservoir and are dropped, but the position is not advanced for them. Audio starts 2000–5200 frames (45–118 ms) after the requested time while `frame_index` reports the exact target. Measured with `harness/seek_check.py` on four files. Not fixed.
+### F23 — Recorder leaves empty files (Low)
+`AudioRecorder_Open` creates the file, then finds that `path_out_size` is too small and returns −16. `repro2 recorder` with `path_out_size = 8`: three calls leave `rec_000001.wav` to `rec_000003.wav`, 44 bytes each.
+Fix (tested): the size is checked before the file is created; no file is left.
+### F24 — `Player_ScanFolder` extension list (Low)
+`is_audio_path` (`src/fm_player.c` L29–34) lists `.m4a`, which `Audio_Open` cannot play (MP4 container, rejected with −17), and omits `.opus`, which it can. Fix (tested): `.opus` replaces `.m4a`.
+### F25 — Example DMA player: tap order (Low)
+`audio_dma_player.h` L177 documents the pre tap as "raw decoded PCM before volume". The call sits after the volume block (L365). `repro2 tap_order`: sample 10000 at volume 0.5 reaches the pre tap as 5000.
+Fix (tested): the call is moved above the volume block; the pre tap then sees 10000 and the post tap 5000.
+### F26 — Media detection (Low)
+- A UTF-16LE text file (`ff fe 48 00 …`) is detected as MP3 by `Media_DetectBuffer` and `File_DetectType`: the byte-order mark passes the frame-sync test at `src/fm_media.c` L123–130.
+- `.m4a` is AAC by extension and MP4 by content, so `Media_SaveEncoded("/x.m4a", …)` fails with −17.
+- `.opus`, `.oga` and `.wave` are UNKNOWN by extension.
+- An extension hint given as `"mp3"` or `".mp3"` returns UNKNOWN; only `"a.mp3"` works.
+Reproduce: `repro2 detect`. No patch. For the first point, require a second valid frame header at the computed frame length before answering MP3.
+### F27 — Seek accuracy on VBR MP3 with Xing (Low)
+Seeks land 1692–2484 frames (38–56 ms) late. IMA WAV, FLAC and Vorbis seeks are sample-exact.
+### F28 — Dynamic allocation (Info)
+README L77 states "Dynamic allocation in the core | None". Measured at open, with libc `malloc` wrapped:
+| Format | Bytes from libc `malloc`, not through `FM_Alloc` |
+|---|---|
+| FLAC | 12752 |
+| Vorbis | 202272 (421 calls) |
+| Opus (libopus) | 27236 |
+A custom allocator installed with `FM_Allocator_Set` therefore does not see this memory, and a project with a small or absent libc heap will fail in these three formats. An Opus stereo open also makes 973 `FM_Alloc` calls. Either route the decoders through `FM_Alloc` (all three offer allocation hooks) or correct the README.
+### F29 — Stack use (Info)
+High-water marks, x86-64 / 32-bit x86: MP3 open 18912 / 18948 bytes; MP3 `Audio_ReadMono` 19008 / 19284; Opus stereo open 27704 / 24480; Vorbis open 7784 / 7236; FLAC open 6072 / 5428; WAV open 4024 / 1572. ARM figures will differ, but the order of magnitude matters for task stack sizing and is not stated in the README.
+### F30 — Undefined behaviour in vendored decoders on corrupt input (Info)
+UBSan reports during fuzzing, all in third-party arithmetic on garbage samples, none with a memory error:
+- `dr_flac.h` L3064, L4824, L4826: signed overflow.
+- `stb_vorbis.c` L1602–1603: left shift of a negative value; L5301–5302: signed overflow.
+## 4. Test evidence
+### Differential decode (valid files)
+22 files of 12 s each were decoded and compared with ffmpeg or libsndfile. PCM (8/16-bit), µ-law, mono IMA ADPCM, FLAC (16/24-bit, 6 channels), MP3 (MPEG-1/2/2.5, CBR and VBR), Vorbis and Opus match exactly or within ±1 LSB. No sanitizer report on any valid file. The exceptions are F3 and F10.
+### Fuzzing
+The machine has no clang, libFuzzer or AFL, so I wrote a small coverage-guided fuzzer (`harness/fuzz_audio.c`, gcc `-fsanitize-coverage=trace-pc`, ASan + UBSan). Each input is a media file plus 8 control bytes that choose a sequence of `Audio_Read`, `ReadMono`, `ReadStereo`, `ReadFrame` and `Audio_Seek` calls and an I/O fault mode.
+| Format | Time | Executions | Edges | Memory errors | Hangs |
+|---|---|---|---|---|---|
+| WAV | 25 min | 139757 | 1538 | 0 | 0 |
+| MP3 | 25 min | 7187 | 1359 | 0 | 0 |
+| AAC (stub decoder) | 20 min | 86256 | 1304 | 0 | 0 |
+| FLAC | 25 min | 22979 | 2720 | 0 | 0 |
+| Opus | OPUS_TIME | OPUS_EXECS | OPUS_EDGES | 0 | 0 |
+| Vorbis, unpatched | 7 min | under 1000 per start | — | 30 crashes, all F1 | 0 |
+| Vorbis, F1 patched | VORBIS_TIME | VORBIS_EXECS | VORBIS_EDGES | 0 | 0 |
+These are short runs on 2 cores. MP3 is slow (about 5 executions per second) because of F2 itself. The runs show that the obvious paths survive; they are not proof of absence. MP3 and FLAC deserve a longer run with a real fuzzer.
+The three `abort-*`/`oracle-*` files saved for WAV and MP3 come from an early, too-strict check ("data after EOF"). They replay cleanly and show the F6 behaviour, not a new defect.
+### Unit tests
+`make test FM_USE_OPUS_LIB=1`: 358/358 before and after the full patch.
+## 5. Not confirmed
+Read in the code but not reproduced; treat as leads, not findings:
+- MP3: VBRI headers, and a channel-count change in the middle of a file (L1124).
+- `aac_find_sync` reads one byte per I/O call (L1661–1694): slow on real storage, not measured.
+- WAV writer: header fields when the data exceeds `UINT32_MAX` (L2621–2634); close after a failed write.
+- WAV: 14-byte `fmt ` chunk (L838); ADPCM allocation sized from `block_align` (L207, L232).
+- `Player_SeekFwd` arithmetic (`src/fm_player.c` L390).
+- Example 33 (L46–62).
+- Unregistering a decoder while one of its streams is open.
+## 6. Checked and found sound
+WAV chunk walker (L786–869); decoder registry locking; Opus lacing bounds; `scan_cb` string copy; playlist growth failure path; DMA half/full flag handling; refusal of 24-bit, float, EXTENSIBLE and multichannel WAV (documented limit); retry after a one-shot I/O error in IMA ADPCM; `FM_ERR_IO` propagation in PCM and A-law.
+## 7. How to rerun
+Environment: Linux x86-64, gcc 12.2, Python 3.11, ffmpeg 9.0 (from the `imageio-ffmpeg` wheel), zig 0.17 as the 32-bit compiler.
+```
+# 1. pristine tree at the audited commit, one copy per build flavour
+git clone https://github.com/hamid-enf/Clain_Filemanagaer /tmp/aud/repo
+git -C /tmp/aud/repo checkout --detach 8dd0f25
+L=/tmp/aud/repo/Clain_FileManager/FileManager_lib
+cp -r $L /tmp/aud/b_plain && make -C /tmp/aud/b_plain libfilemanager.a FM_USE_OPUS_LIB=1
+cp -r $L /tmp/aud/b_asan  && make -C /tmp/aud/b_asan  libfilemanager.a FM_USE_OPUS_LIB=1 \
+     CFLAGS_EXTRA="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+# 2. patched tree
+git -C /tmp/aud/repo worktree add --detach /tmp/aud/wt 8dd0f25
+git -C /tmp/aud/wt apply /home/user/audit/fixes/all_fixes.patch
+cp -r /tmp/aud/wt/Clain_FileManager/FileManager_lib /tmp/aud/b_fix2
+make -C /tmp/aud/b_fix2 test FM_USE_OPUS_LIB=1            # 358/358
+make -C /tmp/aud/b_fix2 libfilemanager.a FM_USE_OPUS_LIB=1
+# 3. tools and corpus
+cd /home/user/audit/repro
+sh ../harness/build.sh /tmp/aud/b_plain aud_repro.c  /tmp/aud/bin/repro
+sh ../harness/build.sh /tmp/aud/b_plain aud_repro2.c /tmp/aud/bin/repro2
+sh ../harness/build.sh /tmp/aud/b_fix2  aud_repro.c  /tmp/aud/bin/repro_fix
+sh ../harness/build.sh /tmp/aud/b_fix2  aud_repro2.c /tmp/aud/bin/repro2_fix
+cd ../harness
+sh build.sh /tmp/aud/b_plain audtool.c /tmp/aud/bin/audtool
+sh build.sh /tmp/aud/b_asan  audtool.c /tmp/aud/bin/audtool_asan -fsanitize=address,undefined
+sh build.sh /tmp/aud/b_fix2  audtool.c /tmp/aud/bin/audtool_fix
+sh gen_corpus.sh <ffmpeg> /tmp/aud/corpus
+# 4. every reproducer, before and after
+sh /home/user/audit/run_repro.sh unfixed
+sh /home/user/audit/run_repro.sh fixed
+```
+Thread builds add `-DFM_USE_THREADS=1 -DFM_SYNC_CUSTOM -I<lib>/ports/pthread` (and `-fsanitize=thread` for TSan). The 32-bit builds use `zig cc -target x86-linux-musl` as `CC`. `run_repro.sh` also expects `cbr128_1bad.mp3` (zero 4 bytes at offset 96130 of `cbr128.mp3`) and `song.m4a` in `/tmp/aud`; without them only those two lines are empty.
+## 8. Files
+| Path | Content |
+|---|---|
+| `fixes/all_fixes.patch` | All tested fixes, `git apply` format, against `8dd0f25` |
+| `fixes/01_mp3_resync.patch` | F2 alone |
+| `fixes/apply_fixes.py` | The same edits as a script (used to build the patch); run only on a copy |
+| `results/unfixed.txt`, `results/fixed.txt` | Output of every reproducer before and after |
+| `run_repro.sh` | Runs all reproducers |
+| `repro/aud_repro.c`, `repro/aud_repro2.c` | Reproducers (in-memory backend / POSIX backend) |
+| `inputs/` | Crafted files for F1, F7, F14, F18, two fuzzer crash inputs, and `vorbis_comment.py` |
+| `harness/` | In-memory `FM_FS`, decode tool, fuzzer, corpus generator, comparison scripts |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
