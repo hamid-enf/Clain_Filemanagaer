@@ -1,0 +1,6 @@
+picojpeg - Public Domain JPEG decompressor
+Copyright (C) Rich Geldreich <richgel99@gmail.com>
+
+This software is released into the public domain (see the header comment in
+picojpeg.h: "picojpeg - Public domain").  It may be used for any purpose,
+commercial or otherwise, without restriction.

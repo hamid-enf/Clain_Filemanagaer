@@ -1,0 +1,3 @@
+#ifndef FM_HALSTUB_USB_DEVICE_H
+#define FM_HALSTUB_USB_DEVICE_H
+#endif
