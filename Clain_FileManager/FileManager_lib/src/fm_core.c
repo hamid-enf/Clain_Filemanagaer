@@ -16,6 +16,7 @@
 #include "fm_opus.h"
 #endif
 #include "fm_cache.h"
+#include "fm_internal.h"
 
 #define FM_VERSION_MAJOR 1
 #define FM_VERSION_MINOR 0
@@ -361,5 +362,53 @@ size_t FM_InternalBufferSize(void)
     return sizeof(g_io_buf);
 #else
     return 0;
+#endif
+}
+
+/* In-use flag next to the buffer.  It has the same storage class as the
+ * buffer: thread-local where the buffer is thread-local (each thread
+ * owns its copy, so only recursion on that thread can collide), shared
+ * otherwise (then the test-and-set runs under the core lock). */
+#if FM_USE_INTERNAL_BUFFER
+#if FM_USE_THREADS && defined(__GNUC__)
+static __thread uint8_t g_io_buf_busy;
+#define IO_BUF_LOCK()   ((void)0)
+#define IO_BUF_UNLOCK() ((void)0)
+#else
+static uint8_t g_io_buf_busy;
+#define IO_BUF_LOCK()   FM_Lock()
+#define IO_BUF_UNLOCK() FM_Unlock()
+#endif
+#endif
+
+uint8_t *FM_InternalBufferAcquire(size_t *size)
+{
+#if FM_USE_INTERNAL_BUFFER
+    uint8_t *p = NULL;
+
+    IO_BUF_LOCK();
+    if (g_io_buf_busy == 0u)
+    {
+        g_io_buf_busy = 1u;
+        p = g_io_buf;
+    }
+    IO_BUF_UNLOCK();
+    if (p != NULL && size != NULL)
+    {
+        *size = sizeof(g_io_buf);
+    }
+    return p;
+#else
+    (void)size;
+    return NULL;
+#endif
+}
+
+void FM_InternalBufferRelease(void)
+{
+#if FM_USE_INTERNAL_BUFFER
+    IO_BUF_LOCK();
+    g_io_buf_busy = 0u;
+    IO_BUF_UNLOCK();
 #endif
 }

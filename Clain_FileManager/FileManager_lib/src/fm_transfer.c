@@ -14,14 +14,107 @@
 #include "fm_crc.h"
 #include "fm_board_config.h"
 #include "fm_debug.h"
+#include "fm_internal.h"
+#include "fm_cache.h"
 
 /* بافر میانی. اندازه از fm_board_config.h می‌آید.
  * تراز ۳۲ بایتی لازم است چون ممکن است طرف مقابل DMA باشد و عملیات کش
- * روی خطوط ۳۲ بایتی انجام می‌شود. */
+ * روی خطوط ۳۲ بایتی انجام می‌شود.  The size is rounded up to a whole
+ * number of 32-byte cache lines so that cache maintenance on the buffer
+ * can never touch a neighbouring variable. */
+#define XFER_BUF_SIZE ((((size_t)FM_TRANSFER_CHUNK) + 31u) & ~(size_t)31u)
+
 #if defined(__GNUC__)
-static uint8_t g_xfer_buf[FM_TRANSFER_CHUNK] __attribute__((aligned(32)));
+static uint8_t g_xfer_buf[XFER_BUF_SIZE] __attribute__((aligned(32)));
 #else
-static uint8_t g_xfer_buf[FM_TRANSFER_CHUNK];
+static uint8_t g_xfer_buf[XFER_BUF_SIZE];
+#endif
+
+/* F-11 (b): the staging buffer is one static object.  A transfer started
+ * while another one is running -- from the progress callback, or from a
+ * second thread -- would overwrite the chunk in flight.  The nested /
+ * concurrent call gets FM_ERR_BUSY instead. */
+static uint8_t g_xfer_busy;
+
+static FM_Bool xfer_acquire(void)
+{
+    FM_Bool ok = FM_FALSE;
+
+    FM_Lock();
+    if (g_xfer_busy == 0u)
+    {
+        g_xfer_busy = 1u;
+        ok = FM_TRUE;
+    }
+    FM_Unlock();
+    return ok;
+}
+
+static void xfer_release(void)
+{
+    FM_Lock();
+    g_xfer_busy = 0u;
+    FM_Unlock();
+}
+
+/* F-11 (a): cache maintenance around every chunk (what fm_transfer.h
+ * promises).  The transfer layer cannot know whether the driver behind a
+ * read()/write() moves the bytes with DMA or with the CPU, so it uses a
+ * sequence that is correct for both:
+ *
+ *   before read : Clean       -- no dirty line is left that could later
+ *                                be written back over the DMA's data
+ *   after read  : Clean, then Invalidate
+ *                   DMA driver : the lines are clean, Clean does nothing,
+ *                                Invalidate drops the stale copies
+ *                   CPU driver : Clean writes the new bytes to RAM first,
+ *                                so Invalidate cannot lose them
+ *   before write: Clean       -- a DMA write sees what the CPU sees
+ *
+ * (A bare Invalidate after a CPU-copy read would throw the data away.)
+ * On a core without D-cache, and on the host, the calls compile to
+ * nothing.  FM_TRANSFER_CACHE_MAINT=0 removes them entirely;
+ * FM_XFER_CACHE_CLEAN / FM_XFER_CACHE_INVALIDATE can be redirected to
+ * instrumented functions (the host test suite counts them). */
+#ifndef FM_TRANSFER_CACHE_MAINT
+#define FM_TRANSFER_CACHE_MAINT 1
+#endif
+
+#if FM_TRANSFER_CACHE_MAINT
+#ifdef FM_XFER_CACHE_CLEAN
+extern void FM_XFER_CACHE_CLEAN(const void *addr, size_t bytes);
+#else
+#define FM_XFER_CACHE_CLEAN(addr, bytes) FM_Cache_CleanForDma((addr), (bytes))
+#endif
+#ifdef FM_XFER_CACHE_INVALIDATE
+extern void FM_XFER_CACHE_INVALIDATE(void *addr, size_t bytes);
+#else
+#define FM_XFER_CACHE_INVALIDATE(addr, bytes) \
+    FM_Cache_InvalidateAfterDma((addr), (bytes))
+#endif
+
+static void xfer_pre_read(void *buf, size_t cap)
+{
+    FM_XFER_CACHE_CLEAN(buf, cap);
+}
+
+static void xfer_post_read(void *buf, size_t got)
+{
+    if (got != 0u)
+    {
+        FM_XFER_CACHE_CLEAN(buf, got);
+        FM_XFER_CACHE_INVALIDATE(buf, got);
+    }
+}
+
+static void xfer_pre_write(const void *buf, size_t len)
+{
+    FM_XFER_CACHE_CLEAN(buf, len);
+}
+#else
+#define xfer_pre_read(buf, cap)   ((void)0)
+#define xfer_post_read(buf, got)  ((void)0)
+#define xfer_pre_write(buf, len)  ((void)0)
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -53,12 +146,11 @@ static FM_Bool xfer_report(const FM_TransferOpts *o, uint64_t done,
 /* سطح فایل                                                            */
 /* ------------------------------------------------------------------ */
 
-FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
-                             const FM_TransferOpts *opts,
-                             FM_TransferInfo *out_info)
+/* The copy itself.  The staging buffer is already owned by the caller. */
+static FM_Result xfer_copy_locked(const char *src_path, const char *dst_path,
+                                  const FM_TransferOpts *o,
+                                  FM_TransferInfo *out_info)
 {
-    FM_TransferOpts tmp;
-    const FM_TransferOpts *o = xfer_opts(opts, &tmp);
     FM_File src;
     FM_File dst;
     FM_Result r;
@@ -66,38 +158,6 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
     uint64_t total = 0;
     uint64_t done = 0;
     uint32_t crc_src = 0;
-    FM_Bool src_open = FM_FALSE;
-    FM_Bool dst_open = FM_FALSE;
-
-    if (src_path == NULL || dst_path == NULL)
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    if (out_info != NULL)
-    {
-        memset(out_info, 0, sizeof(*out_info));
-    }
-#if !FM_USE_CRC
-    /* verify re-reads the destination and compares CRC-32s; without the
-     * CRC module there is nothing to compare with.  Refuse up front --
-     * before anything is opened or truncated -- instead of copying and
-     * then reporting a check that never ran as passed. */
-    if (o->verify)
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
-#endif
-
-    /* مقصد از قبل هست؟ */
-    if (o->no_overwrite)
-    {
-        FM_Bool exists = FM_FALSE;
-
-        if (File_Exists(dst_path, &exists) == FM_OK && exists)
-        {
-            return FM_ERR_EXISTS;
-        }
-    }
 
     /* File_OpenEx returns FM_ERR_BUSY on a handle whose `used` flag is
      * set, and these live on the stack, so clear them first. */
@@ -109,7 +169,6 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
     {
         return r;
     }
-    src_open = FM_TRUE;
     (void)File_Size(&src, &total);
 
     r = File_OpenEx(&dst, dst_path,
@@ -119,14 +178,15 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         (void)File_Close(&src);
         return r;
     }
-    dst_open = FM_TRUE;
 
     for (;;)
     {
         uint32_t got = 0;
         uint32_t put = 0;
 
+        xfer_pre_read(g_xfer_buf, sizeof(g_xfer_buf));
         r = File_Read(&src, g_xfer_buf, (uint32_t)sizeof(g_xfer_buf), &got);
+        xfer_post_read(g_xfer_buf, got);
         /* File_Read reports EOF as FM_ERR_EOF, not as a zero-length
          * read.  Treat both as a clean end of input. */
         if (r == FM_ERR_EOF)
@@ -142,6 +202,7 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         {
             break;
         }
+        xfer_pre_write(g_xfer_buf, got);
         r = File_Write(&dst, g_xfer_buf, got, &put);
         if (r != FM_OK)
         {
@@ -160,6 +221,16 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         }
 #endif
         done += got;
+        if (done >= total)
+        {
+            /* Same rule as File_Copy (F-05): flush before the report
+             * that says "everything is there". */
+            r = File_Flush(&dst);
+            if (r != FM_OK)
+            {
+                break;
+            }
+        }
         if (!xfer_report(o, done, total))
         {
             r = FM_ERR_CANCELLED;
@@ -167,18 +238,12 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         }
     }
 
-    if (dst_open)
+    rc = File_Close(&dst);
+    if (r == FM_OK)
     {
-        rc = File_Close(&dst);
-        if (r == FM_OK)
-        {
-            r = rc;                      /* خطای بستن را گم نکن */
-        }
+        r = rc;                          /* خطای بستن را گم نکن */
     }
-    if (src_open)
-    {
-        (void)File_Close(&src);
-    }
+    (void)File_Close(&src);
 
     if (r != FM_OK)
     {
@@ -210,8 +275,10 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         {
             uint32_t got = 0;
 
+            xfer_pre_read(g_xfer_buf, sizeof(g_xfer_buf));
             r = File_Read(&chk, g_xfer_buf, (uint32_t)sizeof(g_xfer_buf),
                           &got);
+            xfer_post_read(g_xfer_buf, got);
             if (r == FM_ERR_EOF)
             {
                 r = FM_OK;
@@ -223,7 +290,15 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
             }
             crc_dst = CRC_Compute32(g_xfer_buf, got, crc_dst);
         }
-        (void)File_Close(&chk);
+        /* F-10: ALWAYS close what was opened.  `chk` lives on this stack
+         * frame and File_OpenEx registered its address in the external
+         * handle table; returning without closing leaves that table
+         * pointing into a dead frame. */
+        rc = File_Close(&chk);
+        if (r == FM_OK)
+        {
+            r = rc;
+        }
         if (r != FM_OK)
         {
             return r;
@@ -235,11 +310,72 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
         }
         if (crc_dst != crc_src)
         {
+            /* F-10: a failed verify is a failed copy -- do not leave the
+             * corrupt destination behind looking like a good file. */
+            (void)File_Delete(dst_path);
             return FM_ERR_CORRUPTED;
         }
     }
+#else
+    (void)o;
 #endif /* FM_USE_CRC */
     return FM_OK;
+}
+
+FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
+                             const FM_TransferOpts *opts,
+                             FM_TransferInfo *out_info)
+{
+    FM_TransferOpts tmp;
+    const FM_TransferOpts *o = xfer_opts(opts, &tmp);
+    FM_Result r;
+
+    if (src_path == NULL || dst_path == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (out_info != NULL)
+    {
+        memset(out_info, 0, sizeof(*out_info));
+    }
+#if !FM_USE_CRC
+    /* verify re-reads the destination and compares CRC-32s; without the
+     * CRC module there is nothing to compare with.  Refuse up front --
+     * before anything is opened or truncated -- instead of copying and
+     * then reporting a check that never ran as passed. */
+    if (o->verify)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+#endif
+    /* F-09: copying a file onto itself would open it for reading and then
+     * truncate it through the second handle -- the file ends up empty and
+     * the call reports success (and FM_Transfer_Move would then delete
+     * it).  Same rule as File_Copy: compare the RESOLVED paths, so
+     * "/a/b" and "/a/./b" are recognised as one file. */
+    if (FM_File_SamePath(src_path, dst_path))
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+
+    /* مقصد از قبل هست؟ */
+    if (o->no_overwrite)
+    {
+        FM_Bool exists = FM_FALSE;
+
+        if (File_Exists(dst_path, &exists) == FM_OK && exists)
+        {
+            return FM_ERR_EXISTS;
+        }
+    }
+
+    if (!xfer_acquire())
+    {
+        return FM_ERR_BUSY;
+    }
+    r = xfer_copy_locked(src_path, dst_path, o, out_info);
+    xfer_release();
+    return r;
 }
 
 FM_Result FM_Transfer_Copy(const char *src_path, const char *dst_path,
@@ -345,30 +481,132 @@ FM_Result FM_Transfer_SaveFile(const char *path, const void *src, size_t len)
 /* سطح خام                                                             */
 /* ------------------------------------------------------------------ */
 
-FM_Result FM_Transfer_Raw(FM_Storage *src, uint64_t src_off,
-                          FM_Storage *dst, uint64_t dst_off,
-                          uint64_t bytes, const FM_TransferOpts *opts)
+/* FM_TRUE when [off, off + bytes) lies inside the device.  Subtraction
+ * form: off + bytes may wrap around uint64_t. */
+static FM_Bool xfer_range_ok(const FM_Storage *s, uint64_t off,
+                             uint64_t bytes)
 {
-    FM_TransferOpts tmp;
-    const FM_TransferOpts *o = xfer_opts(opts, &tmp);
+    return (off <= s->capacity && bytes <= s->capacity - off) ? FM_TRUE
+                                                              : FM_FALSE;
+}
+
+/* F-07: erase the destination range one erase unit at a time.
+ *
+ *  - every request is exactly one aligned unit (the adapters in
+ *    fm_device.c reject anything else);
+ *  - the 64-bit length is never squeezed through a uint32_t
+ *    (a multiple of 4 GiB used to become "erase 0 bytes");
+ *  - the progress callback runs before every unit, so a long erase can
+ *    be cancelled.  It is called with done = 0: nothing has been copied
+ *    yet, and the bar must not run to 100 % twice.
+ *
+ * The caller has verified that dst_off is unit-aligned.  The END of the
+ * range is rounded up: the last unit is erased whole, as every flash
+ * programming tool does. */
+static FM_Result xfer_erase_range(FM_Storage *dst, uint64_t dst_off,
+                                  uint64_t bytes, const FM_TransferOpts *o)
+{
+    const uint32_t unit = dst->erase_size;
+    uint64_t at = dst_off;
+    uint64_t end = dst_off + bytes;      /* in range: checked by caller */
+
+    if (unit != 0u)
+    {
+        uint64_t tail = end % unit;
+
+        if (tail != 0u)
+        {
+            end += (uint64_t)unit - tail;
+        }
+        if (end > dst->capacity)
+        {
+            end = dst->capacity;
+        }
+    }
+    while (at < end)
+    {
+        /* no erase unit declared: hand the range over in pieces that
+         * fit the 32-bit length of the driver callback */
+        const uint32_t step = (unit != 0u) ? unit : 0x40000000u;
+        uint64_t left = end - at;
+        uint32_t n = (left > (uint64_t)step) ? step : (uint32_t)left;
+        FM_Result r;
+
+        if (!xfer_report(o, 0u, bytes))
+        {
+            return FM_ERR_CANCELLED;
+        }
+        r = dst->erase(dst, at, n);
+        if (r == FM_ERR_UNSUPPORTED)
+        {
+            break;                       /* driver erases on write */
+        }
+        if (r != FM_OK)
+        {
+            FM_ERR_LOG("erase at %lu failed: %d", (unsigned long)at, (int)r);
+            return r;
+        }
+        at += n;
+    }
+    return FM_OK;
+}
+
+static FM_Result xfer_raw_verify_locked(FM_Storage *a, uint64_t a_off,
+                                        FM_Storage *b, uint64_t b_off,
+                                        uint64_t bytes)
+{
+    uint64_t done = 0;
+    /* بافر را نصف می‌کنیم تا هر دو طرف در همان بافر ایستا جا شوند.
+     * Each half is a whole number of cache lines. */
+    const uint32_t half = (uint32_t)((sizeof(g_xfer_buf) / 2u) & ~(size_t)31u);
+    uint8_t *ba = g_xfer_buf;
+    uint8_t *bb = g_xfer_buf + half;
+
+    while (done < bytes)
+    {
+        uint64_t left = bytes - done;
+        uint32_t n = (left > (uint64_t)half) ? half : (uint32_t)left;
+        FM_Result r;
+
+        xfer_pre_read(ba, n);
+        r = a->read(a, a_off + done, ba, n);
+        xfer_post_read(ba, n);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        xfer_pre_read(bb, n);
+        r = b->read(b, b_off + done, bb, n);
+        xfer_post_read(bb, n);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (memcmp(ba, bb, n) != 0)
+        {
+            return FM_ERR_CORRUPTED;
+        }
+        done += n;
+    }
+    return FM_OK;
+}
+
+static FM_Result xfer_raw_locked(FM_Storage *src, uint64_t src_off,
+                                 FM_Storage *dst, uint64_t dst_off,
+                                 uint64_t bytes, const FM_TransferOpts *o)
+{
     uint64_t done = 0;
     FM_Result r;
     uint32_t chunk = (uint32_t)sizeof(g_xfer_buf);
     uint32_t unit_mask = 0u;
-
-    FM_CHECK_PTR(src, FM_ERR_INVALID_ARGUMENT);
-    FM_CHECK_PTR(dst, FM_ERR_INVALID_ARGUMENT);
-    FM_CHECK(src->read != NULL, FM_ERR_INVALID_ARGUMENT,
-             "source has no read function");
-    FM_CHECK(dst->write != NULL, FM_ERR_INVALID_ARGUMENT,
-             "destination has no write function");
+    FM_Bool synced = FM_FALSE;
 
     /* فلش NOR فقط بعد از erase قابل نوشتن است. اگر مقصد erase دارد،
      * ناحیه را پاک کن. */
     if (dst->erase != NULL && bytes > 0u)
     {
-        r = dst->erase(dst, dst_off, (uint32_t)bytes);
-        if (r != FM_OK && r != FM_ERR_UNSUPPORTED)
+        r = xfer_erase_range(dst, dst_off, bytes, o);
+        if (r != FM_OK)
         {
             return r;
         }
@@ -426,13 +664,16 @@ FM_Result FM_Transfer_Raw(FM_Storage *src, uint64_t src_off,
             }
         }
 
+        xfer_pre_read(g_xfer_buf, n);
         r = src->read(src, src_off + done, g_xfer_buf, n);
+        xfer_post_read(g_xfer_buf, n);
         if (r != FM_OK)
         {
             FM_ERR_LOG("read at %lu failed: %d",
                        (unsigned long)(src_off + done), (int)r);
             return r;
         }
+        xfer_pre_write(g_xfer_buf, n);
         r = dst->write(dst, dst_off + done, g_xfer_buf, n);
         if (r != FM_OK)
         {
@@ -441,57 +682,111 @@ FM_Result FM_Transfer_Raw(FM_Storage *src, uint64_t src_off,
             return r;
         }
         done += n;
+        if (done == bytes && dst->sync != NULL)
+        {
+            /* durable before the 100 % report; a failed sync is a
+             * failed write */
+            r = dst->sync(dst);
+            synced = FM_TRUE;
+            if (r != FM_OK && r != FM_ERR_UNSUPPORTED)
+            {
+                FM_ERR_LOG("sync failed: %d", (int)r);
+                return r;
+            }
+        }
         if (!xfer_report(o, done, bytes))
         {
             return FM_ERR_CANCELLED;
         }
     }
-    if (dst->sync != NULL)
+    if (!synced && dst->sync != NULL)
     {
-        (void)dst->sync(dst);
+        r = dst->sync(dst);
+        if (r != FM_OK && r != FM_ERR_UNSUPPORTED)
+        {
+            return r;
+        }
     }
     if (o->verify)
     {
-        return FM_Transfer_RawVerify(src, src_off, dst, dst_off, bytes);
+        return xfer_raw_verify_locked(src, src_off, dst, dst_off, bytes);
     }
     return FM_OK;
+}
+
+FM_Result FM_Transfer_Raw(FM_Storage *src, uint64_t src_off,
+                          FM_Storage *dst, uint64_t dst_off,
+                          uint64_t bytes, const FM_TransferOpts *opts)
+{
+    FM_TransferOpts tmp;
+    const FM_TransferOpts *o = xfer_opts(opts, &tmp);
+    FM_Result r;
+
+    FM_CHECK_PTR(src, FM_ERR_INVALID_ARGUMENT);
+    FM_CHECK_PTR(dst, FM_ERR_INVALID_ARGUMENT);
+    FM_CHECK(src->read != NULL, FM_ERR_INVALID_ARGUMENT,
+             "source has no read function");
+    FM_CHECK(dst->write != NULL, FM_ERR_INVALID_ARGUMENT,
+             "destination has no write function");
+    FM_CHECK(!o->verify || dst->read != NULL, FM_ERR_UNSUPPORTED,
+             "verify needs a destination read function");
+
+    /* F-06: the driver callbacks are thin and trust their caller (the
+     * Storage_*Blocks wrappers do the same check).  Everything below is
+     * decided BEFORE the first erase or write. */
+    if (bytes > 0u)
+    {
+        FM_CHECK(xfer_range_ok(src, src_off, bytes), FM_ERR_INVALID_ARGUMENT,
+                 "source range past capacity");
+        FM_CHECK(xfer_range_ok(dst, dst_off, bytes), FM_ERR_INVALID_ARGUMENT,
+                 "destination range past capacity");
+        /* F-07: one policy for every adapter.  A start offset inside an
+         * erase unit would mean erasing bytes in front of the requested
+         * range (what the QSPI adapter silently did) or failing half-way
+         * (what the block adapters did).  Neither: refuse it here. */
+        FM_CHECK(dst->erase == NULL || dst->erase_size == 0u ||
+                 (dst_off % dst->erase_size) == 0u,
+                 FM_ERR_INVALID_ARGUMENT,
+                 "destination offset is not aligned to the erase unit");
+    }
+
+    if (!xfer_acquire())
+    {
+        return FM_ERR_BUSY;
+    }
+    r = xfer_raw_locked(src, src_off, dst, dst_off, bytes, o);
+    xfer_release();
+    return r;
 }
 
 FM_Result FM_Transfer_RawVerify(FM_Storage *a, uint64_t a_off,
                                 FM_Storage *b, uint64_t b_off,
                                 uint64_t bytes)
 {
-    uint64_t done = 0;
-    /* بافر را نصف می‌کنیم تا هر دو طرف در همان بافر ایستا جا شوند. */
-    const uint32_t half = (uint32_t)(sizeof(g_xfer_buf) / 2u);
-    uint8_t *ba = g_xfer_buf;
-    uint8_t *bb = g_xfer_buf + half;
+    FM_Result r;
 
     if (a == NULL || b == NULL)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    while (done < bytes)
+    /* F-08: same guards as FM_Transfer_Raw -- a storage without read()
+     * is an error, not a NULL call. */
+    FM_CHECK(a->read != NULL, FM_ERR_UNSUPPORTED,
+             "source has no read function");
+    FM_CHECK(b->read != NULL, FM_ERR_UNSUPPORTED,
+             "target has no read function");
+    if (bytes > 0u)
     {
-        uint64_t left = bytes - done;
-        uint32_t n = (left > (uint64_t)half) ? half : (uint32_t)left;
-        FM_Result r;
-
-        r = a->read(a, a_off + done, ba, n);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        r = b->read(b, b_off + done, bb, n);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        if (memcmp(ba, bb, n) != 0)
-        {
-            return FM_ERR_CORRUPTED;
-        }
-        done += n;
+        FM_CHECK(xfer_range_ok(a, a_off, bytes), FM_ERR_INVALID_ARGUMENT,
+                 "verify range past source capacity");
+        FM_CHECK(xfer_range_ok(b, b_off, bytes), FM_ERR_INVALID_ARGUMENT,
+                 "verify range past target capacity");
     }
-    return FM_OK;
+    if (!xfer_acquire())
+    {
+        return FM_ERR_BUSY;
+    }
+    r = xfer_raw_verify_locked(a, a_off, b, b_off, bytes);
+    xfer_release();
+    return r;
 }

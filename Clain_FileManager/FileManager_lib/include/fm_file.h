@@ -56,6 +56,11 @@ void File_Init(FM_File *f);
  * count فقط عدد برمی‌گرداند (برای تست/نمایش UI). */
 uint32_t File_PoolUsed(void);
 void     File_PoolDump(void);
+/* File_PoolUsed() is the TOTAL (pool + external).  The two are separate
+ * resources of FM_MAX_OPEN_FILES entries each: `internal` counts handles
+ * from File_Open(), `external` counts caller-owned handles opened with
+ * File_OpenEx().  Either pointer may be NULL. */
+void     File_PoolUsedSplit(uint32_t *internal, uint32_t *external);
 
 /* File_Open returns a handle from an internal static pool sized by    */
 /* FM_MAX_OPEN_FILES (no allocation).  File_OpenEx opens into a        */
@@ -83,6 +88,10 @@ FM_Bool  File_IsOpen(const FM_File *f);
 /* ------------------------------------------------------------------ */
 FM_Result File_Create(const char *path);                  /* empty file */
 FM_Result File_Delete(const char *path);
+/* Rename inside one mount (cross-mount -> FM_ERR_UNSUPPORTED, use
+ * File_Move).  Renaming an entry onto itself -- also when the two paths
+ * are merely spelled differently ("/a/b" vs "/a/./b") -- is a no-op that
+ * returns FM_OK (FM_ERR_NOT_FOUND if the entry does not exist). */
 FM_Result File_Rename(const char *old_path, const char *new_path);
 FM_Result File_Exists(const char *path, FM_Bool *exists);
 FM_Result File_GetInfo(const char *path, FM_FileInfo *info);
@@ -112,7 +121,27 @@ FM_Result File_ReadText(const char *path, char *buffer, size_t buffer_size,
 FM_Result File_WriteText(const char *path, const char *text);
 FM_Result File_AppendText(const char *path, const char *text);
 
-/* Copy / move with optional progress reporting (cb may be NULL). */
+/* Copy / move with optional progress reporting (cb may be NULL).
+ *
+ * File_Copy is all-or-nothing for the destination: the data is written to
+ * "<dst>.fm_tmp" and renamed over dst only after it has been written,
+ * flushed and closed.  On any failure the temp file is removed, dst does
+ * not appear half-written, and a dst that already existed keeps its old
+ * content.  Consequence: replacing an existing file needs free space for
+ * the old and the new copy at the same time.  (Adapters without rename,
+ * or a dst too long for the suffix, write dst directly and delete it on
+ * failure.)  src and dst naming the same file -> FM_ERR_INVALID_ARGUMENT.
+ *
+ * Progress: cur == total is reported exactly once, after the data has
+ * been flushed.  The callback must not start another File_Copy /
+ * File_Move / File_Insert / File_DeleteRange / File_ReplaceRange: they
+ * share one scratch buffer and the nested call returns FM_ERR_BUSY.
+ *
+ * File_Move is a rename inside one mount and copy + delete across mounts.
+ * If the source cannot be deleted after the copy, the error is returned
+ * and the copy is removed again -- unless dst already existed before the
+ * call, in which case it is left in place (now holding the new content)
+ * rather than deleted. */
 FM_Result File_Copy(const char *src, const char *dst,
                     FM_ProgressCallback progress, void *user_data);
 FM_Result File_Move(const char *src, const char *dst,

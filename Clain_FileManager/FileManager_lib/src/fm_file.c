@@ -52,7 +52,10 @@ static FM_Result file_read_backend(FM_File *f, void *buf, uint32_t len,
     {
         return FM_OK;
     }
-    return (total > 0u) ? FM_OK : r;
+    /* F-14: only EOF may be folded into a short read.  A hard error
+     * (IO / timeout / corrupted) is reported even when some bytes were
+     * already delivered; *got still tells the caller how many. */
+    return r;
 }
 
 static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
@@ -177,6 +180,101 @@ static void cache_invalidate_file(FM_File *f)
     }
 }
 
+/* F-13: a cache line belongs to one handle, but the bytes belong to the
+ * file.  A write / truncate / delete / rename must therefore drop the
+ * lines of EVERY handle that is open on the same file, otherwise a second
+ * handle keeps serving the old content.
+ *
+ * Identity is (mount, normalized path).  The comparison ignores ASCII
+ * case: FAT is case-insensitive, and on a case-sensitive filesystem the
+ * only cost of a false match is one extra cache miss. */
+static FM_Bool cache_name_equal(const char *a, const char *b)
+{
+    for (;;)
+    {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+
+        if (ca >= (unsigned char)'A' && ca <= (unsigned char)'Z')
+        {
+            ca = (unsigned char)(ca + ((unsigned char)'a' - (unsigned char)'A'));
+        }
+        if (cb >= (unsigned char)'A' && cb <= (unsigned char)'Z')
+        {
+            cb = (unsigned char)(cb + ((unsigned char)'a' - (unsigned char)'A'));
+        }
+        if (ca != cb)
+        {
+            return FM_FALSE;
+        }
+        if (ca == 0u)
+        {
+            return FM_TRUE;
+        }
+    }
+}
+
+/* Relative path of an open handle inside its mount -- the same slice of
+ * the normalized path that FM_VFS_Resolve() hands to the backend. */
+static const char *cache_file_rel(const FM_File *f)
+{
+    const FM_MountEntry *m = (const FM_MountEntry *)f->mount;
+    size_t mlen = (m != NULL) ? strlen(m->mount_path) : 1u;
+    size_t plen = strlen(f->path);
+
+    if (mlen <= 1u)
+    {
+        return (plen > 0u) ? f->path + 1 : f->path;
+    }
+    if (plen <= mlen)
+    {
+        return f->path + plen;          /* "" */
+    }
+    return f->path + mlen + 1u;
+}
+
+/* Drop every line that caches (mount, rel).  Cache lock must be held. */
+static void cache_invalidate_path(const void *mount, const char *rel)
+{
+    uint32_t i;
+
+    for (i = 0; i < FM_CACHE_LINES; i++)
+    {
+        const FM_File *owner = g_cache[i].file;
+
+        if (owner != NULL && owner->mount == mount &&
+            cache_name_equal(cache_file_rel(owner), rel))
+        {
+            g_cache[i].valid = 0;
+            g_cache[i].file = NULL;
+        }
+    }
+}
+
+/* Drop the lines of every handle open on the same file as `f`
+ * (including f itself).  Cache lock must be held. */
+static void cache_invalidate_same_file(const FM_File *f)
+{
+    uint32_t i;
+
+    for (i = 0; i < FM_CACHE_LINES; i++)
+    {
+        const FM_File *owner = g_cache[i].file;
+
+        if (owner == NULL)
+        {
+            continue;
+        }
+        if (owner == f ||
+            (owner->mount == f->mount &&
+             cache_name_equal(owner->path, f->path)))
+        {
+            g_cache[i].valid = 0;
+            g_cache[i].file = NULL;
+        }
+    }
+}
+
 static FM_CacheLine *cache_find(FM_File *f, uint64_t off)
 {
     uint32_t i;
@@ -256,12 +354,15 @@ static FM_Result cache_fill(FM_File *f, uint64_t block_off, FM_CacheLine **out)
             break;
         }
     }
-    if (got == 0)
+    if (got == 0 || r != FM_OK)
     {
         /* EOF: leave the line invalid so an empty block never evicts a
-         * useful one and never matches a later read */
+         * useful one and never matches a later read.  Same for a hard
+         * read error (F-14): a half-filled block must not be served as
+         * if it were the file's content. */
         line->valid = 0;
         line->file = NULL;
+        line->len = 0;
     }
     else
     {
@@ -407,7 +508,7 @@ FM_Bool FM_File_AnyOpenOnMount(const FM_MountEntry *mount)
     return FM_FALSE;
 }
 
-uint32_t File_PoolUsed(void)
+void File_PoolUsedSplit(uint32_t *internal, uint32_t *external)
 {
     uint32_t i;
     uint32_t used = 0u;
@@ -424,24 +525,48 @@ uint32_t File_PoolUsed(void)
             ext++;
         }
     }
+    if (internal != NULL)
+    {
+        *internal = used;
+    }
+    if (external != NULL)
+    {
+        *external = ext;
+    }
+}
+
+uint32_t File_PoolUsed(void)
+{
+    uint32_t used = 0u;
+    uint32_t ext = 0u;
+
+    File_PoolUsedSplit(&used, &ext);
     return used + ext;
 }
 
+/* F-03: the pool (File_Open) and the external registry (File_OpenEx) are
+ * two independent resources of FM_MAX_OPEN_FILES entries each.  Print
+ * them separately -- telling them apart is exactly the evidence needed
+ * to find which kind of handle is leaking. */
 void File_PoolDump(void)
 {
     uint32_t i;
+    uint32_t used = 0u;
+    uint32_t ext = 0u;
 
-    FM_Log("file pool: %lu/%u internal",
-           (unsigned long)File_PoolUsed(), (unsigned)FM_MAX_OPEN_FILES);
+    File_PoolUsedSplit(&used, &ext);
+    FM_Log("file pool: %lu internal / %lu external (slots %u)\n",
+           (unsigned long)used, (unsigned long)ext,
+           (unsigned)FM_MAX_OPEN_FILES);
     for (i = 0; i < FM_MAX_OPEN_FILES; i++)
     {
         if (g_pool[i].used)
         {
-            FM_Log("  [%lu] %s", (unsigned long)i, g_pool[i].path);
+            FM_Log("  [i%lu] %s\n", (unsigned long)i, g_pool[i].path);
         }
         if (g_external_files[i] != NULL && g_external_files[i]->used)
         {
-            FM_Log("  [x%lu] %s", (unsigned long)i,
+            FM_Log("  [x%lu] %s\n", (unsigned long)i,
                    g_external_files[i]->path);
         }
     }
@@ -516,6 +641,15 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
     f->mode = (uint8_t)mode;
     f->mount = (void *)mount;
     f->fs = fs;
+#if FM_USE_CACHE
+    if (mode & FM_OPEN_TRUNCATE)
+    {
+        /* the content other handles cached is gone (F-13) */
+        cache_lock();
+        cache_invalidate_same_file(f);
+        cache_unlock();
+    }
+#endif
 
     /* refresh cached size / position */
     if (fs->ops.file_size != NULL)
@@ -733,6 +867,14 @@ FM_Result File_Read(FM_File *f, void *buf, uint32_t len, uint32_t *read)
                 uint64_t block_off =
                     (f->pos / FM_CACHE_LINE_SIZE) * FM_CACHE_LINE_SIZE;
 
+                if (f->size != 0 && block_off >= f->size &&
+                    f->fs->ops.file_size != NULL)
+                {
+                    /* f->size is this handle's snapshot; another handle
+                     * may have appended since (F-13).  Ask the backend
+                     * before declaring EOF. */
+                    (void)f->fs->ops.file_size(f->fs, f->fh, &f->size);
+                }
                 if (f->size != 0 && block_off >= f->size)
                 {
                     cache_unlock();
@@ -778,7 +920,14 @@ FM_Result File_Read(FM_File *f, void *buf, uint32_t len, uint32_t *read)
             (void)f->fs->ops.file_seek(f->fs, f->fh, (int64_t)f->pos,
                                        FM_SEEK_SET);
         }
-        return (total > 0) ? FM_OK : r;
+        /* F-14: a short read is a success only at end of file.  A hard
+         * error (IO / timeout / corrupted) is returned even when some
+         * bytes were already served; *read reports how many. */
+        if (r == FM_ERR_EOF && total > 0)
+        {
+            r = FM_OK;
+        }
+        return r;
     }
 #endif
     {
@@ -817,7 +966,7 @@ FM_Result File_Write(FM_File *f, const void *buf, uint32_t len,
     }
 #if FM_USE_CACHE
     cache_lock();
-    cache_invalidate_file(f);
+    cache_invalidate_same_file(f);
     cache_unlock();
 #endif
     {
@@ -940,7 +1089,7 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
     {
 #if FM_USE_CACHE
         cache_lock();
-        cache_invalidate_file(f);
+        cache_invalidate_same_file(f);
         cache_unlock();
 #endif
         f->size = size;
@@ -1019,6 +1168,11 @@ FM_Result File_Delete(const char *path)
     {
         return FM_ERR_UNSUPPORTED;
     }
+#if FM_USE_CACHE
+    cache_lock();
+    cache_invalidate_path(mount, rel);
+    cache_unlock();
+#endif
     r = mount->fs->ops.delete_file(mount->fs, rel);
     if (r == FM_OK)
     {
@@ -1030,6 +1184,38 @@ FM_Result File_Delete(const char *path)
     }
     FM_Core_SetLastError(r);
     return r;
+}
+
+/* Same-mount rename on already-resolved relative paths.  Shared by
+ * File_Rename and File_Move so both apply one policy (F-16):
+ * renaming an entry onto itself -- however the two paths were spelled
+ * ("/a/b" vs "/a/./b") -- is a no-op that never reaches the backend, so
+ * an adapter that implements rename as "delete target, then move" cannot
+ * lose the file.  A missing source is still reported. */
+static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
+                                      const char *to)
+{
+    if (m->fs->ops.rename == NULL)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    if (strcmp(from, to) == 0)
+    {
+        if (m->fs->ops.stat != NULL)
+        {
+            FM_FileInfo info;
+
+            return m->fs->ops.stat(m->fs, from, &info);
+        }
+        return FM_OK;
+    }
+#if FM_USE_CACHE
+    cache_lock();
+    cache_invalidate_path(m, from);
+    cache_invalidate_path(m, to);
+    cache_unlock();
+#endif
+    return m->fs->ops.rename(m->fs, from, to);
 }
 
 FM_Result File_Rename(const char *old_path, const char *new_path)
@@ -1054,13 +1240,31 @@ FM_Result File_Rename(const char *old_path, const char *new_path)
     {
         return FM_ERR_UNSUPPORTED; /* cross-mount rename: use Move */
     }
-    if (m1->fs->ops.rename == NULL)
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
-    r = m1->fs->ops.rename(m1->fs, r1, r2);
+    r = file_rename_resolved(m1, r1, r2);
     FM_Core_SetLastError(r);
     return r;
+}
+
+/* FM_TRUE when both paths name the same entry of the same mount after
+ * normalization.  Paths that do not resolve are never "the same": the
+ * caller's own open/resolve reports the real error. */
+FM_Bool FM_File_SamePath(const char *a, const char *b)
+{
+    FM_MountEntry *ma = NULL;
+    FM_MountEntry *mb = NULL;
+    char ra[FM_PATH_MAX];
+    char rb[FM_PATH_MAX];
+
+    if (a == NULL || b == NULL)
+    {
+        return FM_FALSE;
+    }
+    if (FM_VFS_Resolve(a, &ma, ra, sizeof(ra)) != FM_OK ||
+        FM_VFS_Resolve(b, &mb, rb, sizeof(rb)) != FM_OK)
+    {
+        return FM_FALSE;
+    }
+    return (ma == mb && strcmp(ra, rb) == 0) ? FM_TRUE : FM_FALSE;
 }
 
 FM_Result File_Exists(const char *path, FM_Bool *exists)
@@ -1345,135 +1549,202 @@ FM_Result FM_File_CopyStream(FM_File *src, FM_File *dst,
                              FM_ProgressCallback progress, void *user_data)
 {
     uint8_t *buf;
-    size_t buf_size;
+    size_t buf_size = 0;
     uint64_t total = 0;
     uint64_t done = 0;
     FM_Result r;
 
-    buf = FM_InternalBuffer();
-    buf_size = FM_InternalBufferSize();
-    if (buf == NULL)
+    if (src == NULL || dst == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (FM_InternalBufferSize() == 0u)
     {
         return FM_ERR_NO_MEMORY;
     }
-
-    r = File_Size(src, &total);
-    if (r != FM_OK)
+    /* F-11: one scratch buffer serves File_Copy, Directory_Copy and the
+     * File_Insert family.  A progress callback that starts another of
+     * them would overwrite the chunk in flight, so the nested call is
+     * refused instead of silently corrupting the copy. */
+    buf = FM_InternalBufferAcquire(&buf_size);
+    if (buf == NULL)
     {
-        return r;
+        return FM_ERR_BUSY;
     }
 
-    for (;;)
+    r = File_Size(src, &total);
+    while (r == FM_OK)
     {
         uint32_t rd = 0;
-        uint32_t wr = 0;
-        size_t chunk = buf_size;
+        uint32_t off = 0;
 
-        r = File_Read(src, buf, (uint32_t)chunk, &rd);
+        r = File_Read(src, buf, (uint32_t)buf_size, &rd);
         if (r == FM_ERR_EOF)
         {
             r = FM_OK;
+            if (rd == 0)
+            {
+                break;
+            }
+        }
+        if (r != FM_OK || rd == 0)
+        {
             break;
+        }
+        while (off < rd)
+        {
+            uint32_t wr = 0;
+
+            r = File_Write(dst, buf + off, rd - off, &wr);
+            if (r != FM_OK)
+            {
+                break;
+            }
+            if (wr == 0)
+            {
+                /* accepted nothing without an error: the volume is full */
+                r = FM_ERR_NO_SPACE;
+                break;
+            }
+            off += wr;
         }
         if (r != FM_OK)
         {
-            return r;
-        }
-        if (rd == 0)
-        {
             break;
         }
-        {
-            uint32_t off = 0;
-
-            while (off < rd)
-            {
-                uint32_t remaining = rd - off;
-
-                r = File_Write(dst, buf + off, remaining, &wr);
-                if (r != FM_OK)
-                {
-                    return r;
-                }
-                if (wr == 0)
-                {
-                    return FM_ERR_IO;
-                }
-                off += wr;
-            }
-        }
         done += rd;
-        if (progress != NULL)
+        /* F-05: 100 % is reported only once, below, after the flush. */
+        if (progress != NULL && done < total)
         {
             progress(done, total, user_data);
         }
     }
-    if (progress != NULL)
+    FM_InternalBufferRelease();
+
+    /* F-05: make the data durable BEFORE telling the caller it is all
+     * there.  Reporting done == total on a buffered write is the classic
+     * "progress bar completes, file is short after a power cut". */
+    if (r == FM_OK)
     {
-        progress(done, total, user_data);
+        r = File_Flush(dst);
     }
-    return FM_OK;
+    if (r == FM_OK && progress != NULL)
+    {
+        progress(done, (done > total) ? done : total, user_data);
+    }
+    return r;
 }
+
+#define FM_FILE_TMP_SUFFIX ".fm_tmp"
 
 FM_Result File_Copy(const char *src_path, const char *dst_path,
                     FM_ProgressCallback progress, void *user_data)
 {
+    FM_MountEntry *src_mount = NULL;
+    FM_MountEntry *dst_mount = NULL;
+    char tmp[FM_PATH_MAX];
+    const char *work_path;
+    FM_Bool staged = FM_FALSE;
     FM_File *src = NULL;
+    FM_File *dst = NULL;
+    FM_Result r;
+    FM_Result rc;
 
     if (src_path == NULL || dst_path == NULL)
     {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    if (strcmp(src_path, dst_path) == 0)
-    {
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
         return FM_ERR_INVALID_ARGUMENT;
     }
     {
-        FM_MountEntry *src_mount = NULL;
-        FM_MountEntry *dst_mount = NULL;
         char src_rel[FM_PATH_MAX];
         char dst_rel[FM_PATH_MAX];
 
-        if (FM_VFS_Resolve(src_path, &src_mount, src_rel, sizeof(src_rel)) == FM_OK &&
-            FM_VFS_Resolve(dst_path, &dst_mount, dst_rel, sizeof(dst_rel)) == FM_OK &&
-            src_mount == dst_mount && strcmp(src_rel, dst_rel) == 0)
+        r = FM_VFS_Resolve(src_path, &src_mount, src_rel, sizeof(src_rel));
+        if (r == FM_OK)
         {
+            r = FM_VFS_Resolve(dst_path, &dst_mount, dst_rel,
+                               sizeof(dst_rel));
+        }
+        if (r != FM_OK)
+        {
+            FM_Core_SetLastError(r);
+            return r;
+        }
+        if (src_mount == dst_mount && strcmp(src_rel, dst_rel) == 0)
+        {
+            FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
             return FM_ERR_INVALID_ARGUMENT;
         }
     }
-    FM_File *dst = NULL;
-    FM_Result r;
+
+    /* F-04: never let a failed copy leave a truncated destination, and
+     * never destroy an existing destination before the copy is known to
+     * be good.  The data goes to "<dst>.fm_tmp" (the pattern file_edit
+     * and File_SafeReplace already use) and is renamed over the
+     * destination only after it was written, flushed and closed.
+     *
+     * Staging needs rename support and a name that fits; otherwise the
+     * copy writes the destination directly and removes it on failure. */
+    if (dst_mount->fs->ops.rename != NULL &&
+        strlen(dst_path) + sizeof(FM_FILE_TMP_SUFFIX) <= sizeof(tmp))
+    {
+        (void)strcpy(tmp, dst_path);
+        (void)strcat(tmp, FM_FILE_TMP_SUFFIX);
+        /* copying "<x>.fm_tmp" to "<x>" must not stage onto its source */
+        staged = FM_File_SamePath(src_path, tmp) ? FM_FALSE : FM_TRUE;
+    }
+    work_path = staged ? tmp : dst_path;
 
     src = File_Open(src_path, FM_OPEN_READ);
     if (src == NULL)
     {
         return File_GetLastError();
     }
-    dst = File_Open(dst_path, FM_OPEN_WRITE | FM_OPEN_CREATE |
-                             FM_OPEN_TRUNCATE);
+    dst = File_Open(work_path, FM_OPEN_WRITE | FM_OPEN_CREATE |
+                               FM_OPEN_TRUNCATE);
+    if (dst == NULL && staged)
+    {
+        r = File_GetLastError();
+        if (r == FM_ERR_INVALID_PATH || r == FM_ERR_INVALID_ARGUMENT ||
+            r == FM_ERR_UNSUPPORTED)
+        {
+            /* The filesystem refuses the temp name (e.g. FAT without
+             * long-file-name support): fall back to a direct copy. */
+            staged = FM_FALSE;
+            work_path = dst_path;
+            dst = File_Open(work_path, FM_OPEN_WRITE | FM_OPEN_CREATE |
+                                       FM_OPEN_TRUNCATE);
+        }
+    }
     if (dst == NULL)
     {
         r = File_GetLastError();
         (void)File_Close(src);
+        FM_Core_SetLastError(r);
         return r;
     }
 
     r = FM_File_CopyStream(src, dst, progress, user_data);
+    rc = File_Close(dst);
+    if (r == FM_OK)
+    {
+        r = rc;
+    }
+    rc = File_Close(src);
+    if (r == FM_OK)
+    {
+        r = rc;
+    }
+    if (r == FM_OK && staged)
+    {
+        r = File_Rename(tmp, dst_path);
+    }
     if (r != FM_OK)
     {
-        (void)File_Close(dst);
-        (void)File_Close(src);
-        FM_Core_SetLastError(r);
-        return r;
+        /* remove only what this call wrote: the temp file, or (direct
+         * mode) the partial destination */
+        (void)File_Delete(work_path);
     }
-    r = File_Close(dst);
-    if (r != FM_OK)
-    {
-        (void)File_Close(src);
-        FM_Core_SetLastError(r);
-        return r;
-    }
-    r = File_Close(src);
     FM_Core_SetLastError(r);
     return r;
 }
@@ -1485,33 +1756,61 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
     FM_MountEntry *m2 = NULL;
     char r1[FM_PATH_MAX];
     char r2[FM_PATH_MAX];
+    FM_Bool dst_existed = FM_TRUE;
     FM_Result r;
 
-    /* Same-mount move is a rename (atomic and fast). */
-    if (FM_VFS_Resolve(src_path, &m1, r1, sizeof(r1)) != FM_OK)
+    /* F-01: reject NULL here and report the resolver's own verdict for
+     * BOTH paths (invalid path / too long / not mounted) instead of
+     * folding every cause into FM_ERR_NOT_FOUND. */
+    if (src_path == NULL || dst_path == NULL)
     {
-        return FM_ERR_NOT_FOUND;
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
+        return FM_ERR_INVALID_ARGUMENT;
     }
-    if (FM_VFS_Resolve(dst_path, &m2, r2, sizeof(r2)) == FM_OK && m1 == m2 &&
-        m1->fs->ops.rename != NULL)
+    r = FM_VFS_Resolve(src_path, &m1, r1, sizeof(r1));
+    if (r == FM_OK)
     {
-        r = m1->fs->ops.rename(m1->fs, r1, r2);
+        r = FM_VFS_Resolve(dst_path, &m2, r2, sizeof(r2));
+    }
+    if (r != FM_OK)
+    {
+        FM_Core_SetLastError(r);
+        return r;
+    }
+
+    /* Same-mount move is a rename (atomic and fast). */
+    if (m1 == m2 && m1->fs->ops.rename != NULL)
+    {
+        r = file_rename_resolved(m1, r1, r2);
         FM_Core_SetLastError(r);
         return r;
     }
 
     /* Cross-mount: copy then delete.  If the source delete fails after a
      * successful copy, remove the destination copy so the operation stays
-     * atomic from the caller's perspective. */
+     * atomic from the caller's perspective -- but ONLY when this call
+     * created it (F-02).  A destination that existed before the call was
+     * the caller's data; deleting it as "rollback" would leave the
+     * caller without the old file and without a completed move.  When
+     * the pre-check itself fails, assume it existed (never delete on a
+     * guess). */
+    {
+        FM_Bool exists = FM_FALSE;
+
+        if (File_Exists(dst_path, &exists) == FM_OK && !exists)
+        {
+            dst_existed = FM_FALSE;
+        }
+    }
     r = File_Copy(src_path, dst_path, progress, user_data);
     if (r != FM_OK)
     {
         return r;
     }
     r = File_Delete(src_path);
-    if (r != FM_OK)
+    if (r != FM_OK && !dst_existed)
     {
-        (void)File_Delete(dst_path); /* rollback: undo the copy */
+        (void)File_Delete(dst_path); /* rollback: undo only our copy */
     }
     FM_Core_SetLastError(r);
     return r;
@@ -1528,7 +1827,7 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
     FM_File *src = NULL;
     FM_File *dst = NULL;
     uint8_t *buf;
-    size_t buf_size;
+    size_t buf_size = 0;
     uint64_t size = 0;
     uint64_t pos = 0;
     FM_Result r;
@@ -1537,20 +1836,34 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    buf = FM_InternalBuffer();
-    buf_size = FM_InternalBufferSize();
-    if (buf == NULL)
+    /* F-15: the temp name must fit completely.  A silently truncated
+     * "<path>.fm_tmp" can be the original path itself (or another
+     * file's temp) -- the edit would then replace the wrong entry. */
+    if (strlen(path) + sizeof(FM_FILE_TMP_SUFFIX) > sizeof(tmp))
+    {
+        FM_Core_SetLastError(FM_ERR_INVALID_PATH);
+        return FM_ERR_INVALID_PATH;
+    }
+    (void)strcpy(tmp, path);
+    (void)strcat(tmp, FM_FILE_TMP_SUFFIX);
+
+    if (FM_InternalBufferSize() == 0u)
     {
         return FM_ERR_NO_MEMORY;
     }
-
-    (void)strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-    (void)strncat(tmp, ".fm_tmp", sizeof(tmp) - strlen(tmp) - 1);
+    /* F-11: refuse nested use of the shared scratch buffer (e.g. from a
+     * File_Copy progress callback) instead of corrupting both users. */
+    buf = FM_InternalBufferAcquire(&buf_size);
+    if (buf == NULL)
+    {
+        FM_Core_SetLastError(FM_ERR_BUSY);
+        return FM_ERR_BUSY;
+    }
 
     src = File_Open(path, FM_OPEN_READ);
     if (src == NULL)
     {
+        FM_InternalBufferRelease();
         return File_GetLastError();
     }
     dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
@@ -1558,6 +1871,7 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
     {
         r = File_GetLastError();
         (void)File_Close(src);
+        FM_InternalBufferRelease();
         return r;
     }
 
@@ -1671,6 +1985,9 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
         (void)pos;
     }
 
+    FM_InternalBufferRelease();
+    buf = NULL;
+
     r = File_Close(dst);
     dst = NULL;
     if (r != FM_OK)
@@ -1694,6 +2011,10 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
     return r;
 
 fail:
+    if (buf != NULL)
+    {
+        FM_InternalBufferRelease();
+    }
     if (dst != NULL)
     {
         (void)File_Close(dst);

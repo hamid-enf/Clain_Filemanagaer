@@ -94,7 +94,11 @@ typedef struct
 FM_Result FM_Transfer_Copy(const char *src_path, const char *dst_path,
                            const FM_TransferOpts *opts);
 
-/* مثل بالا ولی با گزارش تفصیلی. */
+/* مثل بالا ولی با گزارش تفصیلی.
+ *
+ * مبدأ و مقصدِ یکسان (بعد از نرمال‌سازی مسیر) → FM_ERR_INVALID_ARGUMENT و
+ * فایل دست‌نخورده می‌ماند. با verify، اگر CRC مقصد با مبدأ نخواند مقصد
+ * حذف می‌شود و FM_ERR_CORRUPTED برمی‌گردد. */
 FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
                              const FM_TransferOpts *opts,
                              FM_TransferInfo *out_info);
@@ -130,12 +134,27 @@ FM_Result FM_Transfer_SaveFile(const char *path, const void *src, size_t len);
  * برای فلش NOR، ناحیهٔ مقصد قبل از نوشتن پاک می‌شود.
  *
  *     FM_Transfer_Raw(sd, 0, qspi, 0, 1024*1024, NULL);
+ *
+ * قرارداد (قبل از اولین erase/write بررسی می‌شود؛ در صورت نقض هیچ بایتی
+ * دست نمی‌خورد و FM_ERR_INVALID_ARGUMENT برمی‌گردد):
+ *   • [src_off, src_off+bytes) و [dst_off, dst_off+bytes) باید داخل
+ *     capacity همان storage باشند.
+ *   • اگر مقصد erase دارد (erase_size != 0)، dst_off باید مضرب erase_size
+ *     باشد. پاک‌کردن واحد‌به‌واحد انجام می‌شود و آخرین واحد کامل پاک
+ *     می‌شود (حتی اگر bytes وسط آن تمام شود) — مثل هر ابزار پروگرام فلش.
+ *   • در حین erase، progress با done = 0 صدا زده می‌شود تا بتوانید لغو
+ *     کنید؛ درصد از شروع کپی بالا می‌رود.
+ *
+ * توابع این فایل یک بافر میانی مشترک دارند: اگر از داخل progress (یا از
+ * ترد دیگر) دوباره FM_Transfer_* صدا بزنید FM_ERR_BUSY می‌گیرید.
  */
 FM_Result FM_Transfer_Raw(FM_Storage *src, uint64_t src_off,
                           FM_Storage *dst, uint64_t dst_off,
                           uint64_t bytes, const FM_TransferOpts *opts);
 
-/* مقایسهٔ دو ناحیه. FM_OK یعنی یکی هستند، FM_ERR_CORRUPT یعنی فرق دارند. */
+/* مقایسهٔ دو ناحیه. FM_OK یعنی یکی هستند، FM_ERR_CORRUPTED یعنی فرق دارند.
+ * storage بدون read → FM_ERR_UNSUPPORTED؛ بازهٔ خارج از capacity →
+ * FM_ERR_INVALID_ARGUMENT. */
 FM_Result FM_Transfer_RawVerify(FM_Storage *a, uint64_t a_off,
                                 FM_Storage *b, uint64_t b_off,
                                 uint64_t bytes);

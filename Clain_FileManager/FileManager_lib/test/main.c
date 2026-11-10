@@ -4638,6 +4638,1490 @@ static void test_transfer(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* File / Transfer report regressions (F-01 .. F-16)                   */
+/*                                                                     */
+/* A wrapper filesystem sits on top of the POSIX adapter and lets a    */
+/* test inject exactly one fault: a failing delete, a write that runs  */
+/* out of space, a read that returns FM_ERR_IO, a corrupted write.     */
+/* A second mount of the POSIX adapter maps to the same host           */
+/* directory, so "/ram/x" and "/x" are the same host file seen through  */
+/* two different mounts.                                               */
+/* ------------------------------------------------------------------ */
+static FM_FS     g_wfs;
+static FM_FS     g_wfs_base;
+static FM_Result g_wfs_delete_result = FM_OK;
+static int64_t   g_wfs_write_budget = -1;   /* bytes left, -1 = no limit */
+static uint32_t  g_wfs_read_calls;
+static uint32_t  g_wfs_read_fail_at;        /* fail this call (1-based)  */
+static uint32_t  g_wfs_open_calls;
+static uint32_t  g_wfs_read_fail_from_open; /* fail reads from Nth open  */
+static uint32_t  g_wfs_flush_calls;
+static uint32_t  g_wfs_rename_calls;
+static FM_Bool   g_wfs_corrupt;
+
+static void wfs_reset(void)
+{
+    g_wfs_delete_result = FM_OK;
+    g_wfs_write_budget = -1;
+    g_wfs_read_calls = 0u;
+    g_wfs_read_fail_at = 0u;
+    g_wfs_open_calls = 0u;
+    g_wfs_read_fail_from_open = 0u;
+    g_wfs_flush_calls = 0u;
+    g_wfs_rename_calls = 0u;
+    g_wfs_corrupt = FM_FALSE;
+}
+
+static FM_Result wfs_delete(FM_FS *fs, const char *path)
+{
+    if (g_wfs_delete_result != FM_OK)
+    {
+        return g_wfs_delete_result;
+    }
+    return g_wfs_base.ops.delete_file(fs, path);
+}
+
+static FM_Result wfs_rename(FM_FS *fs, const char *a, const char *b)
+{
+    g_wfs_rename_calls++;
+    return g_wfs_base.ops.rename(fs, a, b);
+}
+
+static FM_Result wfs_open(FM_FS *fs, void *fh, const char *path,
+                          uint32_t mode)
+{
+    g_wfs_open_calls++;
+    return g_wfs_base.ops.file_open(fs, fh, path, mode);
+}
+
+static FM_Result wfs_read(FM_FS *fs, void *fh, void *buf, uint32_t len,
+                          uint32_t *got)
+{
+    g_wfs_read_calls++;
+    if (g_wfs_read_fail_at != 0u && g_wfs_read_calls >= g_wfs_read_fail_at)
+    {
+        if (got != NULL) { *got = 0u; }
+        return FM_ERR_IO;
+    }
+    if (g_wfs_read_fail_from_open != 0u &&
+        g_wfs_open_calls >= g_wfs_read_fail_from_open)
+    {
+        if (got != NULL) { *got = 0u; }
+        return FM_ERR_IO;
+    }
+    return g_wfs_base.ops.file_read(fs, fh, buf, len, got);
+}
+
+static FM_Result wfs_write(FM_FS *fs, void *fh, const void *buf,
+                           uint32_t len, uint32_t *put)
+{
+    uint32_t n = len;
+
+    if (g_wfs_write_budget >= 0)
+    {
+        if (g_wfs_write_budget == 0)
+        {
+            if (put != NULL) { *put = 0u; }
+            return FM_ERR_NO_SPACE;
+        }
+        if ((int64_t)n > g_wfs_write_budget)
+        {
+            n = (uint32_t)g_wfs_write_budget;
+        }
+        g_wfs_write_budget -= (int64_t)n;
+    }
+    if (g_wfs_corrupt && n > 0u)
+    {
+        /* flip the first byte of every chunk on its way to the "disk" */
+        uint8_t bad = (uint8_t)(((const uint8_t *)buf)[0] ^ 0xFFu);
+        uint32_t w1 = 0u;
+        uint32_t w2 = 0u;
+        FM_Result r = g_wfs_base.ops.file_write(fs, fh, &bad, 1u, &w1);
+
+        if (r == FM_OK && n > 1u)
+        {
+            r = g_wfs_base.ops.file_write(fs, fh,
+                                          (const uint8_t *)buf + 1, n - 1u,
+                                          &w2);
+        }
+        if (put != NULL) { *put = w1 + w2; }
+        return r;
+    }
+    return g_wfs_base.ops.file_write(fs, fh, buf, n, put);
+}
+
+static FM_Result wfs_flush(FM_FS *fs, void *fh)
+{
+    g_wfs_flush_calls++;
+    return (g_wfs_base.ops.file_flush != NULL)
+               ? g_wfs_base.ops.file_flush(fs, fh) : FM_OK;
+}
+
+static FM_Result wfs_mount(const char *where)
+{
+    FM_Result r = PosixFS_Init(&g_wfs_base);
+
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    memset(&g_wfs, 0, sizeof(g_wfs));
+    (void)strcpy(g_wfs.name, "WRAPFS");
+    g_wfs.ops = g_wfs_base.ops;
+    g_wfs.ops.delete_file = wfs_delete;
+    g_wfs.ops.rename = wfs_rename;
+    g_wfs.ops.file_open = wfs_open;
+    g_wfs.ops.file_read = wfs_read;
+    g_wfs.ops.file_write = wfs_write;
+    g_wfs.ops.file_flush = wfs_flush;
+    wfs_reset();
+    r = FS_Register(&g_wfs);
+    if (r == FM_OK)
+    {
+        r = FS_Mount(where, &g_wfs);
+    }
+    return r;
+}
+
+static void wfs_unmount(const char *where)
+{
+    (void)FS_Unmount(where);
+    (void)FS_Unregister("WRAPFS");
+    wfs_reset();
+}
+
+/* Fake raw storage that records what the transfer layer asks for. */
+typedef struct
+{
+    uint8_t *mem;            /* backing bytes (may be NULL: discard)   */
+    uint32_t mem_size;
+    uint32_t reads;
+    uint32_t writes;
+    uint32_t erases;
+    uint64_t max_write_end;
+    uint64_t erase_off[8];
+    uint32_t erase_len[8];
+    FM_Bool  strict_erase;   /* reject anything but whole aligned units */
+} FakeStore;
+
+static FM_Result fake_read(FM_Storage *s, uint64_t off, void *buf,
+                           uint32_t len)
+{
+    FakeStore *fsr = (FakeStore *)s->user_data;
+
+    fsr->reads++;
+    if (fsr->mem != NULL && off < fsr->mem_size &&
+        len <= fsr->mem_size - (uint32_t)off)
+    {
+        memcpy(buf, fsr->mem + off, len);
+    }
+    return FM_OK;
+}
+
+static FM_Result fake_write(FM_Storage *s, uint64_t off, const void *buf,
+                            uint32_t len)
+{
+    FakeStore *fsr = (FakeStore *)s->user_data;
+
+    fsr->writes++;
+    if (off + len > fsr->max_write_end)
+    {
+        fsr->max_write_end = off + len;
+    }
+    if (fsr->mem != NULL && off < fsr->mem_size &&
+        len <= fsr->mem_size - (uint32_t)off)
+    {
+        memcpy(fsr->mem + off, buf, len);
+    }
+    return FM_OK;
+}
+
+static FM_Result fake_erase(FM_Storage *s, uint64_t off, uint32_t len)
+{
+    FakeStore *fsr = (FakeStore *)s->user_data;
+
+    if (fsr->strict_erase && s->erase_size != 0u &&
+        ((off % s->erase_size) != 0u || (len % s->erase_size) != 0u ||
+         len == 0u))
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (fsr->erases < 8u)
+    {
+        fsr->erase_off[fsr->erases] = off;
+        fsr->erase_len[fsr->erases] = len;
+    }
+    fsr->erases++;
+    if (fsr->mem != NULL && off < fsr->mem_size &&
+        len <= fsr->mem_size - (uint32_t)off)
+    {
+        memset(fsr->mem + off, 0xFF, len);
+    }
+    return FM_OK;
+}
+
+static void fake_store_init(FM_Storage *s, FakeStore *fsr, uint8_t *mem,
+                            uint32_t mem_size, uint64_t capacity)
+{
+    memset(s, 0, sizeof(*s));
+    memset(fsr, 0, sizeof(*fsr));
+    fsr->mem = mem;
+    fsr->mem_size = mem_size;
+    (void)strcpy(s->name, "fake");
+    s->capacity = capacity;
+    s->present = 1u;
+    s->user_data = fsr;
+    s->read = fake_read;
+    s->write = fake_write;
+}
+
+static FM_Bool f_cancel_now_cb(uint64_t done, uint64_t total, void *user)
+{
+    (void)done;
+    (void)total;
+    (void)user;
+    return FM_FALSE;
+}
+
+/* F-05: what the copy had flushed when each progress report arrived */
+static uint32_t g_f05_calls;
+static uint32_t g_f05_full_reports;
+static uint32_t g_f05_flushes_at_full;
+static uint32_t g_f05_flushes_before_full;
+
+static void f05_progress(uint64_t cur, uint64_t total, void *user)
+{
+    (void)user;
+    g_f05_calls++;
+    if (cur >= total)
+    {
+        g_f05_full_reports++;
+        g_f05_flushes_at_full = g_wfs_flush_calls;
+    }
+    else
+    {
+        g_f05_flushes_before_full = g_wfs_flush_calls;
+    }
+}
+
+/* F-11: a progress callback that starts another copy / edit */
+static FM_Result g_f11_nested_copy = FM_OK;
+static FM_Result g_f11_nested_insert = FM_OK;
+static FM_Bool   g_f11_ran;
+
+static void f11_file_progress(uint64_t cur, uint64_t total, void *user)
+{
+    (void)cur;
+    (void)total;
+    (void)user;
+    if (!g_f11_ran)
+    {
+        g_f11_ran = FM_TRUE;
+        g_f11_nested_copy = File_Copy("/f11_other.bin", "/f11_other2.bin",
+                                      NULL, NULL);
+        g_f11_nested_insert = File_Insert("/f11_other.bin", 0u, "zz", 2u);
+    }
+}
+
+static FM_Result g_f11_nested_xfer = FM_OK;
+
+static FM_Bool f11_xfer_progress(uint64_t done, uint64_t total, void *user)
+{
+    (void)done;
+    (void)total;
+    (void)user;
+    if (!g_f11_ran)
+    {
+        g_f11_ran = FM_TRUE;
+        g_f11_nested_xfer = FM_Transfer_Copy("/f11_other.bin",
+                                             "/f11_other2.bin", NULL);
+    }
+    return FM_TRUE;
+}
+
+#ifdef FM_XFER_CACHE_CLEAN
+/* The matrix builds one configuration with the transfer layer's cache
+ * hooks redirected here (see tools/check_matrix.sh). */
+static uint32_t g_xfer_clean_calls;
+static uint32_t g_xfer_inval_calls;
+static uint32_t g_xfer_hook_unaligned;
+
+void FM_XFER_CACHE_CLEAN(const void *addr, size_t bytes);
+void FM_XFER_CACHE_INVALIDATE(void *addr, size_t bytes);
+
+void FM_XFER_CACHE_CLEAN(const void *addr, size_t bytes)
+{
+    (void)bytes;
+    g_xfer_clean_calls++;
+    if (((uintptr_t)addr & 31u) != 0u)
+    {
+        g_xfer_hook_unaligned++;
+    }
+}
+
+void FM_XFER_CACHE_INVALIDATE(void *addr, size_t bytes)
+{
+    (void)bytes;
+    g_xfer_inval_calls++;
+    if (((uintptr_t)addr & 31u) != 0u)
+    {
+        g_xfer_hook_unaligned++;
+    }
+}
+#endif
+
+static FM_Bool f_file_equals(const char *path, const void *want, size_t len)
+{
+    static uint8_t back[48u * 1024u];
+    size_t got = 0;
+
+    if (len > sizeof(back))
+    {
+        return FM_FALSE;
+    }
+    if (File_ReadAll(path, back, sizeof(back), &got) != FM_OK)
+    {
+        return FM_FALSE;
+    }
+    return (got == len && memcmp(back, want, len) == 0) ? FM_TRUE : FM_FALSE;
+}
+
+static FM_Bool f_exists(const char *path)
+{
+    FM_Bool exists = FM_FALSE;
+
+    return (File_Exists(path, &exists) == FM_OK && exists) ? FM_TRUE
+                                                          : FM_FALSE;
+}
+
+static void test_file_report(void)
+{
+    static uint8_t big[40000];
+    size_t i;
+
+    restore_posix_root();
+    for (i = 0; i < sizeof(big); i++)
+    {
+        big[i] = (uint8_t)((i * 31u) ^ (i >> 7));
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-01: File_Move reports NULL / resolver errors as they are");
+    {
+        static char longp[FM_PATH_MAX + 64];
+        FM_Result a, b, c, d, e, f;
+
+        /* no root mount for this one, so "/nomount" really is unmounted */
+        (void)FS_Unmount("/");
+        (void)FS_Mount("/ram", &g_fs);
+        (void)File_WriteText("/ram/mv_a.txt", "0123456789");
+        memset(longp, 'a', sizeof(longp) - 1u);
+        longp[0] = '/';
+        longp[sizeof(longp) - 1u] = '\0';
+
+        a = File_Move(NULL, "/ram/mv_b.txt", NULL, NULL);
+        b = File_Move("/ram/mv_a.txt", NULL, NULL, NULL);
+        c = File_Move("/nomount/x.txt", "/ram/mv_c.txt", NULL, NULL);
+        d = File_Move("/ram/mv_a.txt", "/nomount/y.txt", NULL, NULL);
+        e = File_Move(longp, "/ram/mv_b.txt", NULL, NULL);
+        f = File_Move("relative.txt", "/ram/mv_b.txt", NULL, NULL);
+        if (a != FM_ERR_INVALID_ARGUMENT || b != FM_ERR_INVALID_ARGUMENT ||
+            c != FM_ERR_NOT_MOUNTED || d != FM_ERR_NOT_MOUNTED ||
+            e != FM_ERR_TOO_LARGE || f != FM_ERR_INVALID_PATH)
+        {
+            static char m[96];
+
+            (void)snprintf(m, sizeof(m), "got %d,%d,%d,%d,%d,%d", (int)a,
+                           (int)b, (int)c, (int)d, (int)e, (int)f);
+            FAIL(m);
+        }
+        else if (!f_exists("/ram/mv_a.txt"))
+        {
+            FAIL("a rejected move removed the source");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/ram/mv_a.txt");
+        (void)FS_Unmount("/ram");
+        restore_posix_root();
+    }
+
+    /* ---------------------------------------------------------------- */
+    if (wfs_mount("/ram") != FM_OK)
+    {
+        TEST("F-xx: wrapper filesystem mount");
+        FAIL("could not mount the fault-injection filesystem");
+        wfs_unmount("/ram");
+        return;
+    }
+
+    TEST("F-02: failed move keeps a destination that already existed");
+    {
+        FM_Result r;
+
+        (void)File_WriteText("/f02_src.txt", "payload-to-move");
+        (void)File_WriteText("/f02_dst.txt",
+                             "IMPORTANT-PRE-EXISTING-DESTINATION");
+        g_wfs_delete_result = FM_ERR_ACCESS;       /* read-only source */
+        r = File_Move("/ram/f02_src.txt", "/f02_dst.txt", NULL, NULL);
+        g_wfs_delete_result = FM_OK;
+        if (r != FM_ERR_ACCESS)
+        {
+            FAIL("source delete failure not reported");
+        }
+        else if (!f_exists("/f02_src.txt"))
+        {
+            FAIL("source vanished");
+        }
+        else if (!f_exists("/f02_dst.txt"))
+        {
+            FAIL("rollback deleted the caller's pre-existing destination");
+        }
+        else if (!f_file_equals("/f02_dst.txt", "payload-to-move", 15u))
+        {
+            FAIL("destination is neither old nor a complete copy");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-02: failed move still rolls back a destination it created");
+    {
+        FM_Result r;
+
+        (void)File_Delete("/f02_dst.txt");
+        g_wfs_delete_result = FM_ERR_ACCESS;
+        r = File_Move("/ram/f02_src.txt", "/f02_dst.txt", NULL, NULL);
+        g_wfs_delete_result = FM_OK;
+        if (r != FM_ERR_ACCESS)
+        {
+            FAIL("source delete failure not reported");
+        }
+        else if (f_exists("/f02_dst.txt"))
+        {
+            FAIL("copy left behind although the move failed");
+        }
+        else if (!f_exists("/f02_src.txt"))
+        {
+            FAIL("source vanished");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f02_src.txt");
+        (void)File_Delete("/f02_dst.txt");
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-03: File_PoolDump separates internal and external");
+    {
+        FM_LogSinkFn saved;
+        void *saved_ctx = NULL;
+        FM_File *in;
+        FM_File x1;
+        FM_File x2;
+        uint32_t i0 = 0u, e0 = 0u, i1 = 0u, e1 = 0u;
+        char want[64];
+
+        File_PoolUsedSplit(&i0, &e0);
+        (void)File_WriteText("/f03_a.txt", "a");
+        (void)File_WriteText("/f03_b.txt", "b");
+        (void)File_WriteText("/f03_c.txt", "c");
+        File_Init(&x1);
+        File_Init(&x2);
+        in = File_Open("/f03_a.txt", FM_OPEN_READ);
+        (void)File_OpenEx(&x1, "/f03_b.txt", FM_OPEN_READ);
+        (void)File_OpenEx(&x2, "/f03_c.txt", FM_OPEN_READ);
+        File_PoolUsedSplit(&i1, &e1);
+
+        saved = FM_Log_GetSink(&saved_ctx);
+        g_logcap_len = 0;
+        g_logcap[0] = '\0';
+        FM_Log_SetSink(test_log_sink, NULL);
+        File_PoolDump();
+        FM_Log_SetSink(saved, saved_ctx);
+
+        (void)snprintf(want, sizeof(want), "%lu internal / %lu external",
+                       (unsigned long)(i0 + 1u), (unsigned long)(e0 + 2u));
+        if (in == NULL || !File_IsOpen(&x1) || !File_IsOpen(&x2))
+        {
+            FAIL("could not open the three handles");
+        }
+        else if (i1 != i0 + 1u || e1 != e0 + 2u)
+        {
+            FAIL("File_PoolUsedSplit miscounts");
+        }
+        else if (File_PoolUsed() != i1 + e1)
+        {
+            FAIL("File_PoolUsed is no longer the total");
+        }
+        else if (strstr(g_logcap, want) == NULL)
+        {
+            FAIL("header does not show the two counts separately");
+        }
+        else if (strstr(g_logcap, "] /f03_a.txt") == NULL ||
+                 strstr(g_logcap, "[i") == NULL ||
+                 strstr(g_logcap, "[x") == NULL)
+        {
+            FAIL("slot tags [i..] / [x..] missing");
+        }
+        else
+        {
+            /* the pool handle is tagged i, the OpenEx handles x */
+            const char *pa = strstr(g_logcap, "] /f03_a.txt");
+            const char *pb = strstr(g_logcap, "] /f03_b.txt");
+            const char *pc = strstr(g_logcap, "] /f03_c.txt");
+
+            if (pb == NULL || pc == NULL || pa - g_logcap < 3 ||
+                pb - g_logcap < 3 || pc - g_logcap < 3 ||
+                pa[-2] != 'i' || pb[-2] != 'x' || pc[-2] != 'x')
+            {
+                FAIL("tag does not match the handle kind");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+        if (in != NULL) { (void)File_Close(in); }
+        (void)File_Close(&x1);
+        (void)File_Close(&x2);
+        (void)File_Delete("/f03_a.txt");
+        (void)File_Delete("/f03_b.txt");
+        (void)File_Delete("/f03_c.txt");
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-04: failed File_Copy leaves no partial destination");
+    {
+        FM_Result r;
+
+        (void)File_WriteAll("/f04_src.bin", big, sizeof(big));
+        (void)File_Delete("/f04_dst.bin");
+        g_wfs_write_budget = 5000;
+        r = File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL, NULL);
+        g_wfs_write_budget = -1;
+        if (r != FM_ERR_NO_SPACE)
+        {
+            static char m[48];
+
+            (void)snprintf(m, sizeof(m), "expected NO_SPACE, got %d",
+                           (int)r);
+            FAIL(m);
+        }
+        else if (f_exists("/f04_dst.bin"))
+        {
+            FAIL("truncated destination left behind");
+        }
+        else if (f_exists("/f04_dst.bin.fm_tmp"))
+        {
+            FAIL("temp file left behind");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-04: failed File_Copy keeps an existing destination intact");
+    {
+        static const char old_txt[] = "OLD-DESTINATION-CONTENT";
+        FM_Result r;
+
+        (void)File_WriteText("/f04_dst.bin", old_txt);
+        g_wfs_write_budget = 5000;
+        r = File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL, NULL);
+        g_wfs_write_budget = -1;
+        if (r != FM_ERR_NO_SPACE)
+        {
+            FAIL("expected NO_SPACE");
+        }
+        else if (!f_file_equals("/f04_dst.bin", old_txt,
+                                sizeof(old_txt) - 1u))
+        {
+            FAIL("old destination was destroyed by a failed copy");
+        }
+        else if (f_exists("/f04_dst.bin.fm_tmp"))
+        {
+            FAIL("temp file left behind");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-04: successful File_Copy replaces the destination");
+    {
+        FM_Result r = File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL,
+                                NULL);
+
+        if (r != FM_OK)
+        {
+            FAIL("copy failed");
+        }
+        else if (!f_file_equals("/f04_dst.bin", big, sizeof(big)))
+        {
+            FAIL("content differs");
+        }
+        else if (f_exists("/f04_dst.bin.fm_tmp"))
+        {
+            FAIL("temp file left behind");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-04: adapter without rename -> no partial file either");
+    {
+        FM_FS_RenameFn keep = g_wfs.ops.rename;
+        FM_Result r;
+
+        (void)File_Delete("/f04_dst.bin");
+        g_wfs.ops.rename = NULL;             /* direct-write mode */
+        g_wfs_write_budget = 5000;
+        r = File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL, NULL);
+        g_wfs_write_budget = -1;
+        if (r != FM_ERR_NO_SPACE)
+        {
+            FAIL("expected NO_SPACE");
+        }
+        else if (f_exists("/f04_dst.bin"))
+        {
+            FAIL("truncated destination left behind");
+        }
+        else if (File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL,
+                           NULL) != FM_OK ||
+                 !f_file_equals("/f04_dst.bin", big, sizeof(big)))
+        {
+            FAIL("direct-mode copy broken");
+        }
+        else
+        {
+            PASS();
+        }
+        g_wfs.ops.rename = keep;
+        (void)File_Delete("/f04_dst.bin");
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-05: 100% progress is reported only after the flush");
+    {
+        FM_Result r;
+
+        (void)File_WriteAll("/f05_src.bin", big, 3000u);
+        (void)File_Delete("/f05_dst.bin");
+        g_f05_calls = 0u;
+        g_f05_full_reports = 0u;
+        g_f05_flushes_at_full = 0u;
+        g_f05_flushes_before_full = 0u;
+        g_wfs_flush_calls = 0u;
+        r = File_Copy("/f05_src.bin", "/ram/f05_dst.bin", f05_progress,
+                      NULL);
+        if (r != FM_OK)
+        {
+            FAIL("copy failed");
+        }
+        else if (g_f05_full_reports != 1u)
+        {
+            FAIL("done == total must be reported exactly once");
+        }
+        else if (g_f05_flushes_at_full == 0u)
+        {
+            FAIL("100% reported before any flush");
+        }
+        else if (g_f05_flushes_before_full != 0u || g_f05_calls < 2u)
+        {
+            FAIL("intermediate reports missing or flushed early");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f05_src.bin");
+        (void)File_Delete("/f05_dst.bin");
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-06: Transfer_Raw rejects ranges past the capacity");
+    {
+        static uint8_t smem[4096];
+        static uint8_t dmem[1024];
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_Result r1, r2, r3;
+
+        fake_store_init(&s, &fsrc, smem, sizeof(smem), sizeof(smem));
+        fake_store_init(&d, &fdst, dmem, sizeof(dmem), sizeof(dmem));
+        r1 = FM_Transfer_Raw(&s, 0, &d, 1008, 256, NULL);
+        r2 = FM_Transfer_Raw(&s, UINT64_MAX - 8u, &d, 0, 16, NULL);
+        r3 = FM_Transfer_Raw(&s, 0, &d, UINT64_MAX - 8u, 16, NULL);
+        if (r1 != FM_ERR_INVALID_ARGUMENT || r2 != FM_ERR_INVALID_ARGUMENT ||
+            r3 != FM_ERR_INVALID_ARGUMENT)
+        {
+            FAIL("out-of-range request accepted");
+        }
+        else if (fdst.writes != 0u || fsrc.reads != 0u)
+        {
+            FAIL("driver was called for a rejected request");
+        }
+        else if (FM_Transfer_Raw(&s, 0, &d, 768, 256, NULL) != FM_OK ||
+                 fdst.max_write_end != 1024u)
+        {
+            FAIL("a request ending exactly at capacity must work");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-07: erase goes unit by unit, exactly aligned");
+    {
+        static uint8_t smem[16384];
+        static uint8_t dmem[32768];
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_Result r;
+
+        memcpy(smem, big, sizeof(smem));
+        fake_store_init(&s, &fsrc, smem, sizeof(smem), sizeof(smem));
+        fake_store_init(&d, &fdst, dmem, sizeof(dmem), sizeof(dmem));
+        d.erase = fake_erase;
+        d.erase_size = 4096u;
+        fdst.strict_erase = FM_TRUE;
+        memset(dmem, 0, sizeof(dmem));
+
+        r = FM_Transfer_Raw(&s, 0, &d, 4096, 8192, NULL);
+        if (r != FM_OK)
+        {
+            FAIL("aligned raw copy failed");
+        }
+        else if (fdst.erases != 2u || fdst.erase_off[0] != 4096u ||
+                 fdst.erase_len[0] != 4096u || fdst.erase_off[1] != 8192u ||
+                 fdst.erase_len[1] != 4096u)
+        {
+            FAIL("expected 2 erases of 4096 at 4096 and 8192");
+        }
+        else if (memcmp(dmem + 4096, smem, 8192) != 0 || dmem[0] != 0u ||
+                 dmem[12288] != 0u)
+        {
+            FAIL("data wrong or a neighbouring unit was touched");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-07: the last, partly used unit is erased whole");
+    {
+        static uint8_t smem[8192];
+        static uint8_t dmem[16384];
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_Result r;
+
+        memcpy(smem, big, sizeof(smem));
+        fake_store_init(&s, &fsrc, smem, sizeof(smem), sizeof(smem));
+        fake_store_init(&d, &fdst, dmem, sizeof(dmem), sizeof(dmem));
+        d.erase = fake_erase;
+        d.erase_size = 4096u;
+        fdst.strict_erase = FM_TRUE;
+        memset(dmem, 0, sizeof(dmem));
+
+        r = FM_Transfer_Raw(&s, 0, &d, 0, 5000, NULL);
+        if (r != FM_OK)
+        {
+            FAIL("copy with a length that is not a unit multiple failed");
+        }
+        else if (fdst.erases != 2u || fdst.erase_off[1] != 4096u ||
+                 fdst.erase_len[1] != 4096u)
+        {
+            FAIL("expected 2 whole-unit erases");
+        }
+        else if (memcmp(dmem, smem, 5000) != 0 || dmem[8192] != 0u)
+        {
+            FAIL("data wrong or a unit past the range was erased");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("F-07: unaligned start is refused before anything is touched");
+    {
+        static uint8_t smem[8192];
+        static uint8_t dmem[16384];
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_Result r;
+
+        fake_store_init(&s, &fsrc, smem, sizeof(smem), sizeof(smem));
+        fake_store_init(&d, &fdst, dmem, sizeof(dmem), sizeof(dmem));
+        d.erase = fake_erase;
+        d.erase_size = 4096u;
+        fdst.strict_erase = FM_TRUE;
+
+        r = FM_Transfer_Raw(&s, 0, &d, 1024, 8192, NULL);
+        if (r != FM_ERR_INVALID_ARGUMENT)
+        {
+            FAIL("expected INVALID_ARGUMENT");
+        }
+        else if (fdst.erases != 0u || fdst.writes != 0u || fsrc.reads != 0u)
+        {
+            FAIL("device touched by a rejected request");
+        }
+        else
+        {
+            /* a device without erase units has no such rule */
+            d.erase = NULL;
+            d.erase_size = 0u;
+            if (FM_Transfer_Raw(&s, 0, &d, 1024, 4096, NULL) != FM_OK)
+            {
+                FAIL("plain device must accept any offset");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+    }
+
+    TEST("F-07: erase can be cancelled; 4 GiB is not truncated to 0");
+    {
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_TransferOpts o;
+        FM_Result r;
+
+        fake_store_init(&s, &fsrc, NULL, 0u, (uint64_t)1 << 33);
+        fake_store_init(&d, &fdst, NULL, 0u, (uint64_t)1 << 33);
+        d.erase = fake_erase;
+        d.erase_size = 0x40000000u;          /* 1 GiB erase unit */
+        fdst.strict_erase = FM_TRUE;
+        memset(&o, 0, sizeof(o));
+        o.progress = f_cancel_now_cb;
+
+        r = FM_Transfer_Raw(&s, 0, &d, 0, (uint64_t)1 << 32, &o);
+        if (r != FM_ERR_CANCELLED || fdst.erases != 0u || fdst.writes != 0u)
+        {
+            FAIL("cancel before the first erase was ignored");
+        }
+        else
+        {
+            r = FM_Transfer_Raw(&s, 0, &d, 0, (uint64_t)1 << 32, NULL);
+            if (r != FM_OK)
+            {
+                FAIL("4 GiB raw copy failed");
+            }
+            else if (fdst.erases != 4u ||
+                     fdst.erase_off[3] != (uint64_t)3 << 30 ||
+                     fdst.erase_len[3] != 0x40000000u)
+            {
+                FAIL("4 GiB must be erased as 4 units of 1 GiB");
+            }
+            else if (fdst.max_write_end != (uint64_t)1 << 32)
+            {
+                FAIL("not all bytes were written");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-08: RawVerify without read() is an error, not a crash");
+    {
+        static uint8_t mem[64];
+        FM_Storage a, b;
+        FakeStore fa, fb;
+        FM_Result r1, r2, r3;
+
+        fake_store_init(&a, &fa, mem, sizeof(mem), sizeof(mem));
+        fake_store_init(&b, &fb, mem, sizeof(mem), sizeof(mem));
+        a.read = NULL;
+        b.read = NULL;
+        r1 = FM_Transfer_RawVerify(&a, 0, &b, 0, 16);
+        a.read = fake_read;
+        r2 = FM_Transfer_RawVerify(&a, 0, &b, 0, 16);
+        b.read = fake_read;
+        r3 = FM_Transfer_RawVerify(&a, 60, &b, 0, 16);
+        if (r1 != FM_ERR_UNSUPPORTED || r2 != FM_ERR_UNSUPPORTED)
+        {
+            FAIL("missing read() not reported as UNSUPPORTED");
+        }
+        else if (r3 != FM_ERR_INVALID_ARGUMENT)
+        {
+            FAIL("range past capacity accepted");
+        }
+        else if (FM_Transfer_RawVerify(&a, 0, &b, 0, 64) != FM_OK)
+        {
+            FAIL("valid verify failed");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-09: Transfer_Copy/Move onto itself keeps the file");
+    {
+        static const char txt[] = "twenty-four bytes here!!";
+        FM_Result r1, r2, r3;
+
+        (void)File_WriteText("/f09_same.txt", txt);
+        r1 = FM_Transfer_Copy("/f09_same.txt", "/f09_same.txt", NULL);
+        r2 = FM_Transfer_Copy("/f09_same.txt", "/./f09_same.txt", NULL);
+        r3 = FM_Transfer_Move("/f09_same.txt", "/f09_same.txt", NULL);
+        if (r1 != FM_ERR_INVALID_ARGUMENT || r2 != FM_ERR_INVALID_ARGUMENT ||
+            r3 != FM_ERR_INVALID_ARGUMENT)
+        {
+            FAIL("self copy/move not rejected");
+        }
+        else if (!f_file_equals("/f09_same.txt", txt, sizeof(txt) - 1u))
+        {
+            FAIL("file truncated or deleted");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f09_same.txt");
+    }
+
+    /* ---------------------------------------------------------------- */
+#if FM_USE_CRC
+    TEST("F-10: verify read error closes its handle");
+    {
+        FM_TransferOpts o;
+        uint32_t before = File_PoolUsed();
+        FM_Result r;
+
+        (void)File_WriteAll("/f10_src.bin", big, 3000u);
+        (void)File_Delete("/f10_dst.bin");
+        memset(&o, 0, sizeof(o));
+        o.verify = FM_TRUE;
+        g_wfs_open_calls = 0u;
+        g_wfs_read_fail_from_open = 2u;      /* 1 = dst, 2 = verify pass */
+        r = FM_Transfer_Copy("/f10_src.bin", "/ram/f10_dst.bin", &o);
+        g_wfs_read_fail_from_open = 0u;
+        if (r != FM_ERR_IO)
+        {
+            static char m[48];
+
+            (void)snprintf(m, sizeof(m), "expected IO, got %d", (int)r);
+            FAIL(m);
+        }
+        else if (File_PoolUsed() != before)
+        {
+            FAIL("verify handle left registered (dangling stack pointer)");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f10_dst.bin");
+    }
+
+    TEST("F-10: CRC mismatch removes the corrupt destination");
+    {
+        FM_TransferOpts o;
+        FM_TransferInfo info;
+        uint32_t before = File_PoolUsed();
+        FM_Result r;
+
+        (void)File_Delete("/f10_dst.bin");
+        memset(&o, 0, sizeof(o));
+        o.verify = FM_TRUE;
+        g_wfs_corrupt = FM_TRUE;
+        r = FM_Transfer_CopyEx("/f10_src.bin", "/ram/f10_dst.bin", &o,
+                               &info);
+        g_wfs_corrupt = FM_FALSE;
+        if (r != FM_ERR_CORRUPTED)
+        {
+            FAIL("corruption not detected");
+        }
+        else if (f_exists("/f10_dst.bin"))
+        {
+            FAIL("corrupt destination left on disk");
+        }
+        else if (File_PoolUsed() != before)
+        {
+            FAIL("handle leaked");
+        }
+        else if (!info.verified || info.crc_source == info.crc_dest)
+        {
+            FAIL("transfer info does not describe the mismatch");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f10_src.bin");
+        (void)File_Delete("/f10_dst.bin");
+    }
+#endif /* FM_USE_CRC */
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-11: nested File_Copy / File_Insert in progress -> BUSY");
+    {
+        FM_Result r;
+
+        (void)File_WriteAll("/f11_src.bin", big, 5000u);
+        (void)File_WriteAll("/f11_other.bin", big + 7000, 3000u);
+        (void)File_Delete("/f11_dst.bin");
+        (void)File_Delete("/f11_other2.bin");
+        g_f11_ran = FM_FALSE;
+        g_f11_nested_copy = FM_OK;
+        g_f11_nested_insert = FM_OK;
+        r = File_Copy("/f11_src.bin", "/f11_dst.bin", f11_file_progress,
+                      NULL);
+        if (r != FM_OK || !g_f11_ran)
+        {
+            FAIL("outer copy failed");
+        }
+        else if (g_f11_nested_copy != FM_ERR_BUSY ||
+                 g_f11_nested_insert != FM_ERR_BUSY)
+        {
+            FAIL("nested use of the scratch buffer was not refused");
+        }
+        else if (!f_file_equals("/f11_dst.bin", big, 5000u))
+        {
+            FAIL("outer copy corrupted by the nested call");
+        }
+        else if (!f_file_equals("/f11_other.bin", big + 7000, 3000u) ||
+                 f_exists("/f11_other2.bin") ||
+                 f_exists("/f11_other2.bin.fm_tmp") ||
+                 f_exists("/f11_other.bin.fm_tmp"))
+        {
+            FAIL("refused nested call left something behind");
+        }
+        else if (File_Copy("/f11_other.bin", "/f11_other2.bin", NULL,
+                           NULL) != FM_OK ||
+                 File_Insert("/f11_other2.bin", 0u, "zz", 2u) != FM_OK)
+        {
+            FAIL("buffer still marked busy after the copy");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f11_dst.bin");
+        (void)File_Delete("/f11_other2.bin");
+    }
+
+    TEST("F-11: nested FM_Transfer_Copy in progress -> BUSY");
+    {
+        FM_TransferOpts o;
+        FM_Result r;
+
+        (void)File_Delete("/f11_dst.bin");
+        memset(&o, 0, sizeof(o));
+        o.progress = f11_xfer_progress;
+        g_f11_ran = FM_FALSE;
+        g_f11_nested_xfer = FM_OK;
+        r = FM_Transfer_Copy("/f11_src.bin", "/f11_dst.bin", &o);
+        if (r != FM_OK || !g_f11_ran)
+        {
+            FAIL("outer transfer failed");
+        }
+        else if (g_f11_nested_xfer != FM_ERR_BUSY)
+        {
+            FAIL("nested transfer was not refused");
+        }
+        else if (!f_file_equals("/f11_dst.bin", big, 5000u) ||
+                 f_exists("/f11_other2.bin"))
+        {
+            FAIL("outer transfer corrupted / nested one ran");
+        }
+        else if (FM_Transfer_Copy("/f11_other.bin", "/f11_other2.bin",
+                                  NULL) != FM_OK)
+        {
+            FAIL("buffer still marked busy after the transfer");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f11_dst.bin");
+        (void)File_Delete("/f11_other2.bin");
+    }
+
+#ifdef FM_XFER_CACHE_CLEAN
+    TEST("F-11: cache clean/invalidate around every chunk");
+    {
+        const uint32_t chunk = (uint32_t)FM_TRANSFER_CHUNK;
+        const uint32_t len = chunk * 3u;
+        uint32_t file_clean, file_inval;
+        FM_Result r;
+
+        (void)File_WriteAll("/f11_src.bin", big, len);
+        (void)File_Delete("/f11_dst.bin");
+        g_xfer_clean_calls = 0u;
+        g_xfer_inval_calls = 0u;
+        g_xfer_hook_unaligned = 0u;
+        r = FM_Transfer_Copy("/f11_src.bin", "/f11_dst.bin", NULL);
+        file_clean = g_xfer_clean_calls;
+        file_inval = g_xfer_inval_calls;
+        if (r != FM_OK || len > sizeof(big))
+        {
+            FAIL("copy failed");
+        }
+        else if (file_inval != 3u || file_clean < 6u)
+        {
+            static char m[64];
+
+            (void)snprintf(m, sizeof(m), "3 chunks: %u clean, %u invalidate",
+                           (unsigned)file_clean, (unsigned)file_inval);
+            FAIL(m);
+        }
+        else
+        {
+            static uint8_t smem[16384];
+            static uint8_t dmem[16384];
+            FM_Storage s, d;
+            FakeStore fsrc, fdst;
+
+            memcpy(smem, big, sizeof(smem));
+            fake_store_init(&s, &fsrc, smem, sizeof(smem), sizeof(smem));
+            fake_store_init(&d, &fdst, dmem, sizeof(dmem), sizeof(dmem));
+            g_xfer_clean_calls = 0u;
+            g_xfer_inval_calls = 0u;
+            r = FM_Transfer_Raw(&s, 0, &d, 0, sizeof(smem), NULL);
+            if (r != FM_OK || memcmp(smem, dmem, sizeof(smem)) != 0)
+            {
+                FAIL("raw copy failed");
+            }
+            else if (g_xfer_inval_calls != fsrc.reads ||
+                     g_xfer_clean_calls < 2u * fdst.writes ||
+                     fsrc.reads != fdst.writes)
+            {
+                FAIL("raw: maintenance does not match the chunk count");
+            }
+            else if (g_xfer_hook_unaligned != 0u)
+            {
+                FAIL("cache maintenance on an unaligned address");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+        (void)File_Delete("/f11_dst.bin");
+    }
+#endif
+    (void)File_Delete("/f11_src.bin");
+    (void)File_Delete("/f11_other.bin");
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-13: a write is visible through another open handle");
+    {
+        FM_File *rd;
+        FM_File *wr;
+        char got[9];
+        uint32_t n = 0u;
+        FM_Bool ok = FM_TRUE;
+
+        (void)File_WriteText("/f13.txt", "AAAAAAAA");
+        rd = File_Open("/f13.txt", FM_OPEN_READ);
+        wr = File_Open("/f13.txt", FM_OPEN_READ | FM_OPEN_WRITE);
+        memset(got, 0, sizeof(got));
+        if (rd == NULL || wr == NULL)
+        {
+            ok = FM_FALSE;
+        }
+        /* prime the reader's cache */
+        if (ok && (File_Read(rd, got, 8u, &n) != FM_OK || n != 8u ||
+                   memcmp(got, "AAAAAAAA", 8) != 0))
+        {
+            ok = FM_FALSE;
+        }
+        if (ok && (File_Write(wr, "BBBBBBBB", 8u, &n) != FM_OK ||
+                   File_Flush(wr) != FM_OK))
+        {
+            ok = FM_FALSE;
+        }
+        if (!ok)
+        {
+            FAIL("setup failed");
+        }
+        else if (File_Seek(rd, 0, FM_SEEK_SET) != FM_OK ||
+                 File_Read(rd, got, 8u, &n) != FM_OK || n != 8u)
+        {
+            FAIL("re-read failed");
+        }
+        else if (memcmp(got, "BBBBBBBB", 8) != 0)
+        {
+            FAIL("reader still sees the bytes from before the write");
+        }
+        else
+        {
+            /* the writer extends the file: the reader must not report
+             * EOF from its stale size */
+            static uint8_t tail[700];
+            static uint8_t back[700];
+
+            memset(tail, 0x6B, sizeof(tail));
+            if (File_Write(wr, tail, (uint32_t)sizeof(tail), &n) != FM_OK ||
+                File_Flush(wr) != FM_OK)
+            {
+                FAIL("extend failed");
+            }
+            else if (File_Read(rd, back, (uint32_t)sizeof(back), &n) !=
+                         FM_OK || n != sizeof(back) ||
+                     memcmp(back, tail, sizeof(tail)) != 0)
+            {
+                FAIL("reader cannot see bytes appended by another handle");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+        if (rd != NULL) { (void)File_Close(rd); }
+        if (wr != NULL) { (void)File_Close(wr); }
+    }
+
+    TEST("F-13: truncate-open / delete drop other handles' cache");
+    {
+        FM_File *rd;
+        char got[9];
+        uint32_t n = 0u;
+
+        (void)File_WriteText("/f13.txt", "AAAAAAAA");
+        rd = File_Open("/f13.txt", FM_OPEN_READ);
+        memset(got, 0, sizeof(got));
+        if (rd == NULL || File_Read(rd, got, 8u, &n) != FM_OK || n != 8u)
+        {
+            FAIL("setup failed");
+        }
+        else if (File_WriteText("/f13.txt", "CCCCCCCC") != FM_OK ||
+                 File_Seek(rd, 0, FM_SEEK_SET) != FM_OK ||
+                 File_Read(rd, got, 8u, &n) != FM_OK || n != 8u)
+        {
+            FAIL("rewrite / re-read failed");
+        }
+        else if (memcmp(got, "CCCCCCCC", 8) != 0)
+        {
+            FAIL("reader still sees the file from before the rewrite");
+        }
+        else
+        {
+            char all[16];
+            size_t len = 0;
+
+            /* whole-file read, out-of-band change, whole-file read */
+            memset(all, 0, sizeof(all));
+            if (File_ReadAll("/f13.txt", all, sizeof(all), &len) != FM_OK ||
+                File_WriteText("/./f13.txt", "DDDDDDDD") != FM_OK ||
+                File_ReadAll("/f13.txt", all, sizeof(all), &len) != FM_OK ||
+                len != 8u || memcmp(all, "DDDDDDDD", 8) != 0)
+            {
+                FAIL("second File_ReadAll returned old content");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+        if (rd != NULL) { (void)File_Close(rd); }
+        (void)File_Delete("/f13.txt");
+    }
+
+    /* ---------------------------------------------------------------- */
+#if FM_USE_CACHE
+    TEST("F-14: I/O error after a partial cached read is reported");
+    {
+        static uint8_t back[900];
+        FM_File *f;
+        uint32_t n = 0u;
+        FM_Bool was = File_GetCacheEnabled();
+
+        File_SetCacheEnabled(FM_TRUE);
+        (void)File_WriteAll("/f14.bin", big, 2048u);
+        f = File_Open("/ram/f14.bin", FM_OPEN_READ);
+        if (f == NULL)
+        {
+            FAIL("open failed");
+        }
+        else
+        {
+            FM_Result r;
+
+            g_wfs_read_calls = 0u;
+            g_wfs_read_fail_at = 2u;     /* second 512-byte block fails */
+            r = File_Read(f, back, (uint32_t)sizeof(back), &n);
+            g_wfs_read_fail_at = 0u;
+            if (r != FM_ERR_IO)
+            {
+                static char m[64];
+
+                (void)snprintf(m, sizeof(m),
+                               "expected IO, got %d (read=%u)", (int)r,
+                               (unsigned)n);
+                FAIL(m);
+            }
+            else if (n != 512u || memcmp(back, big, 512) != 0)
+            {
+                FAIL("bytes delivered before the error are wrong");
+            }
+            else if (File_Read(f, back, 100u, &n) != FM_OK || n != 100u ||
+                     memcmp(back, big + 512, 100) != 0)
+            {
+                /* the failed block must not have been cached half-filled */
+                FAIL("read after the error returned wrong data");
+            }
+            else
+            {
+                PASS();
+            }
+            (void)File_Close(f);
+        }
+        File_SetCacheEnabled(was);
+        (void)File_Delete("/f14.bin");
+    }
+
+    TEST("F-14: a short read at end of file is still a success");
+    {
+        static uint8_t back[900];
+        FM_File *f;
+        uint32_t n = 0u;
+
+        (void)File_WriteAll("/f14.bin", big, 700u);
+        f = File_Open("/ram/f14.bin", FM_OPEN_READ);
+        if (f == NULL)
+        {
+            FAIL("open failed");
+        }
+        else if (File_Read(f, back, (uint32_t)sizeof(back), &n) != FM_OK ||
+                 n != 700u || memcmp(back, big, 700) != 0)
+        {
+            (void)File_Close(f);
+            FAIL("short read at EOF must return FM_OK with the bytes");
+        }
+        else if (File_Read(f, back, 10u, &n) != FM_ERR_EOF || n != 0u)
+        {
+            (void)File_Close(f);
+            FAIL("reading at EOF must return FM_ERR_EOF");
+        }
+        else
+        {
+            (void)File_Close(f);
+            PASS();
+        }
+        (void)File_Delete("/f14.bin");
+    }
+#endif /* FM_USE_CACHE */
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-15: edit refuses a path whose temp name does not fit");
+    {
+        static char longp[FM_PATH_MAX];
+        FM_Result r;
+
+        /* strlen == FM_PATH_MAX - 3: valid on its own, but
+         * "<path>.fm_tmp" does not fit in FM_PATH_MAX */
+        memset(longp, 'q', sizeof(longp));
+        longp[0] = '/';
+        longp[FM_PATH_MAX - 3] = '\0';
+        if (File_WriteText(longp, "keep-me") != FM_OK)
+        {
+            FAIL("could not create the long-named file");
+        }
+        else
+        {
+            r = File_Insert(longp, 0u, "XY", 2u);
+            if (r != FM_ERR_INVALID_PATH)
+            {
+                static char m[48];
+
+                (void)snprintf(m, sizeof(m), "expected INVALID_PATH, got %d",
+                               (int)r);
+                FAIL(m);
+            }
+            else if (File_DeleteRange(longp, 0u, 1u) != FM_ERR_INVALID_PATH ||
+                     File_ReplaceRange(longp, 0u, 1u, "Z", 1u) !=
+                         FM_ERR_INVALID_PATH)
+            {
+                FAIL("DeleteRange / ReplaceRange not guarded");
+            }
+            else if (!f_file_equals(longp, "keep-me", 7u))
+            {
+                FAIL("file was modified");
+            }
+            else
+            {
+                PASS();
+            }
+        }
+        (void)File_Delete(longp);
+    }
+
+    /* ---------------------------------------------------------------- */
+    TEST("F-16: rename onto itself is a no-op; delete is normalized");
+    {
+        FM_Result r1, r2, r3, r4;
+
+        (void)Directory_Create("/f16d");
+        (void)File_WriteText("/f16d/b.txt", "sixteen");
+        g_wfs_rename_calls = 0u;
+        r1 = File_Rename("/f16d/b.txt", "/f16d/./b.txt");
+        r2 = File_Rename("/ram/f16d/b.txt", "/ram/f16d/../f16d/b.txt");
+        r3 = File_Move("/ram/f16d/b.txt", "/ram/f16d/./b.txt", NULL, NULL);
+        r4 = File_Rename("/f16d/missing.txt", "/f16d/./missing.txt");
+        if (r1 != FM_OK || r2 != FM_OK || r3 != FM_OK)
+        {
+            FAIL("self rename / move must succeed");
+        }
+        else if (g_wfs_rename_calls != 0u)
+        {
+            FAIL("self rename reached the backend");
+        }
+        else if (r4 != FM_ERR_NOT_FOUND)
+        {
+            FAIL("self rename of a missing file must report NOT_FOUND");
+        }
+        else if (!f_file_equals("/f16d/b.txt", "sixteen", 7u))
+        {
+            FAIL("file damaged by a self rename");
+        }
+        else if (File_Delete("/f16d/./b.txt") != FM_OK ||
+                 f_exists("/f16d/b.txt"))
+        {
+            FAIL("File_Delete(\"/a/./b\") did not remove /a/b");
+        }
+        else if (File_Rename("/f16d/b.txt", "/f16d/c.txt") !=
+                 FM_ERR_NOT_FOUND)
+        {
+            FAIL("rename of a deleted file must fail");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f16d/b.txt");
+        (void)Directory_Delete("/f16d");
+    }
+
+    (void)File_Delete("/f04_src.bin");
+    (void)File_Delete("/f04_dst.bin");
+    wfs_unmount("/ram");
+}
+
 #if FM_USE_VIDEO
 static void test_video(void)
 {
@@ -9544,6 +11028,7 @@ int main(void)
     RUN_SUITE(test_logging);
     RUN_SUITE(test_board_config);
     RUN_SUITE(test_transfer);
+    RUN_SUITE(test_file_report);
 #if FM_USE_VIDEO
     RUN_SUITE(test_video);
 #endif

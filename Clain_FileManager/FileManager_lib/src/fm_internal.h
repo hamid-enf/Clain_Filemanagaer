@@ -44,6 +44,15 @@ void FM_Unlock(void);
 /* Internal scratch buffer */
 uint8_t *FM_InternalBuffer(void);
 size_t   FM_InternalBufferSize(void);
+/* Exclusive use of the scratch buffer.  Acquire returns NULL while the
+ * buffer is already in use on this thread (nested call, e.g. from a
+ * progress callback) -- callers report FM_ERR_BUSY.  Every successful
+ * Acquire must be paired with exactly one Release. */
+uint8_t *FM_InternalBufferAcquire(size_t *size);
+void     FM_InternalBufferRelease(void);
+
+/* FM_TRUE when both paths resolve to the same entry of the same mount. */
+FM_Bool FM_File_SamePath(const char *a, const char *b);
 
 #if FM_USE_IMAGE
 /* Shrink (sw,sh) so dest RGB/gray fits `capacity` and optional max_w/max_h

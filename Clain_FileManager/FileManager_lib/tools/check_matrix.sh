@@ -92,6 +92,21 @@ run_one() {   # $1 = label ; rest = make variables
     echo "ok    $label  $res"
 }
 
+link_one() {  # $1 = label ; build + link only.  For configurations that
+              # must compile but whose reduced feature set (documented)
+              # makes parts of the suite fail by design.
+    label="$1"; shift
+    ran=$((ran + 1))
+    make clean >/dev/null 2>&1
+    if ! make -j"$JOBS" fm_test "$@" \
+            CFLAGS_EXTRA="-Werror -Wno-error=cpp $SAN $CFLAGS_EXTRA" \
+            LDFLAGS="$SAN" >"$LOG" 2>&1; then
+        echo "FAIL  $label  (build)"; grep -E ": error|undefined reference|\*\*\* " "$LOG" | cut -c1-220 | head -6
+        fail=$((fail + 1)); return
+    fi
+    echo "ok    $label  (builds and links)"
+}
+
 echo "== FM_USE_IMAGE / FM_USE_VIDEO / FM_USE_AUDIO  (mode: $MODE)"
 for i in 0 1; do for v in 0 1; do for a in 0 1; do
     run_one "I=$i V=$v A=$a" FM_USE_IMAGE=$i FM_USE_VIDEO=$v FM_USE_AUDIO=$a
@@ -115,6 +130,14 @@ if [ "$MODE" != "quick" ]; then
     run_one "THREADS=1"                    FM_USE_THREADS=1
     run_one "OPUS_LIB=1 (real libopus)"    FM_USE_OPUS_LIB=1
     CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=3" run_one "FM_DEBUG_LEVEL=3 (all log macros expanded)"
+    # F-11: redirect the transfer layer's cache-maintenance hooks to
+    # counters in test/main.c and check them against the chunk count.
+    CFLAGS_EXTRA="-DFM_XFER_CACHE_CLEAN=fm_test_xfer_clean -DFM_XFER_CACHE_INVALIDATE=fm_test_xfer_inval" \
+        run_one "transfer cache hooks instrumented"
+    CFLAGS_EXTRA="-DFM_TRANSFER_CACHE_MAINT=0" run_one "FM_TRANSFER_CACHE_MAINT=0"
+    # No scratch buffer: File_Copy / File_Insert report FM_ERR_NO_MEMORY by
+    # design, so only the build is checked (report F-12, Test/L).
+    CFLAGS_EXTRA="-DFM_USE_INTERNAL_BUFFER=0" link_one "FM_USE_INTERNAL_BUFFER=0"
 fi
 
 make clean >/dev/null 2>&1
