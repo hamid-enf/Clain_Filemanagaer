@@ -320,10 +320,14 @@ static FM_Result fmfs_save(FMFS_Context *ctx)
         return FM_ERR_NO_SPACE;
     }
 
-    /* Write the entry records first and the header LAST: if power or a
-     * reset interrupts the save, the storage still holds the previous
-     * (self-consistent) header describing older-but-valid metadata,
-     * instead of a new header pointing at half-written records. */
+    /* Write the entry records first and the header LAST, so an
+     * interrupted save never leaves a new header (new data_next) over
+     * records that were not written yet.
+     *
+     * This narrows the window; it does not close it.  The records are
+     * rewritten in place, so a reset in the middle leaves some of them
+     * new and some old under the old header.  FMFS has one copy of its
+     * table and no journal: it is not power-fail safe (see README). */
     for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
     {
         uint8_t record[FMFS_RECORD_SIZE];
