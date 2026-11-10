@@ -149,7 +149,8 @@
 /*
  * PNG decode scratch.  Deflate's matching window is 32 KB; two
  * reconstructed scanlines need FM_PNG_MAX_STRIDE bytes each.  16384
- * covers 4K-wide gray and ~5461-wide RGB.  On the MCU these arrays
+ * covers 4K-wide gray, ~5461-wide RGB, 4096-wide RGBA and 2048-wide
+ * 16-bit RGBA (a wider picture is FM_ERR_TOO_LARGE).  On the MCU these arrays
  * are placed in FM_IMAGE_SECTION (default ".sdram_buffers" — match
  * the Cube linker script).  Host builds keep them in normal BSS.
  * Override smaller on tiny MCUs, or disable PNG via FM_USE_PNG=0.

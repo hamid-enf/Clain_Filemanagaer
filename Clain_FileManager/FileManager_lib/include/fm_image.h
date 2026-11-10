@@ -11,8 +11,11 @@
  *          slurp) and baseline encode; STM32 JPEG hardware via
  *          Image_RegisterCodec("JPEG", ...) / example 20 (falls back to
  *          picojpeg when the file does not fit the heap)
- *   PNG  — 8-bit gray / RGB / RGBA / palette decode (inflate built in,
- *          streamed) and write (stored zlib, valid PNG)
+ *   PNG  — decode of every colour type and bit depth (gray 1/2/4/8/16,
+ *          RGB / RGBA / gray+alpha 8/16, palette 1/2/4/8), interlaced
+ *          (Adam7) or not; inflate built in, streamed, Adler-32 and
+ *          chunk CRCs verified.  Output is RGB888 (alpha dropped).
+ *          Write: RGB8, stored zlib, valid PNG
  *
  * Image_Load auto-detects BMP/JPEG/PNG from magic bytes (the file
  * extension is ignored).  When the decoded RGB888 image would not fit

@@ -12995,8 +12995,9 @@ TEST_MAYBE_UNUSED static void ir_chunk(IrBuf *o, const char *type,
     ir_be32(o, crc ^ 0xFFFFFFFFu);
 }
 
-TEST_MAYBE_UNUSED static void ir_head(IrBuf *o, uint32_t w, uint32_t h,
-                                      uint8_t color)
+TEST_MAYBE_UNUSED static void ir_head_ex(IrBuf *o, uint32_t w, uint32_t h,
+                                         uint8_t color, uint8_t depth,
+                                         uint8_t interlace)
 {
     static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
     uint8_t ihdr[13];
@@ -13007,10 +13008,17 @@ TEST_MAYBE_UNUSED static void ir_head(IrBuf *o, uint32_t w, uint32_t h,
     ihdr[2] = (uint8_t)(w >> 8);  ihdr[3] = (uint8_t)w;
     ihdr[4] = (uint8_t)(h >> 24); ihdr[5] = (uint8_t)(h >> 16);
     ihdr[6] = (uint8_t)(h >> 8);  ihdr[7] = (uint8_t)h;
-    ihdr[8] = 8;
+    ihdr[8] = depth;
     ihdr[9] = color;
+    ihdr[12] = interlace;
     ir_put(o, sig, 8);
     ir_chunk(o, "IHDR", ihdr, 13);
+}
+
+TEST_MAYBE_UNUSED static void ir_head(IrBuf *o, uint32_t w, uint32_t h,
+                                      uint8_t color)
+{
+    ir_head_ex(o, w, h, color, 8, 0);
 }
 
 /* Complete gray/RGB PNG around one zlib stream. */
@@ -13118,12 +13126,19 @@ TEST_MAYBE_UNUSED static void ir_dyn_begin(IrBits *w, const uint8_t *ll,
     for (i = 0; i < ndist; i++) ir_code(w, dl[i], 4);
 }
 
-TEST_MAYBE_UNUSED static size_t ir_dyn_end(IrBits *w, uint8_t *z)
+/* `raw` is what the stream inflates to: its Adler-32 is the trailer.
+ * (NULL for the streams that are meant to fail before the trailer.) */
+TEST_MAYBE_UNUSED static size_t ir_dyn_end(IrBits *w, uint8_t *z,
+                                           const uint8_t *raw, size_t raw_n)
 {
     size_t n = (w->bit + 7u) / 8u;
+    uint32_t ad = (raw != NULL) ? ir_adler(raw, raw_n) : 0u;
 
     memcpy(z, w->b, n);
-    memset(z + n, 0, 4);               /* Adler-32 (not checked) */
+    z[n] = (uint8_t)(ad >> 24);
+    z[n + 1u] = (uint8_t)(ad >> 16);
+    z[n + 2u] = (uint8_t)(ad >> 8);
+    z[n + 3u] = (uint8_t)ad;
     return n + 4u;
 }
 
@@ -13322,7 +13337,7 @@ static void test_image_report(void)
         dl[0] = 0;
         ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
         ir_code(&w, 0u, 1); ir_code(&w, 2u, 2); ir_code(&w, 3u, 2);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, (const uint8_t *)"\x00\x55", 2u);
         ir_png(&png, 1, 1, 0, z, zn);
         rgb[0] = 0;
         r = ir_decode(&png, rgb, sizeof(rgb));
@@ -13341,7 +13356,7 @@ static void test_image_report(void)
         ir_code(&w, 3u, 2);                       /* length 3        */
         ir_code(&w, 0u, 1);                       /* distance 1      */
         ir_code(&w, 2u, 2);                       /* end of block    */
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, (const uint8_t *)"\x00\x66\x66\x66\x66", 5u);
         ir_png(&png, 4, 1, 0, z, zn);
         memset(rgb, 0, 12);
         r = ir_decode(&png, rgb, sizeof(rgb));
@@ -13359,7 +13374,7 @@ static void test_image_report(void)
         dl[0] = 0;
         ir_dyn_begin(&w, ll, 259u, dl, 1u, 0);
         ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 2u, 2);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, NULL, 0u);
         ir_png(&png, 1, 1, 0, z, zn);
         r = ir_decode(&png, rgb, sizeof(rgb));
         r = (r == FM_ERR_CORRUPTED) ? FM_OK
@@ -13373,7 +13388,7 @@ static void test_image_report(void)
         dl[0] = 0;
         ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
         ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 2u, 2);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, NULL, 0u);
         ir_png(&png, 1, 1, 0, z, zn);
         r = ir_decode(&png, rgb, sizeof(rgb));
         r = (r == FM_ERR_CORRUPTED) ? FM_OK
@@ -13386,7 +13401,7 @@ static void test_image_report(void)
         dl[0] = 0;
         ir_dyn_begin(&w, ll, 257u, dl, 1u, 1);
         ir_code(&w, 0u, 1); ir_code(&w, 2u, 2); ir_code(&w, 3u, 2);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, NULL, 0u);
         ir_png(&png, 1, 1, 0, z, zn);
         r = ir_decode(&png, rgb, sizeof(rgb));
         r = (r == FM_ERR_CORRUPTED) ? FM_OK
@@ -13401,7 +13416,7 @@ static void test_image_report(void)
         ir_dyn_begin(&w, ll, 258u, dl, 1u, 0);
         ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 3u, 2);
         ir_code(&w, 0u, 1); ir_code(&w, 2u, 2);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, NULL, 0u);
         ir_png(&png, 4, 1, 0, z, zn);
         r = ir_decode(&png, rgb, sizeof(rgb));
         r = (r == FM_ERR_CORRUPTED) ? FM_OK
@@ -13414,7 +13429,7 @@ static void test_image_report(void)
         dl[0] = 0;
         ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
         ir_code(&w, 0u, 1); ir_code(&w, 1u, 1);
-        zn = ir_dyn_end(&w, z);
+        zn = ir_dyn_end(&w, z, NULL, 0u);
         ir_png(&png, 1, 1, 0, z, zn);
         r = ir_decode(&png, rgb, sizeof(rgb));
         r = (r == FM_ERR_CORRUPTED) ? FM_OK
@@ -13457,7 +13472,9 @@ static void test_image_report(void)
                 ir_code(&w, (k == 0u) ? 3u : 30u, 5);     /* distance     */
             }
             ir_code(&w, 0u, 7);                           /* end of block */
-            zn = ir_dyn_end(&w, z);
+            zn = ir_dyn_end(&w, z,
+                            (k == 2u) ? (const uint8_t *)"\x00\x21\x21\x21\x21"
+                                      : NULL, 5u);
             ir_png(&png, 4, 1, 0, z, zn);
             memset(rgb, 0, 12);
             e = ir_decode(&png, rgb, sizeof(rgb));
@@ -14142,6 +14159,796 @@ static void test_image_report(void)
     CHECK_RESULT(r, "probe budget");
 #endif
 }
+#if FM_USE_PNG
+/* ------------------------------------------------------------------ */
+/* PNG: every colour type / bit depth, Adam7, zlib and chunk checks    */
+/* ------------------------------------------------------------------ */
+static uint32_t pf_crc(const uint8_t *p, size_t n)
+{
+    return ir_crc32(p, n, 0xFFFFFFFFu) ^ 0xFFFFFFFFu;
+}
+
+/* PNG around `raw` (the filtered scanlines) in one stored block. */
+static void pf_png(IrBuf *o, uint32_t w, uint32_t h, uint8_t color,
+                   uint8_t depth, uint8_t interlace, const uint8_t *raw,
+                   size_t n)
+{
+    static uint8_t z[420];
+
+    ir_head_ex(o, w, h, color, depth, interlace);
+    if (n + 11u <= sizeof(z))
+    {
+        ir_chunk(o, "IDAT", z, ir_zstored(z, raw, n));
+    }
+    ir_chunk(o, "IEND", NULL, 0);
+}
+
+static void pf_pixel(uint32_t x, uint32_t y, uint8_t *rgb)
+{
+    rgb[0] = (uint8_t)(x * 27u + y * 3u + 1u);
+    rgb[1] = (uint8_t)(y * 29u + x + 2u);
+    rgb[2] = (uint8_t)((x ^ y) * 17u + 3u);
+}
+
+/* Adam7 scanlines of the pf_pixel() picture.  The first row of every
+ * pass is filtered "Up" (which must see zeroes, not the last row of
+ * the pass before), the others "Sub". */
+static size_t pf_adam7_raw(uint8_t *raw, uint32_t w, uint32_t h)
+{
+    static const uint8_t x0[7] = { 0, 4, 0, 2, 0, 1, 0 };
+    static const uint8_t y0[7] = { 0, 0, 4, 0, 2, 0, 1 };
+    static const uint8_t dx[7] = { 8, 8, 4, 4, 2, 2, 1 };
+    static const uint8_t dy[7] = { 8, 8, 8, 4, 4, 2, 2 };
+    size_t n = 0;
+    uint32_t p;
+
+    for (p = 0; p < 7u; p++)
+    {
+        uint32_t y;
+
+        if (x0[p] >= w)
+        {
+            continue;
+        }
+        for (y = y0[p]; y < h; y += dy[p])
+        {
+            uint8_t left[3] = { 0, 0, 0 };
+            uint32_t x;
+            FM_Bool first = (y == y0[p]) ? FM_TRUE : FM_FALSE;
+
+            raw[n++] = first ? 2u : 1u;
+            for (x = x0[p]; x < w; x += dx[p])
+            {
+                uint8_t px[3];
+                int c;
+
+                pf_pixel(x, y, px);
+                for (c = 0; c < 3; c++)
+                {
+                    raw[n++] = first ? px[c] : (uint8_t)(px[c] - left[c]);
+                    left[c] = px[c];
+                }
+            }
+        }
+    }
+    return n;
+}
+
+/* Patch 4 big-endian bytes. */
+static void pf_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
+/* Offset of the first IDAT chunk (its length field) in a PNG, 0 if none. */
+static size_t pf_find_idat(const uint8_t *png, size_t n)
+{
+    size_t p = 8;
+
+    while (p + 12u <= n)
+    {
+        uint32_t len = ((uint32_t)png[p] << 24) | ((uint32_t)png[p + 1u] << 16) |
+                       ((uint32_t)png[p + 2u] << 8) | png[p + 3u];
+
+        if (memcmp(png + p + 4u, "IDAT", 4) == 0)
+        {
+            return p;
+        }
+        p += 12u + len;
+    }
+    return 0;
+}
+
+/* Recompute the CRC of the chunk at `at`. */
+static void pf_fix_crc(uint8_t *png, size_t at)
+{
+    uint32_t len = ((uint32_t)png[at] << 24) | ((uint32_t)png[at + 1u] << 16) |
+                   ((uint32_t)png[at + 2u] << 8) | png[at + 3u];
+
+    pf_be32(png + at + 8u + len, pf_crc(png + at + 4u, 4u + len));
+}
+
+/* Make every chunk CRC right again (walks the chunks as far as their
+ * length fields make sense). */
+static void pf_fix_all_crcs(uint8_t *png, size_t n)
+{
+    size_t p = 8;
+
+    while (p + 12u <= n)
+    {
+        uint32_t len = ((uint32_t)png[p] << 24) | ((uint32_t)png[p + 1u] << 16) |
+                       ((uint32_t)png[p + 2u] << 8) | png[p + 3u];
+
+        if (len > n || p + 12u + len > n)
+        {
+            break;
+        }
+        pf_fix_crc(png, p);
+        p += 12u + len;
+    }
+}
+
+#ifndef PF_FUZZ_ROUNDS
+#define PF_FUZZ_ROUNDS 3000u
+#endif
+
+static void test_png_formats(void)
+{
+    static uint8_t file[48u * 1024u];
+    static uint8_t full[211 * 157 * 3];
+    static uint8_t out[211 * 157 * 3];
+    static const struct
+    {
+        const char *name;
+        uint16_t w;
+        uint16_t h;
+        uint32_t crc;       /* CRC-32 of the RGB888 picture */
+    } k_vec[] = {
+        /* Written by ImageMagick (tools/gen_png_vectors.sh).  The CRCs
+         * come from tools/png_ref.py, an independent decoder; for every
+         * 8-bit-or-less file they are also exactly what ImageMagick
+         * itself decodes.  (For the 16-bit files ImageMagick floors
+         * v / 257 where this library rounds, like libpng's
+         * png_set_scale_16: at most 1 LSB apart.) */
+        { "rgb8_a7", 37u, 29u, 0x393E234Au },
+        { "rgba8_a7", 37u, 29u, 0x393E234Au },
+        { "rgb16", 37u, 29u, 0xB20F59D4u },
+        { "rgba16_a7", 37u, 29u, 0x7B8AF9E0u },
+        { "gray1", 37u, 29u, 0x2D809C3Eu },
+        { "gray2_a7", 37u, 29u, 0x774EF8F8u },
+        { "gray4", 37u, 29u, 0x03B3FEE5u },
+        { "gray8_a7", 37u, 29u, 0xFDA003A6u },
+        { "gray16", 37u, 29u, 0xA2C64A49u },
+        { "ga8", 37u, 29u, 0xFDA003A6u },
+        { "ga16_a7", 37u, 29u, 0xAD47BB17u },
+        { "pal1_a7", 37u, 29u, 0xC6EC1310u },
+        { "pal2", 37u, 29u, 0xF50102EFu },
+        { "pal4_a7", 37u, 29u, 0x5366A128u },
+        { "pal8_a7", 37u, 29u, 0x6620E554u },
+        { "big_rgb8_a7", 211u, 157u, 0x94E1C462u },
+        { "tall_gray4_a7", 5u, 41u, 0x2657945Eu },
+    };
+    char path[64];
+    FM_Result r;
+    uint32_t i;
+
+    (void)FS_Unmount("/");
+    r = Storage_Mount("ram");
+    if (r == FM_OK) r = FS_Mount("/", &g_fs);
+    if (r != FM_OK)
+    {
+        TEST("PNG formats: remount POSIX");
+        FAIL(FM_ResultString(r));
+        return;
+    }
+
+    TEST("png: every colour type, bit depth and Adam7 decode (17 files)");
+    r = FM_OK;
+    for (i = 0; i < (uint32_t)(sizeof(k_vec) / sizeof(k_vec[0])); i++)
+    {
+        FM_ImageInfo info;
+        FM_Image img;
+        size_t got = 0;
+        size_t px = (size_t)k_vec[i].w * k_vec[i].h * 3u;
+        FM_Result e;
+        const char *what = NULL;
+
+        (void)snprintf(path, sizeof(path), "/test/vectors/png/%s.png",
+                       k_vec[i].name);
+        memset(&img, 0, sizeof(img));
+        memset(out, 0xA5, px);
+        e = File_ReadAll(path, file, sizeof(file), &got);
+        if (e != FM_OK) what = "read";
+        if (what == NULL)
+        {
+            e = Image_ProbePNG(file, got, &info);
+            if (e != FM_OK) what = "probe";
+            else if (info.width != k_vec[i].w || info.height != k_vec[i].h)
+            {
+                e = FM_ERR_INVALID_FORMAT; what = "probe size";
+            }
+        }
+        if (what == NULL)
+        {
+            e = Image_DecodePNG(file, got, &img, out, sizeof(out));
+            if (e != FM_OK) what = "decode";
+            else if (img.width != k_vec[i].w || img.height != k_vec[i].h ||
+                     img.data_size != px)
+            {
+                e = FM_ERR_INVALID_FORMAT; what = "decode size";
+            }
+            else if (pf_crc(out, px) != k_vec[i].crc)
+            {
+                e = FM_ERR_CRC; what = "pixels";
+            }
+        }
+        if (what == NULL)
+        {
+            /* the same file through the file reader */
+            memset(out, 0x5A, px);
+            e = Image_Load(path, &img, out, sizeof(out));
+            if (e != FM_OK) what = "load";
+            else if (pf_crc(out, px) != k_vec[i].crc)
+            {
+                e = FM_ERR_CRC; what = "load pixels";
+            }
+        }
+        if (what != NULL)
+        {
+            printf("[%s: %s %d] ", k_vec[i].name, what, (int)e);
+            r = (e != FM_OK) ? e : FM_ERR_INTERNAL;
+        }
+    }
+    CHECK_RESULT(r, "png formats");
+
+    TEST("png: 16-bit samples are rounded, sub-byte grey is full scale");
+    {
+        /* 8x1 grey 16: the values around the rounding points */
+        static const uint8_t raw16[17] = {
+            0, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x80, 0x00, 0x81,
+               0x7A, 0x78, 0x80, 0xFF, 0x81, 0x01, 0xFE, 0x7F };
+        static const uint8_t want16[8] = { 0, 255, 0, 1, 122, 128, 129, 254 };
+        /* 4x1 grey 2: 0 1 2 3 -> 0 85 170 255;  8x1 grey 1: 10110001 */
+        static const uint8_t raw2[2] = { 0, 0x1B };
+        static const uint8_t raw1[2] = { 0, 0xB1 };
+        /* 3x1 grey 4: 0x0, 0x9, 0xF -> 0, 153, 255 */
+        static const uint8_t raw4[3] = { 0, 0x09, 0xF0 };
+        IrBuf png;
+
+        pf_png(&png, 8, 1, 0, 16, 0, raw16, sizeof(raw16));
+        r = ir_decode(&png, out, sizeof(out));
+        for (i = 0; i < 8u && r == FM_OK; i++)
+        {
+            if (out[i * 3u] != want16[i] || out[i * 3u + 2u] != want16[i])
+            {
+                printf("[16-bit sample %u: %u, want %u] ", (unsigned)i,
+                       (unsigned)out[i * 3u], (unsigned)want16[i]);
+                r = FM_ERR_CRC;
+            }
+        }
+        if (r == FM_OK)
+        {
+            pf_png(&png, 4, 1, 0, 2, 0, raw2, sizeof(raw2));
+            r = ir_decode(&png, out, sizeof(out));
+            if (r == FM_OK && (out[0] != 0u || out[3] != 85u ||
+                               out[6] != 170u || out[9] != 255u))
+            {
+                printf("[2-bit] ");
+                r = FM_ERR_CRC;
+            }
+        }
+        if (r == FM_OK)
+        {
+            pf_png(&png, 8, 1, 0, 1, 0, raw1, sizeof(raw1));
+            r = ir_decode(&png, out, sizeof(out));
+            for (i = 0; i < 8u && r == FM_OK; i++)
+            {
+                uint8_t want = ((0xB1u >> (7u - i)) & 1u) ? 255u : 0u;
+
+                if (out[i * 3u] != want)
+                {
+                    printf("[1-bit pixel %u] ", (unsigned)i);
+                    r = FM_ERR_CRC;
+                }
+            }
+        }
+        if (r == FM_OK)
+        {
+            pf_png(&png, 3, 1, 0, 4, 0, raw4, sizeof(raw4));
+            r = ir_decode(&png, out, sizeof(out));
+            if (r == FM_OK && (out[0] != 0u || out[3] != 153u ||
+                               out[6] != 255u))
+            {
+                printf("[4-bit] ");
+                r = FM_ERR_CRC;
+            }
+        }
+    }
+    CHECK_RESULT(r, "sample scaling");
+
+    TEST("png adam7: every size 1x1 .. 9x9 (empty passes, pass restart)");
+    {
+        static uint8_t raw[9 * 9 * 3 + 32];
+        uint32_t w;
+        uint32_t h;
+
+        r = FM_OK;
+        for (h = 1; h <= 9u && r == FM_OK; h++)
+        {
+            for (w = 1; w <= 9u && r == FM_OK; w++)
+            {
+                IrBuf png;
+                size_t n = pf_adam7_raw(raw, w, h);
+                uint32_t x;
+                uint32_t y;
+
+                pf_png(&png, w, h, 2, 8, 1, raw, n);
+                memset(out, 0xEE, w * h * 3u);
+                r = ir_decode(&png, out, sizeof(out));
+                for (y = 0; y < h && r == FM_OK; y++)
+                {
+                    for (x = 0; x < w; x++)
+                    {
+                        uint8_t px[3];
+
+                        pf_pixel(x, y, px);
+                        if (memcmp(px, out + (y * w + x) * 3u, 3) != 0)
+                        {
+                            r = FM_ERR_CRC;
+                        }
+                    }
+                }
+                if (r != FM_OK)
+                {
+                    printf("[%ux%u] ", (unsigned)w, (unsigned)h);
+                }
+            }
+        }
+    }
+    CHECK_RESULT(r, "adam7 sizes");
+
+    TEST("png adam7: scaled decode == nearest neighbour of the full one");
+    {
+        static const struct { const char *name; uint16_t mw; uint16_t mh; }
+        k_sc[] = {
+            { "big_rgb8_a7", 100, 60 }, { "big_rgb8_a7", 13, 157 },
+            { "big_rgb8_a7", 211, 9 },  { "gray2_a7", 10, 10 },
+            { "pal4_a7", 36, 28 },      { "rgba16_a7", 5, 3 },
+            { "tall_gray4_a7", 3, 7 },  { "pal1_a7", 1, 1 },
+        };
+
+        r = FM_OK;
+        for (i = 0; i < (uint32_t)(sizeof(k_sc) / sizeof(k_sc[0])) &&
+                    r == FM_OK; i++)
+        {
+            FM_Image a;
+            FM_Image b;
+            uint32_t x;
+            uint32_t y;
+
+            (void)snprintf(path, sizeof(path), "/test/vectors/png/%s.png",
+                           k_sc[i].name);
+            memset(&a, 0, sizeof(a));
+            memset(&b, 0, sizeof(b));
+            r = Image_Load(path, &a, full, sizeof(full));
+            if (r == FM_OK)
+            {
+                memset(out, 0xC3, sizeof(out));
+                r = Image_LoadEx(path, &b, out, sizeof(out), k_sc[i].mw,
+                                 k_sc[i].mh);
+            }
+            if (r == FM_OK && (b.width == 0u || b.height == 0u ||
+                               b.width > k_sc[i].mw || b.height > k_sc[i].mh ||
+                               (b.width == a.width && b.height == a.height)))
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            for (y = 0; y < b.height && r == FM_OK; y++)
+            {
+                for (x = 0; x < b.width; x++)
+                {
+                    uint32_t sx = x * a.width / b.width;
+                    uint32_t sy = y * a.height / b.height;
+
+                    if (memcmp(out + ((size_t)y * b.width + x) * 3u,
+                               full + ((size_t)sy * a.width + sx) * 3u, 3) != 0)
+                    {
+                        r = FM_ERR_CRC;
+                    }
+                }
+            }
+            if (r != FM_OK)
+            {
+                printf("[%s to %ux%u: got %ux%u] ", k_sc[i].name,
+                       (unsigned)k_sc[i].mw, (unsigned)k_sc[i].mh,
+                       (unsigned)b.width, (unsigned)b.height);
+            }
+        }
+    }
+    CHECK_RESULT(r, "adam7 scaled");
+
+    TEST("png: illegal colour type / depth / interlace is UNSUPPORTED");
+    {
+        static const uint8_t bad[][3] = {
+            { 2, 4, 0 }, { 3, 16, 0 }, { 4, 2, 0 }, { 6, 1, 0 }, { 0, 3, 0 },
+            { 5, 8, 0 }, { 1, 8, 0 },  { 2, 8, 2 }, { 0, 0, 0 }, { 6, 32, 0 },
+        };
+        static const uint8_t raw[5] = { 0, 1, 2, 3, 4 };
+
+        r = FM_OK;
+        for (i = 0; i < (uint32_t)(sizeof(bad) / sizeof(bad[0])); i++)
+        {
+            FM_ImageInfo info;
+            IrBuf png;
+            FM_Result e1;
+            FM_Result e2;
+
+            pf_png(&png, 1, 1, bad[i][0], bad[i][1], bad[i][2], raw,
+                   sizeof(raw));
+            e1 = Image_ProbePNG(png.b, png.n, &info);
+            e2 = ir_decode(&png, out, sizeof(out));
+            if (e1 != FM_ERR_UNSUPPORTED || e2 != FM_ERR_UNSUPPORTED)
+            {
+                printf("[colour %u depth %u il %u: probe %d decode %d] ",
+                       (unsigned)bad[i][0], (unsigned)bad[i][1],
+                       (unsigned)bad[i][2], (int)e1, (int)e2);
+                r = FM_ERR_INVALID_FORMAT;
+            }
+        }
+    }
+    CHECK_RESULT(r, "illegal header");
+
+    TEST("png: a sub-byte palette index past PLTE is CORRUPTED");
+    {
+        static const uint8_t pal[6] = { 10, 20, 30, 40, 50, 60 };
+        static const uint8_t ok_raw[2] = { 0, 0x10 };    /* 0 1 0 0 */
+        static const uint8_t bad_raw[2] = { 0, 0x13 };   /* 0 1 0 3 */
+        uint8_t z[32];
+        IrBuf png;
+        FM_Result e;
+
+        ir_head_ex(&png, 4, 1, 3, 2, 0);
+        ir_chunk(&png, "PLTE", pal, sizeof(pal));
+        ir_chunk(&png, "IDAT", z, ir_zstored(z, ok_raw, 2));
+        ir_chunk(&png, "IEND", NULL, 0);
+        r = ir_decode(&png, out, sizeof(out));
+        if (r == FM_OK && (out[0] != 10u || out[3] != 40u || out[5] != 60u ||
+                           out[9] != 10u))
+        {
+            r = FM_ERR_CRC;
+        }
+        ir_head_ex(&png, 4, 1, 3, 2, 0);
+        ir_chunk(&png, "PLTE", pal, sizeof(pal));
+        ir_chunk(&png, "IDAT", z, ir_zstored(z, bad_raw, 2));
+        ir_chunk(&png, "IEND", NULL, 0);
+        e = ir_decode(&png, out, sizeof(out));
+        if (r == FM_OK && e != FM_ERR_CORRUPTED)
+        {
+            printf("[index 3 of 2: %d] ", (int)e);
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+    }
+    CHECK_RESULT(r, "palette index");
+
+    TEST("png: a wrong Adler-32 (zlib trailer) is FM_ERR_CRC");
+    {
+        static const uint8_t raw[5] = { 0, 0x11, 0x22, 0x33, 0x44 };
+        uint8_t z[32];
+        size_t zn = ir_zstored(z, raw, sizeof(raw));
+        IrBuf png;
+        FM_Result e;
+        size_t got = 0;
+
+        /* control */
+        ir_png(&png, 4, 1, 0, z, zn);
+        r = ir_decode(&png, out, sizeof(out));
+        /* every single-bit error in the trailer */
+        for (i = 0; i < 32u && r == FM_OK; i++)
+        {
+            z[zn - 4u + i / 8u] ^= (uint8_t)(1u << (i % 8u));
+            ir_png(&png, 4, 1, 0, z, zn);       /* chunk CRC is right */
+            e = ir_decode(&png, out, sizeof(out));
+            z[zn - 4u + i / 8u] ^= (uint8_t)(1u << (i % 8u));
+            if (e != FM_ERR_CRC)
+            {
+                printf("[trailer bit %u: %d] ", (unsigned)i, (int)e);
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+        /* trailer cut off */
+        if (r == FM_OK)
+        {
+            ir_png(&png, 4, 1, 0, z, zn - 2u);
+            e = ir_decode(&png, out, sizeof(out));
+            if (e != FM_ERR_CORRUPTED)
+            {
+                printf("[short trailer: %d] ", (int)e);
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+        /* a real file: the stored picture data is changed (one pixel
+         * byte inside a deflate stream cannot be flipped without
+         * knowing the codes, so the trailer is what gets damaged
+         * here; the chunk CRC is made right again) */
+        if (r == FM_OK)
+        {
+            r = File_ReadAll("/test/vectors/png/gray8_a7.png", file,
+                             sizeof(file), &got);
+        }
+        if (r == FM_OK)
+        {
+            size_t at = pf_find_idat(file, got);
+            uint32_t len = ((uint32_t)file[at] << 24) |
+                           ((uint32_t)file[at + 1u] << 16) |
+                           ((uint32_t)file[at + 2u] << 8) | file[at + 3u];
+            FM_Image img;
+
+            memset(&img, 0, sizeof(img));
+            file[at + 8u + len - 1u] ^= 0x01u;
+            pf_fix_crc(file, at);
+            e = Image_DecodePNG(file, got, &img, out, sizeof(out));
+            if (e != FM_ERR_CRC)
+            {
+                printf("[file trailer: %d] ", (int)e);
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+    }
+    CHECK_RESULT(r, "adler");
+
+    TEST("png: the CRC of every IDAT chunk is checked, the last one too");
+    {
+        static const uint8_t raw[5] = { 0, 0x11, 0x22, 0x33, 0x44 };
+        uint8_t z[40];
+        size_t zn = ir_zstored(z, raw, sizeof(raw));
+        IrBuf png;
+        FM_Result e;
+        size_t at;
+
+        /* (a) one IDAT, CRC wrong */
+        ir_png(&png, 4, 1, 0, z, zn);
+        at = pf_find_idat(png.b, png.n);
+        png.b[at + 8u + zn] ^= 0x80u;
+        e = ir_decode(&png, out, sizeof(out));
+        r = (e == FM_ERR_CRC) ? FM_OK
+                              : ((e == FM_OK) ? FM_ERR_INVALID_FORMAT : e);
+        if (r != FM_OK) printf("[single IDAT: %d] ", (int)e);
+
+        /* (b) two IDATs; the second holds only the last trailer bytes */
+        if (r == FM_OK)
+        {
+            ir_head(&png, 4, 1, 0);
+            ir_chunk(&png, "IDAT", z, zn - 2u);
+            at = png.n;
+            ir_chunk(&png, "IDAT", z + zn - 2u, 2u);
+            ir_chunk(&png, "IEND", NULL, 0);
+            e = ir_decode(&png, out, sizeof(out));      /* control */
+            if (e != FM_OK || out[0] != 0x11u || out[9] != 0x44u)
+            {
+                printf("[split control: %d] ", (int)e);
+                r = (e == FM_OK) ? FM_ERR_CRC : e;
+            }
+            else
+            {
+                png.b[at + 8u + 2u + 3u] ^= 0x01u;
+                e = ir_decode(&png, out, sizeof(out));
+                if (e != FM_ERR_CRC)
+                {
+                    printf("[last IDAT: %d] ", (int)e);
+                    r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+                }
+            }
+        }
+
+        /* (c) the first of two IDATs (the stream needs the second) */
+        if (r == FM_OK)
+        {
+            ir_head(&png, 4, 1, 0);
+            at = png.n;
+            ir_chunk(&png, "IDAT", z, 6u);
+            ir_chunk(&png, "IDAT", z + 6u, zn - 6u);
+            ir_chunk(&png, "IEND", NULL, 0);
+            png.b[at + 8u + 6u] ^= 0x10u;
+            e = ir_decode(&png, out, sizeof(out));
+            if (e != FM_ERR_CRC)
+            {
+                printf("[first IDAT: %d] ", (int)e);
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+
+        /* (d) bytes after the end of the zlib stream inside the last
+         * IDAT: tolerated when the chunk is intact, a CRC error when
+         * it is not (they are still read and summed) */
+        if (r == FM_OK)
+        {
+            memset(z + zn, 0x77, 6);
+            ir_png(&png, 4, 1, 0, z, zn + 6u);
+            e = ir_decode(&png, out, sizeof(out));
+            if (e != FM_OK)
+            {
+                printf("[padded IDAT: %d] ", (int)e);
+                r = e;
+            }
+            else
+            {
+                at = pf_find_idat(png.b, png.n);
+                png.b[at + 8u + zn + 3u] ^= 0x02u;      /* in the padding */
+                e = ir_decode(&png, out, sizeof(out));
+                if (e != FM_ERR_CRC)
+                {
+                    printf("[damaged padding: %d] ", (int)e);
+                    r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+                }
+            }
+        }
+    }
+    CHECK_RESULT(r, "idat crc");
+
+    TEST("png: more or fewer scanlines than the header says is CORRUPTED");
+    {
+        static uint8_t raw[9 * 9 * 3 + 32];
+        static const uint8_t rows3[6] = { 0, 0x10, 0, 0x20, 0, 0x30 };
+        IrBuf png;
+        FM_Result e;
+        size_t n;
+
+        r = FM_OK;
+        /* 1x2 grey with three rows of data, then with one */
+        pf_png(&png, 1, 2, 0, 8, 0, rows3, 6);
+        e = ir_decode(&png, out, sizeof(out));
+        if (e != FM_ERR_CORRUPTED)
+        {
+            printf("[extra row: %d] ", (int)e);
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+        pf_png(&png, 1, 2, 0, 8, 0, rows3, 2);
+        e = ir_decode(&png, out, sizeof(out));
+        if (r == FM_OK && e != FM_ERR_CORRUPTED)
+        {
+            printf("[missing row: %d] ", (int)e);
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+        /* Adam7 5x5: the last pass is missing its last row / has one
+         * row too many */
+        n = pf_adam7_raw(raw, 5, 5);
+        pf_png(&png, 5, 5, 2, 8, 1, raw, n - 16u);
+        e = ir_decode(&png, out, sizeof(out));
+        if (r == FM_OK && e != FM_ERR_CORRUPTED)
+        {
+            printf("[adam7 short: %d] ", (int)e);
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+        memset(raw + n, 0, 16);
+        pf_png(&png, 5, 5, 2, 8, 1, raw, n + 16u);
+        e = ir_decode(&png, out, sizeof(out));
+        if (r == FM_OK && e != FM_ERR_CORRUPTED)
+        {
+            printf("[adam7 long: %d] ", (int)e);
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+        /* a filter type that does not exist */
+        {
+            static const uint8_t bad_filter[2] = { 5, 0x10 };
+
+            pf_png(&png, 1, 1, 0, 8, 0, bad_filter, 2);
+            e = ir_decode(&png, out, sizeof(out));
+            if (r == FM_OK && e != FM_ERR_CORRUPTED)
+            {
+                printf("[filter 5: %d] ", (int)e);
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+    }
+    CHECK_RESULT(r, "row count");
+
+    TEST("png: damaged files never crash, never write past the buffer");
+    {
+        /* Random byte damage to real files, half of the time with the
+         * chunk CRCs repaired so that the damage reaches the header
+         * parser, inflate, the filters and the palette instead of being
+         * stopped at the first CRC.  Any result is acceptable; the
+         * sanitizer build and the guard bytes are the judges. */
+        static const char *const k_fz[] = {
+            "rgb8_a7", "rgba16_a7", "gray1", "gray2_a7", "gray4", "ga8",
+            "pal1_a7", "pal2", "pal4_a7", "pal8_a7", "tall_gray4_a7",
+            "gray16", "rgb16", "ga16_a7", "gray8_a7",
+        };
+        static uint8_t orig[8u * 1024u];
+        uint32_t seed = 0x9E3779B9u;
+        uint32_t round;
+        uint32_t accepted = 0;
+        const size_t cap = 37u * 29u * 3u;     /* guard right behind it */
+
+        r = FM_OK;
+        for (round = 0; round < PF_FUZZ_ROUNDS && r == FM_OK; round++)
+        {
+            const char *name = k_fz[round % (sizeof(k_fz) / sizeof(k_fz[0]))];
+            size_t got = 0;
+            FM_Image img;
+            FM_Result e;
+            uint32_t hits;
+            uint32_t k;
+
+            (void)snprintf(path, sizeof(path), "/test/vectors/png/%s.png",
+                           name);
+            r = File_ReadAll(path, orig, sizeof(orig), &got);
+            if (r != FM_OK)
+            {
+                break;
+            }
+            memcpy(file, orig, got);
+            seed = seed * 1664525u + 1013904223u;
+            hits = 1u + ((seed >> 28) & 3u);
+            for (k = 0; k < hits; k++)
+            {
+                size_t at;
+
+                seed = seed * 1664525u + 1013904223u;
+                at = 8u + (size_t)((seed >> 8) % (uint32_t)(got - 8u));
+                seed = seed * 1664525u + 1013904223u;
+                file[at] = (uint8_t)(file[at] ^ (1u << ((seed >> 13) & 7u)));
+                if (((seed >> 20) & 7u) == 0u)
+                {
+                    file[at] = (uint8_t)(seed >> 24);
+                }
+            }
+            seed = seed * 1664525u + 1013904223u;
+            if ((seed >> 31) != 0u)
+            {
+                pf_fix_all_crcs(file, got);
+            }
+            seed = seed * 1664525u + 1013904223u;
+            if (((seed >> 27) & 7u) == 0u)
+            {
+                got -= (size_t)((seed >> 8) % 40u);     /* and cut short */
+            }
+            memset(&img, 0, sizeof(img));
+            memset(out + cap, 0xD7, 64);
+            e = Image_DecodePNG(file, got, &img, out, cap);
+            for (k = 0; k < 64u; k++)
+            {
+                if (out[cap + k] != 0xD7u)
+                {
+                    printf("[round %u %s: wrote past the buffer] ",
+                           (unsigned)round, name);
+                    r = FM_ERR_INTERNAL;
+                    break;
+                }
+            }
+            if (e == FM_OK)
+            {
+                accepted++;
+                if (r == FM_OK &&
+                    ((size_t)img.width * img.height * 3u > cap ||
+                     img.width == 0u || img.height == 0u))
+                {
+                    printf("[round %u %s: %ux%u] ", (unsigned)round, name,
+                           (unsigned)img.width, (unsigned)img.height);
+                    r = FM_ERR_INTERNAL;
+                }
+            }
+        }
+        /* an intact file must still decode after all of that */
+        if (r == FM_OK)
+        {
+            FM_Image img;
+
+            memset(&img, 0, sizeof(img));
+            r = Image_Load("/test/vectors/png/rgb8_a7.png", &img, out,
+                           sizeof(out));
+            if (r == FM_OK && pf_crc(out, 37u * 29u * 3u) != 0x393E234Au)
+            {
+                r = FM_ERR_CRC;
+            }
+        }
+        (void)accepted;
+    }
+    CHECK_RESULT(r, "png damage");
+}
+#endif /* FM_USE_PNG */
+
 #else /* !FM_USE_IMAGE */
 /* FM_USE_IMAGE=0 used to drop every Image_* symbol except the six JPEG /
  * PNG stubs: an application that keeps one call (behind a run-time
@@ -15864,6 +16671,9 @@ int main(void)
     RUN_SUITE(test_scale);
 #endif
     RUN_SUITE(test_image_report);
+#if FM_USE_IMAGE && FM_USE_PNG
+    RUN_SUITE(test_png_formats);
+#endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_hook);
 #endif

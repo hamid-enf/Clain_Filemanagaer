@@ -7,7 +7,13 @@
  * malloc'd.  That is what used to return FM_ERR_NO_MEMORY on STM32 when
  * Image_Load slurped camera photos onto the internal heap.
  *
- * Interlaced PNGs and bit depths other than 8 are rejected.
+ * Every colour type and bit depth of the PNG specification decodes
+ * (grey 1/2/4/8/16, RGB 8/16, palette 1/2/4/8, grey+alpha and RGBA
+ * 8/16), interlaced (Adam7) or not.  The output is always RGB888:
+ * alpha is dropped, 16-bit samples are rounded to 8, sub-byte grey is
+ * stretched to full scale.  An Adam7 picture needs no extra memory:
+ * each pass is written straight to its place in the (scaled) output.
+ * The zlib Adler-32 and the CRC of every IDAT chunk are verified.
  * Encode writes a valid RGB8 PNG with zlib stored (uncompressed) blocks.
  */
 
@@ -85,6 +91,8 @@ struct Inf
     int nbits;
     uint8_t *window;
     size_t produced;
+    uint32_t adler_a;       /* Adler-32 of everything produced so far */
+    uint32_t adler_b;
     uint8_t *row;
     size_t row_len;
     size_t row_fill;
@@ -297,6 +305,10 @@ static int inf_put(Inf *z, uint8_t b)
 {
     z->window[z->produced & 32767u] = b;
     z->produced++;
+    z->adler_a += b;
+    if (z->adler_a >= 65521u) z->adler_a -= 65521u;
+    z->adler_b += z->adler_a;
+    if (z->adler_b >= 65521u) z->adler_b -= 65521u;
     if (z->row != NULL && z->row_len != 0u)
     {
         z->row[z->row_fill++] = b;
@@ -614,6 +626,32 @@ static FM_Result png_inflate(Inf *z)
             return FM_ERR_CORRUPTED;
         }
     } while (!last);
+
+    /* zlib trailer: Adler-32 of the uncompressed data, big-endian.  The
+     * per-chunk CRC only protects the compressed bytes as stored; this
+     * is the check that the inflated picture is the one that was
+     * deflated (and the only integrity check a PNG read from a memory
+     * buffer through a damaged decoder table would ever get). */
+    {
+        uint32_t want = 0;
+        int i;
+
+        inf_align(z);
+        for (i = 0; i < 4; i++)
+        {
+            int b = inf_get(z);
+
+            if (b < 0)
+            {
+                return FM_ERR_CORRUPTED;        /* trailer cut off */
+            }
+            want = (want << 8) | (uint32_t)b;
+        }
+        if (want != ((z->adler_b << 16) | z->adler_a))
+        {
+            return FM_ERR_CRC;
+        }
+    }
     return FM_OK;
 }
 
@@ -674,6 +712,50 @@ static void png_unfilter(uint8_t *recon, const uint8_t *filt, uint8_t *prev,
     }
 }
 
+/* Bits per pixel of a legal colour-type / bit-depth pair, 0 otherwise.
+ *
+ *   0 greyscale        1 2 4 8 16      4 greyscale + alpha    8 16
+ *   2 RGB                    8 16      6 RGB + alpha          8 16
+ *   3 palette          1 2 4 8                                      */
+static uint32_t png_pixel_bits(uint8_t color, uint8_t depth)
+{
+    uint32_t channels;
+
+    switch (color)
+    {
+    case 0u:
+        if (depth != 1u && depth != 2u && depth != 4u && depth != 8u &&
+            depth != 16u)
+        {
+            return 0u;
+        }
+        channels = 1u;
+        break;
+    case 3u:
+        if (depth != 1u && depth != 2u && depth != 4u && depth != 8u)
+        {
+            return 0u;
+        }
+        channels = 1u;
+        break;
+    case 2u: channels = 3u; break;
+    case 4u: channels = 2u; break;
+    case 6u: channels = 4u; break;
+    default: return 0u;
+    }
+    if (color != 0u && color != 3u && depth != 8u && depth != 16u)
+    {
+        return 0u;
+    }
+    return channels * depth;
+}
+
+/* Adam7: where pass p starts and how far apart its pixels are. */
+static const uint8_t k_a7_x0[7] = { 0, 4, 0, 2, 0, 1, 0 };
+static const uint8_t k_a7_y0[7] = { 0, 0, 4, 0, 2, 0, 1 };
+static const uint8_t k_a7_dx[7] = { 8, 8, 4, 4, 2, 2, 1 };
+static const uint8_t k_a7_dy[7] = { 8, 8, 8, 4, 4, 2, 2 };
+
 FM_Result Image_ProbePNG(const void *png, size_t png_size, FM_ImageInfo *info)
 {
     const uint8_t *p = (const uint8_t *)png;
@@ -709,18 +791,15 @@ FM_Result Image_ProbePNG(const void *png, size_t png_size, FM_ImageInfo *info)
     h = png_be32(p + 20);
     depth = p[24];
     color = p[25];
-    if (w == 0 || h == 0 || w > UINT16_MAX || h > UINT16_MAX || depth != 8u)
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
-    if (color != 0u && color != 2u && color != 3u && color != 6u)
+    if (w == 0 || h == 0 || w > UINT16_MAX || h > UINT16_MAX ||
+        png_pixel_bits(color, depth) == 0u || p[28] > 1u)
     {
         return FM_ERR_UNSUPPORTED;
     }
     memset(info, 0, sizeof(*info));
     info->width = (uint16_t)w;
     info->height = (uint16_t)h;
-    info->channels = (color == 0u) ? 1u : 3u;
+    info->channels = (color == 0u || color == 4u) ? 1u : 3u;
     info->bit_depth = (uint8_t)(info->channels * 8u);
     info->data_size = (uint64_t)w * h * info->channels;
     (void)strcpy(info->codec, "PNG");
@@ -742,6 +821,7 @@ typedef struct
     uint32_t crc;
     FM_Bool in_idat;
     FM_Bool ended;
+    FM_Result err;          /* why png_need() refused (FM_OK: plain end) */
     uint8_t tmp[256];
 } PngFeed;
 
@@ -753,12 +833,21 @@ typedef struct
     uint16_t dw;
     uint16_t dh;
     uint8_t color;
-    int bpp;
+    uint8_t depth;
+    uint32_t pixel_bits;    /* bits per pixel in the file */
+    int bpp;                /* filter distance: whole bytes per pixel, >= 1 */
     uint8_t palette[256 * 3];
     uint32_t pal_n;
     uint8_t *prev;
     uint8_t *recon;
-    uint32_t y;
+    uint8_t interlace;      /* 0 = one pass, 1 = Adam7 */
+    uint8_t pass;           /* current pass (always 0 when not interlaced) */
+    uint32_t x0, y0, dx, dy;/* geometry of the current pass */
+    uint32_t pw;            /* pixels per row in the current pass */
+    uint32_t ph;            /* rows in the current pass */
+    size_t row_bytes;       /* bytes per row in the current pass */
+    uint32_t y;             /* row inside the current pass */
+    FM_Bool done;           /* every row of every pass was delivered */
     FM_Result err;
 } PngEmit;
 
@@ -868,6 +957,7 @@ static int png_need(Inf *z)
             got = png_be32(crc_file);
             if (got != PNG_CRC_FIN(p->crc))
             {
+                p->err = FM_ERR_CRC;
                 return -1;
             }
             p->in_idat = FM_FALSE;
@@ -936,66 +1026,183 @@ static int png_need(Inf *z)
     }
 }
 
-static void png_sample_rgb(PngEmit *e, uint32_t sx, uint8_t *dst)
+/* After the zlib stream ended: whatever is left of the current IDAT
+ * chunk is skipped, and its CRC is checked like every other chunk's
+ * (png_need() only gets to check a chunk when inflate asks for more). */
+static FM_Result png_finish_idat(PngFeed *p)
 {
-    const uint8_t *s = e->recon + (size_t)sx * (size_t)e->bpp;
+    uint8_t crc_file[4];
 
-    if (e->color == 0u)
+    if (!p->in_idat)
     {
-        dst[0] = dst[1] = dst[2] = s[0];
+        return FM_OK;
     }
-    else if (e->color == 2u)
+    while (p->idat_left != 0u)
     {
-        dst[0] = s[0];
-        dst[1] = s[1];
-        dst[2] = s[2];
-    }
-    else if (e->color == 3u)
-    {
-        uint32_t idx = s[0];
+        uint32_t n = p->idat_left;
 
-        if (idx >= e->pal_n)
+        if (n > (uint32_t)sizeof(p->tmp))
         {
-            dst[0] = dst[1] = dst[2] = 0;
-            e->err = FM_ERR_CORRUPTED;
+            n = (uint32_t)sizeof(p->tmp);
+        }
+        if (png_read(p->in, p->tmp, n) != FM_OK)
+        {
+            return FM_ERR_CORRUPTED;
+        }
+        p->crc = PNG_CRC_RUN(p->tmp, n, p->crc);
+        p->idat_left -= n;
+    }
+    if (png_read(p->in, crc_file, 4) != FM_OK)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    p->in_idat = FM_FALSE;
+    return (png_be32(crc_file) == PNG_CRC_FIN(p->crc)) ? FM_OK : FM_ERR_CRC;
+}
+
+/* 16-bit sample -> 8 bit, correctly rounded (v * 255 / 65535). */
+static uint8_t png_16to8(const uint8_t *s)
+{
+    uint32_t v = ((uint32_t)s[0] << 8) | s[1];
+
+    return (uint8_t)((v * 255u + 32895u) >> 16);
+}
+
+/* RGB of pixel `px` of the row just reconstructed (px counts inside the
+ * current pass).  Alpha is not part of the output and is dropped. */
+static void png_sample_rgb(PngEmit *e, uint32_t px, uint8_t *dst)
+{
+    uint32_t v;
+
+    if (e->depth < 8u)
+    {
+        /* packed samples, most significant bits first */
+        uint32_t bit = px * e->depth;
+        uint32_t shift = 8u - e->depth - (bit & 7u);
+
+        v = ((uint32_t)e->recon[bit >> 3] >> shift) &
+            ((1u << e->depth) - 1u);
+        if (e->color == 0u)
+        {
+            /* 1, 2, 4 bits: full scale is 1, 3, 15 -> x255, x85, x17 */
+            v *= 255u / ((1u << e->depth) - 1u);
+            dst[0] = dst[1] = dst[2] = (uint8_t)v;
             return;
         }
-        dst[0] = e->palette[idx * 3u];
-        dst[1] = e->palette[idx * 3u + 1u];
-        dst[2] = e->palette[idx * 3u + 2u];
     }
     else
     {
-        dst[0] = s[0];
-        dst[1] = s[1];
-        dst[2] = s[2];
+        const uint8_t *s = e->recon + (size_t)px * (e->pixel_bits / 8u);
+
+        if (e->color == 2u || e->color == 6u)
+        {
+            if (e->depth == 16u)
+            {
+                dst[0] = png_16to8(s);
+                dst[1] = png_16to8(s + 2);
+                dst[2] = png_16to8(s + 4);
+            }
+            else
+            {
+                dst[0] = s[0];
+                dst[1] = s[1];
+                dst[2] = s[2];
+            }
+            return;
+        }
+        v = (e->depth == 16u) ? png_16to8(s) : s[0];
+        if (e->color != 3u)
+        {
+            dst[0] = dst[1] = dst[2] = (uint8_t)v;  /* grey (+alpha) */
+            return;
+        }
     }
+    /* palette index */
+    if (v >= e->pal_n)
+    {
+        dst[0] = dst[1] = dst[2] = 0;
+        e->err = FM_ERR_CORRUPTED;
+        return;
+    }
+    dst[0] = e->palette[v * 3u];
+    dst[1] = e->palette[v * 3u + 1u];
+    dst[2] = e->palette[v * 3u + 2u];
+}
+
+/* Select pass `pass` (skipping the ones a small picture leaves empty)
+ * and tell inflate how long its rows are.  Sets e->done after the last
+ * pass. */
+static void png_enter_pass(Inf *z, PngEmit *e, uint32_t pass)
+{
+    for (;;)
+    {
+        if (e->interlace == 0u)
+        {
+            if (pass != 0u)
+            {
+                break;
+            }
+            e->x0 = 0; e->y0 = 0; e->dx = 1; e->dy = 1;
+        }
+        else
+        {
+            if (pass >= 7u)
+            {
+                break;
+            }
+            e->x0 = k_a7_x0[pass]; e->y0 = k_a7_y0[pass];
+            e->dx = k_a7_dx[pass]; e->dy = k_a7_dy[pass];
+        }
+        e->pw = (e->sw > e->x0) ? ((uint32_t)e->sw - e->x0 + e->dx - 1u) / e->dx
+                                : 0u;
+        e->ph = (e->sh > e->y0) ? ((uint32_t)e->sh - e->y0 + e->dy - 1u) / e->dy
+                                : 0u;
+        if (e->pw != 0u && e->ph != 0u)
+        {
+            e->pass = (uint8_t)pass;
+            e->y = 0;
+            e->row_bytes = ((size_t)e->pw * e->pixel_bits + 7u) / 8u;
+            /* the filters of a pass never look at the pass before it */
+            memset(e->prev, 0, e->row_bytes);
+            z->row_len = e->row_bytes + 1u;
+            return;
+        }
+        pass++;                         /* empty pass: no bytes at all */
+    }
+    e->done = FM_TRUE;
 }
 
 static int png_on_row(Inf *z)
 {
     PngEmit *e = (PngEmit *)z->row_ctx;
-    uint32_t sy = e->y;
-    uint16_t dy;
+    uint32_t sy;
+    uint32_t dy;
+    uint32_t dy_end;
 
     if (e->err != FM_OK)
     {
         return -1;
     }
-    if (z->row[0] > 4u)
+    if (e->done || z->row[0] > 4u)
     {
+        /* more rows than the header announced, or an unknown filter */
         e->err = FM_ERR_CORRUPTED;
         return -1;
     }
-    png_unfilter(e->recon, z->row, e->prev, (size_t)e->sw * (size_t)e->bpp,
-                 e->bpp);
-    memcpy(e->prev, e->recon, (size_t)e->sw * (size_t)e->bpp);
-    for (dy = 0; dy < e->dh; dy++)
+    png_unfilter(e->recon, z->row, e->prev, e->row_bytes, e->bpp);
+    memcpy(e->prev, e->recon, e->row_bytes);
+    sy = e->y0 + e->y * e->dy;          /* picture row of this pass row */
+    /* The output rows that sample picture row sy are the dy with
+     * dy * sh / dh == sy, i.e. ceil(sy*dh/sh) <= dy < ceil((sy+1)*dh/sh).
+     * (All factors fit 16 bits, so the products fit 32.) */
+    dy = (sy * e->dh + e->sh - 1u) / e->sh;
+    dy_end = ((sy + 1u) * e->dh + e->sh - 1u) / e->sh;
+    if (dy_end > e->dh)
     {
-        if ((uint32_t)dy * e->sh / e->dh != sy)
-        {
-            continue;
-        }
+        dy_end = e->dh;
+    }
+    for (; dy < dy_end; dy++)
+    {
         {
             uint8_t *dst = e->out + (size_t)dy * e->dw * 3u;
             uint16_t dx;
@@ -1004,11 +1211,20 @@ static int png_on_row(Inf *z)
             {
                 uint32_t sx = (uint32_t)dx * e->sw / e->dw;
 
-                png_sample_rgb(e, sx, dst + (size_t)dx * 3u);
+                if (sx < e->x0 || (sx - e->x0) % e->dx != 0u)
+                {
+                    continue;           /* belongs to another pass */
+                }
+                png_sample_rgb(e, (sx - e->x0) / e->dx,
+                               dst + (size_t)dx * 3u);
             }
         }
     }
     e->y++;
+    if (e->y >= e->ph)
+    {
+        png_enter_pass(z, e, (uint32_t)e->pass + 1u);
+    }
     FM_Idle();
     return (e->err == FM_OK) ? 0 : -1;
 }
@@ -1025,6 +1241,7 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     uint8_t depth;
     uint8_t color;
     uint8_t interlace;
+    uint32_t pixel_bits;
     int bpp;
     size_t stride;
     uint16_t dw;
@@ -1064,32 +1281,18 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     depth = ihdr[8];
     color = ihdr[9];
     interlace = ihdr[12];
-    if (w == 0 || h == 0 || w > UINT16_MAX || h > UINT16_MAX || depth != 8u ||
-        ihdr[10] != 0u || ihdr[11] != 0u || interlace != 0u)
+    pixel_bits = png_pixel_bits(color, depth);
+    if (w == 0 || h == 0 || w > UINT16_MAX || h > UINT16_MAX ||
+        pixel_bits == 0u || ihdr[10] != 0u || ihdr[11] != 0u ||
+        interlace > 1u)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    if (color == 0u)
-    {
-        bpp = 1;
-    }
-    else if (color == 2u)
-    {
-        bpp = 3;
-    }
-    else if (color == 3u)
-    {
-        bpp = 1;
-    }
-    else if (color == 6u)
-    {
-        bpp = 4;
-    }
-    else
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
-    stride = (size_t)w * (size_t)bpp;
+    /* the filters work on whole bytes: the "pixel to the left" of a
+     * sub-byte pixel is the byte to the left */
+    bpp = (pixel_bits >= 8u) ? (int)(pixel_bits / 8u) : 1;
+    /* widest row of the picture (the last Adam7 pass is full width) */
+    stride = ((size_t)w * pixel_bits + 7u) / 8u;
     if (stride > FM_PNG_MAX_STRIDE || stride + 1u > sizeof(g_png_row))
     {
         return FM_ERR_TOO_LARGE;
@@ -1108,11 +1311,13 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     emit.dw = dw;
     emit.dh = dh;
     emit.color = color;
+    emit.depth = depth;
+    emit.pixel_bits = pixel_bits;
     emit.bpp = bpp;
+    emit.interlace = interlace;
     emit.prev = g_png_prev;
     emit.recon = g_png_recon;
     emit.err = FM_OK;
-    memset(g_png_prev, 0, stride);
 
     /* PLTE lives before IDAT.  Walk chunks until the first IDAT, then
      * hand the rest of the IDAT stream to inflate via png_need(). */
@@ -1174,10 +1379,11 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     z.need = png_need;
     z.need_ctx = &feed;
     z.window = g_png_window;
+    z.adler_a = 1u;
     z.row = g_png_row;
-    z.row_len = stride + 1u;
     z.on_row = png_on_row;
     z.row_ctx = &emit;
+    png_enter_pass(&z, &emit, 0u);      /* sets z.row_len */
     /* Prime the first IDAT bytes. */
     if (png_need(&z) != 0)
     {
@@ -1186,15 +1392,22 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     r = png_inflate(&z);
     if (r != FM_OK)
     {
-        return r;
+        /* a chunk that failed its CRC is reported as that, not as
+         * whatever inflate made of the missing bytes */
+        return (feed.err != FM_OK) ? feed.err : r;
     }
     if (emit.err != FM_OK)
     {
         return emit.err;
     }
-    if (emit.y != h)
+    if (!emit.done)
     {
-        return FM_ERR_CORRUPTED;
+        return FM_ERR_CORRUPTED;        /* fewer rows than announced */
+    }
+    r = png_finish_idat(&feed);
+    if (r != FM_OK)
+    {
+        return r;
     }
     memset(img, 0, sizeof(*img));
     img->width = dw;
