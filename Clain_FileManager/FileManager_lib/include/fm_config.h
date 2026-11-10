@@ -294,6 +294,39 @@
 #ifndef FM_FMFS_MAX_ENTRIES
 #define FM_FMFS_MAX_ENTRIES 32        /* built-in FS file/dir entries  */
 #endif
+/* The layout FMFS gives a storage when it formats it:
+ *   0  version 1: one table, rewritten in place.  Smallest (the table
+ *      takes about 5.7 KiB), but a reset during a save or a compaction
+ *      can cost the volume.
+ *   1  version 2 -- two tables and a move journal, safe against a reset
+ *      at any moment -- when that takes no more than half of the
+ *      storage (about 11.5 KiB on a byte-addressed storage, 13 KiB
+ *      with 512-byte blocks, 24 KiB with 4 KiB erase units); version 1
+ *      on anything smaller.  On block storage (not RAM) every file
+ *      then starts on a block boundary, which costs half a block per
+ *      file on average.
+ *   2  version 2 whenever it fits at all.
+ * Mounting never depends on this: both versions mount in every build
+ * and keep the layout they have.  FMFS_IsPowerSafe() tells which one a
+ * mounted volume is. */
+#ifndef FM_FMFS_POWER_SAFE
+#define FM_FMFS_POWER_SAFE 1
+#endif
+/* Version 2 volumes: the journal records one file may cost when a
+ * compaction slides it over itself.  A file moves in steps of the
+ * distance it moves by (or of the free space it can be parked in), one
+ * record a step; a hole smaller than 1/FM_FMFS_MOVE_STEPS of the file
+ * behind it would take more than that, and is left where it is.  The
+ * price: up to that fraction of a file's size in front of it may stay
+ * unusable, so a nearly full volume can answer FM_ERR_NO_SPACE while
+ * FS_GetInfo() still reports a little free space.  The gain: no write
+ * can cost thousands of journal writes -- on flash, thousands of erase
+ * cycles of one block -- to win a few bytes.
+ * 0xFFFFFFFF: never give up (every free byte can be used; right for RAM
+ * and SDRAM, where a write costs nothing). */
+#ifndef FM_FMFS_MOVE_STEPS
+#define FM_FMFS_MOVE_STEPS 64
+#endif
 #ifndef FM_INTERNAL_BUFFER_SIZE
 #define FM_INTERNAL_BUFFER_SIZE 512   /* core scratch buffer (chunks)  */
 #endif

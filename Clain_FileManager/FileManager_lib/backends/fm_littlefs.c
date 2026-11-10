@@ -40,6 +40,7 @@ typedef struct
     FM_Bool     auto_format;
     FM_Bool     mounted;
     FM_Bool     in_use;
+    FM_FS      *owner;          /* the FM_FS it is in use by */
 
     /* Static buffers handed to littlefs (no heap required). */
     uint8_t     read_buf[FM_LFS_CACHE_SIZE];
@@ -302,15 +303,61 @@ static void lfs_path(const char *path, char *out, size_t out_size)
 /* ------------------------------------------------------------------ */
 /* Mount / format / check                                              */
 /* ------------------------------------------------------------------ */
-static FM_Result lfs_fs_mount(FM_FS *fs, FM_Storage *storage)
+/* A context goes back to the pool when its volume is unmounted, and
+ * when a mount fails (nothing is mounted then, so no unmount would ever
+ * return it).  It used to stay taken for good: the fifth LittleFS_Init()
+ * of a program -- a card that is taken out and put back often enough --
+ * failed with FM_ERR_NO_MEMORY.
+ *
+ * The FM_FS keeps pointing at its context.  Mounting it again without
+ * a new LittleFS_Init() takes the context back when nobody has it, and
+ * is refused when another FM_FS does. */
+static LittleFS_Ctx *lfs_claim(FM_FS *fs)
 {
     LittleFS_Ctx *ctx = lfs_ctx(fs);
+
+    if (ctx == NULL)
+    {
+        return NULL;
+    }
+    FM_Lock();
+    if (!ctx->in_use)
+    {
+        ctx->in_use = FM_TRUE;
+        ctx->owner = fs;
+    }
+    else if (ctx->owner != fs)
+    {
+        ctx = NULL;
+    }
+    FM_Unlock();
+    return ctx;
+}
+
+static void lfs_release(LittleFS_Ctx *ctx)
+{
+    FM_Lock();
+    ctx->mounted = FM_FALSE;
+    ctx->storage = NULL;
+    ctx->owner = NULL;
+    ctx->in_use = FM_FALSE;
+    FM_Unlock();
+}
+
+static FM_Result lfs_fs_mount(FM_FS *fs, FM_Storage *storage)
+{
+    LittleFS_Ctx *ctx = lfs_claim(fs);
     FM_Result r;
     int err;
 
+    if (ctx == NULL)
+    {
+        return FM_ERR_NOT_READY;
+    }
     r = lfs_build_cfg(ctx, storage);
     if (r != FM_OK)
     {
+        lfs_release(ctx);
         return r;
     }
     err = lfs_mount(&ctx->lfs, &ctx->cfg);
@@ -326,6 +373,10 @@ static FM_Result lfs_fs_mount(FM_FS *fs, FM_Storage *storage)
     {
         ctx->mounted = FM_TRUE;
     }
+    else
+    {
+        lfs_release(ctx);
+    }
     return lfs_map_err(err);
 }
 
@@ -333,12 +384,15 @@ static FM_Result lfs_fs_unmount(FM_FS *fs)
 {
     LittleFS_Ctx *ctx = lfs_ctx(fs);
 
+    if (ctx == NULL || ctx->owner != fs)
+    {
+        return FM_ERR_NOT_MOUNTED;
+    }
     if (ctx->mounted)
     {
         (void)lfs_unmount(&ctx->lfs);
     }
-    ctx->mounted = FM_FALSE;
-    ctx->storage = NULL;
+    lfs_release(ctx);
     return FM_OK;
 }
 
@@ -854,16 +908,28 @@ FM_Result LittleFS_Init(FM_FS *fs)
     memset(fs, 0, sizeof(*fs));
 
     FM_Lock();
+    /* an FM_FS that is initialised again keeps the context it has */
     for (i = 0; i < FM_MAX_FS; i++)
+    {
+        if (g_lfs[i].in_use && g_lfs[i].owner == fs)
+        {
+            ctx = &g_lfs[i];
+            break;
+        }
+    }
+    for (i = 0; ctx == NULL && i < FM_MAX_FS; i++)
     {
         if (!g_lfs[i].in_use)
         {
             ctx = &g_lfs[i];
-            memset(ctx, 0, sizeof(*ctx));
-            ctx->auto_format = FM_TRUE;
-            ctx->in_use = FM_TRUE;
-            break;
         }
+    }
+    if (ctx != NULL)
+    {
+        memset(ctx, 0, sizeof(*ctx));
+        ctx->auto_format = FM_TRUE;
+        ctx->in_use = FM_TRUE;
+        ctx->owner = fs;
     }
     FM_Unlock();
     if (ctx == NULL)
@@ -908,7 +974,7 @@ void LittleFS_SetAutoFormat(FM_FS *fs, FM_Bool auto_format)
         return;
     }
     ctx = lfs_ctx(fs);
-    if (ctx != NULL)
+    if (ctx != NULL && ctx->owner == fs)
     {
         ctx->auto_format = auto_format;
     }

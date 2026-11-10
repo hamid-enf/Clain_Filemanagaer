@@ -973,7 +973,11 @@ static void mp3_release(FM_Mp3Stream *m)
 {
     if (m != NULL)
     {
+        /* under the lock mp3_acquire() scans the pool with: another
+         * task may be opening a stream while this one closes */
+        FM_Lock();
         m->used = FM_FALSE;
+        FM_Unlock();
     }
 }
 
@@ -1647,7 +1651,9 @@ static void aac_release(FM_AacStream *s)
 {
     if (s != NULL)
     {
+        FM_Lock();                  /* see mp3_release() */
         s->used = FM_FALSE;
+        FM_Unlock();
     }
 }
 

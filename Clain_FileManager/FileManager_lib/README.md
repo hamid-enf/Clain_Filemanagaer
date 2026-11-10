@@ -594,24 +594,93 @@ host run cannot show is real interrupt/priority behaviour on the target.
 
 ### FMFS notes
 
-- Space is reclaimed automatically: when the tail of the data area is
-  used up, a write compacts the area (and, if needed, rotates the
-  growing file to the end) before it reports `FM_ERR_NO_SPACE`.  A write
-  therefore fails for lack of space only when the live data really does
-  not fit, and `FS_GetFreeSpace()` reports capacity minus live data.
-  `FMFS_Repack()` does the same compaction on request; open handles stay
-  valid across it.
+- **Power-fail safe (layout version 2).**  A format writes two copies of
+  the metadata table and a small move journal.  A change always goes to
+  the copy that is not in use, with a sequence number and a CRC; a
+  compaction that has to slide a file over itself records its progress
+  in the journal, and the next mount finishes it.  After a reset at any
+  moment — also in the middle of a compaction, and again in the middle
+  of the recovery — every file is either what it was before the
+  operation that was running or what that operation leaves:
+  create, delete, rename, truncate, append, and every move of data the
+  filesystem makes on its own are all-or-nothing.
+  `FMFS_IsPowerSafe(&fs)` tells whether a mounted volume has this layout.
+- **What it does not cover.**  `File_Write` changes bytes a file already
+  has in place; a reset can leave those half written.  On a block
+  device that includes the rest of the block being written — for an
+  append, the last block of the file as it was.  Other files are never
+  affected.  Nothing is checksummed except the metadata: FMFS does not
+  detect data that the medium itself corrupts.  Use LittleFS where you
+  need copy-on-write data or wear levelling.
+- **Blocks.**  Drivers for SD cards and NOR flash rewrite whole blocks,
+  and a reset can cost the whole block that was being rewritten.  The
+  tables, the journal records and — on anything but RAM — every file
+  therefore have blocks to themselves (block = the larger of
+  `block_size` and `erase_size`, up to 4096 bytes; larger erase units
+  are not covered and are treated as byte storage).  The price is half
+  a block per file on average, and `FS_GetFreeSpace()` counts it.
+- **Cost.**  The metadata takes about 11.5 KiB instead of 5.7 KiB
+  (13 KiB with 512-byte blocks, 24 KiB with 4 KiB erase units).  A
+  storage on which that is more than half the capacity is formatted
+  with the old single-table layout (version 1), which is not safe
+  against a reset; `FM_FMFS_POWER_SAFE` (0 / 1 / 2) moves that limit.
+- **Existing volumes.**  Version 1 volumes written by earlier releases
+  mount and work as before in every build, and are never converted
+  behind your back — `FS_Format()` is the way to the new layout.  On
+  RAM/SDRAM storage a volume whose metadata cannot be read (both tables
+  on version 2) is formatted at mount; on any other storage the mount
+  fails with `FM_ERR_CORRUPTED` and nothing is erased.
+- **Space is reclaimed automatically.**  A file that grows takes the
+  space behind it, else moves into the largest hole deleted files left,
+  and only then is the data area compacted (and, if needed, the free
+  space brought to where the file is).  `FMFS_Repack()` compacts on
+  request; open handles stay valid across it.
+- **Journal writes are bounded.**  Sliding a file by a distance much
+  smaller than the file takes many steps, each a journal record — on
+  flash, an erase cycle of the journal's block.  A move may cost at most
+  `FM_FMFS_MOVE_STEPS` records (default 64); a hole that would take more
+  to close stays where it is until something fits into it.  On a nearly
+  full version 2 volume a write can therefore fail with
+  `FM_ERR_NO_SPACE` while a little free space is still reported.
+  `-DFM_FMFS_MOVE_STEPS=0xFFFFFFFF` restores "fails only when the live
+  data really does not fit" (the behaviour of version 1 volumes) at the
+  price of unbounded journal traffic — fine on RAM.
 - Metadata is rewritten only when it changes: reading a file, closing a
-  handle, and overwriting bytes in place do not touch the table.
+  handle, and overwriting bytes in place do not touch the table.  There
+  is no wear levelling: the two tables and the two journal records are
+  at fixed places.
 - A handle whose file was deleted or replaced by a rename returns
   `FM_ERR_NOT_FOUND`; it can never reach the file that reuses the slot.
 - A rename is all or nothing on the mounted volume: every reason to
   refuse it is checked before the table changes, and when the table
   cannot be written the old names — and a file that was to be replaced —
   are put back.
-- Compaction moves data in place and the table is rewritten in place:
-  FMFS is **not power-fail safe**.  A reset in the middle of either can
-  leave files damaged.  Use LittleFS where that matters.
+- After an I/O error in the middle of a compaction the volume stays
+  usable: the interrupted move is finished at the start of the next
+  operation that changes anything (or by the next mount).
+- `FMFS_Init()` / `LittleFS_Init()` take one of `FM_MAX_FS` contexts.
+  `FS_Unmount()` and a failed `FS_Mount()` give it back, so a medium can
+  be mounted and unmounted any number of times.  Call the init function
+  before each mount; an `FM_FS` mounted again without it is refused
+  with `FM_ERR_NOT_READY` when its old context now belongs to another
+  mount.
+
+**How the power-fail safety is verified.**  On the host, not on a
+board: the test suite replays several hundred random operations on
+small, nearly full volumes and cuts the power at each storage write of
+each of them (about 11 000 cuts, a second cut during recovery where the
+mount had work to do), then mounts and compares every file with a
+model.  Three devices are simulated: byte storage where a cut write
+stops anywhere and leaves a few bytes of noise, and 512-byte and
+4096-byte block devices that additionally lose the whole block they
+were rewriting.  The same harness run against a version 1 volume does
+find damage, and seeded faults in the implementation (a journal record
+skipped, a table saved in the wrong order, files sharing a block, …)
+are each caught by it.  What this cannot show is a device that
+misbehaves in other ways — one that reorders or drops writes it has
+acknowledged, for instance.  The storage `sync` callback is called at
+the points where the order matters; a driver that caches must honour
+it.
 
 ## Examples
 

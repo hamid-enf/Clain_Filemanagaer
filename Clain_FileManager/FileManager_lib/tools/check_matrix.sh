@@ -164,6 +164,13 @@ if [ "$MODE" != "quick" ]; then
     CFLAGS_EXTRA="-DFM_JPEG_HW_FILE_MAX=0u" run_one "FM_JPEG_HW_FILE_MAX=0 (files never go to the HW codec)"
     # Audio setup data (MKV CodecPrivate) never taken from the heap.
     CFLAGS_EXTRA="-DFM_VIDEO_AUDIO_PRIVATE_HEAP_MAX=0u" run_one "FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX=0"
+    # FMFS: format with the old single-table layout only (the power-cut
+    # suites then run their version 1 parts), always with the two-table
+    # layout, and with no limit on the journal records a compaction may
+    # cost (the model test then allows no unusable space at all).
+    CFLAGS_EXTRA="-DFM_FMFS_POWER_SAFE=0" run_one "FM_FMFS_POWER_SAFE=0 (version 1 volumes only)"
+    CFLAGS_EXTRA="-DFM_FMFS_POWER_SAFE=2" run_one "FM_FMFS_POWER_SAFE=2"
+    CFLAGS_EXTRA="-DFM_FMFS_MOVE_STEPS=0xFFFFFFFF" run_one "FM_FMFS_MOVE_STEPS unlimited"
     # A "mutex only" sync port (no thread identity): a busy scratch
     # resource is reported as FM_ERR_BUSY instead of being waited for, so
     # the multi-thread suites fail by design -- only the build is checked.

@@ -998,6 +998,9 @@ static void test_standard_device_adapters(void)
 /* High-level memory-backed filesystem (FMFS)                       */
 /* ================================================================ */
 #if FM_USE_FMFS
+static void pf_v1_image(uint8_t *mem, uint32_t cap);
+static uint64_t pf_le(const uint8_t *p, uint32_t n);
+
 static void test_memory_fs(void)
 {
     FM_FS memfs;
@@ -1050,42 +1053,91 @@ static void test_memory_fs(void)
 
     TEST("FMFS auto-formats corrupted RAM metadata");
     {
-        /* Simulate a reset in the middle of fmfs_save(): the FMFS magic
-         * is intact but an entry record is torn.  On volatile media
-         * (RAM disk / external SDRAM that survives soft resets) the
-         * mount must recover by re-formatting instead of failing with
+        /* Metadata that cannot be read.  On volatile media (RAM disk /
+         * external SDRAM that survives soft resets) the mount must
+         * recover by re-formatting instead of failing with
          * FM_ERR_CORRUPTED - otherwise every later file call in the
          * application dies, exactly like on the STM32H7 board whose
-         * "RAM disk" lives in external SDRAM. */
+         * "RAM disk" lives in external SDRAM.
+         *
+         * Round 0: a version 1 volume, as older releases wrote it, with
+         * a reset in the middle of its one table: an entry record is
+         * torn.  Nothing else to read: formatted.
+         * Round 1: what a format writes today.  One torn table is NOT
+         * a reason to format -- the other one is used and the files are
+         * still there.  Both torn: formatted. */
         static uint8_t corrupt_buf[64 * 1024];
         FM_Storage cst;
         FM_FS      cfs;
         char ctext[64];
+        uint32_t round;
+        const char *why = NULL;
 
         r = FS_Unmount("/");
         if (r == FM_ERR_NOT_MOUNTED) r = FM_OK;
 
-        /* first mount formats the blank disk */
-        r = FileManager_MountMemory(&cst, &cfs, "CRPT", corrupt_buf,
-                                    sizeof(corrupt_buf), 1, FM_FALSE);
-        if (r != FM_OK) { FAIL(FM_ResultString(r)); }
-        else
+        for (round = 0; round < 2u && why == NULL; round++)
         {
+            FM_Bool safe;
+            uint32_t slot = 0;
+
+            if (round == 0u) pf_v1_image(corrupt_buf, sizeof(corrupt_buf));
+            else memset(corrupt_buf, 0, sizeof(corrupt_buf));
+            r = FileManager_MountMemory(&cst, &cfs, "CRPT", corrupt_buf,
+                                        sizeof(corrupt_buf), 1, FM_FALSE);
+            if (r != FM_OK) { why = FM_ResultString(r); break; }
+            safe = FMFS_IsPowerSafe(&cfs);
             r = File_WriteText("/ok.txt", "fine");
             (void)FS_Unmount("/");
             (void)Storage_Unregister("CRPT");
-            /* header at [0..31]: magic[0..3], version u16@4, count u16@6,
-             * data_start u64@8, data_next u64@16, capacity u64@24.
-             * records start at 32: used@0, type@1, ... (180 bytes each).
-             * Tear entry #1: mark it used with an invalid type. */
-            corrupt_buf[32 + 180 + 0] = 1;      /* used   */
-            corrupt_buf[32 + 180 + 1] = 0x77;   /* bogus type */
+            if (r != FM_OK) { why = "write"; break; }
+            if (round == 0u && safe) { why = "version 1 converted"; break; }
+
+            if (safe)
+            {
+                /* tear the table that is not the newest one */
+                uint32_t seq_a = (uint32_t)pf_le(corrupt_buf + 32, 4);
+                uint32_t seq_b;
+
+                slot = (uint32_t)pf_le(corrupt_buf + 36, 4);
+                if (slot < 5000u || slot > 9000u) { why = "layout"; break; }
+                seq_b = (uint32_t)pf_le(corrupt_buf + slot + 32u, 4);
+                corrupt_buf[((seq_a < seq_b) ? 0u : slot) + 64u + 181u] = 0x77;
+                r = FileManager_MountMemory(&cst, &cfs, "CRPT", corrupt_buf,
+                                            sizeof(corrupt_buf), 1, FM_FALSE);
+                memset(ctext, 0, sizeof(ctext));
+                if (r == FM_OK)
+                    r = File_ReadText("/ok.txt", ctext, sizeof(ctext), NULL);
+                (void)FS_Unmount("/");
+                (void)Storage_Unregister("CRPT");
+                if (r != FM_OK || strcmp(ctext, "fine") != 0)
+                {
+                    why = "one torn table lost the files";
+                    break;
+                }
+                /* now both */
+                corrupt_buf[64 + 181] ^= 0x55u;
+                corrupt_buf[slot + 64u + 181u] ^= 0x55u;
+            }
+            else
+            {
+                /* header at [0..31]: magic[0..3], version u16@4, count
+                 * u16@6, data_start u64@8, data_next u64@16, capacity
+                 * u64@24.  Records start at 32: used@0, type@1, ...
+                 * (180 bytes each).  Tear entry #1: mark it used with
+                 * an invalid type. */
+                corrupt_buf[32 + 180 + 0] = 1;      /* used   */
+                corrupt_buf[32 + 180 + 1] = 0x77;   /* bogus type */
+            }
 
             r = FileManager_MountMemory(&cst, &cfs, "CRPT", corrupt_buf,
                                         sizeof(corrupt_buf), 1, FM_FALSE);
-            if (r != FM_OK)
+            if (r != FM_OK) { why = FM_ResultString(r); break; }
+            memset(ctext, 0, sizeof(ctext));
+            if (File_ReadText("/ok.txt", ctext, sizeof(ctext), NULL) !=
+                FM_ERR_NOT_FOUND)
             {
-                FAIL(FM_ResultString(r));
+                why = "not formatted";
             }
             else
             {
@@ -1094,14 +1146,14 @@ static void test_memory_fs(void)
                 if (r == FM_OK)
                     r = File_ReadText("/after-recover.txt", ctext,
                                       sizeof(ctext), NULL);
-                if (r == FM_OK && strcmp(ctext, "recovered") == 0)
-                    PASS();
-                else
-                    FAIL("write after auto-format");
-                (void)FS_Unmount("/");
-                (void)Storage_Unregister("CRPT");
+                if (r != FM_OK || strcmp(ctext, "recovered") != 0)
+                    why = "write after auto-format";
             }
+            (void)FS_Unmount("/");
+            (void)Storage_Unregister("CRPT");
         }
+        if (why != NULL) { FAIL(why); }
+        else { PASS(); }
     }
 
     TEST("Custom storage driver mount helper");
@@ -16752,7 +16804,13 @@ static void test_threads_wide(void)
     if (r == FM_OK) r = FMFS_Init(&mfs);
     if (r == FM_OK) r = FS_Mount("/twm", &mfs);
     if (r == FM_OK) g_tw_have_mfs = FM_TRUE;
-    else printf("[fmfs mount: %s] ", FM_ResultString(r));
+    else
+    {
+        /* (this used to be printed and the test went on with one
+         * filesystem less -- and passed) */
+        printf("[fmfs mount: %s] ", FM_ResultString(r));
+        ok = 0;
+    }
 #endif
 #if FM_USE_LITTLEFS
     memset(lfs_mem, 0xFF, sizeof(lfs_mem));
@@ -16761,7 +16819,11 @@ static void test_threads_wide(void)
     if (r == FM_OK) r = LittleFS_Init(&lfs);
     if (r == FM_OK) r = FS_Mount("/twl", &lfs);
     if (r == FM_OK) g_tw_have_lfs = FM_TRUE;
-    else printf("[littlefs mount: %s] ", FM_ResultString(r));
+    else
+    {
+        printf("[littlefs mount: %s] ", FM_ResultString(r));
+        ok = 0;
+    }
 #endif
     (void)mfs_mem; (void)lfs_mem; (void)mfs_storage; (void)lfs_storage;
     (void)mfs; (void)lfs;
@@ -16911,6 +16973,8 @@ static uint32_t g_srf_size[SRF_FILES];
 static uint8_t  g_srf_there[SRF_FILES];
 static uint32_t g_srf_rng;
 
+static void pf_v1_image(uint8_t *mem, uint32_t cap);
+
 static uint32_t srf_rand(uint32_t n)
 {
     g_srf_rng = g_srf_rng * 1664525u + 1013904223u;
@@ -16954,8 +17018,11 @@ static FM_Result srf_check_all(void)
     return FM_OK;
 }
 
+/* `slack`: how close to full the volume may be when it refuses a write
+ * that would still fit (version 2 leaves a hole alone when closing it
+ * costs too many journal records; version 1: none). */
 static FM_Result srf_run(FM_FS *fs, uint32_t seed, uint32_t steps,
-                         uint32_t *no_space_seen)
+                         uint32_t slack, uint32_t *no_space_seen)
 {
     FM_FSInfo info;
     uint64_t cap;
@@ -17005,7 +17072,7 @@ static FM_Result srf_run(FM_FS *fs, uint32_t seed, uint32_t steps,
             if (r == FM_ERR_NO_SPACE)
             {
                 (*no_space_seen)++;
-                if (live + grow <= cap)
+                if (live + grow + slack <= cap)
                 {
                     printf("[step %u: truncate refused with room] ",
                            (unsigned)step);
@@ -17054,7 +17121,7 @@ static FM_Result srf_run(FM_FS *fs, uint32_t seed, uint32_t steps,
             if (r == FM_ERR_NO_SPACE)
             {
                 (*no_space_seen)++;
-                if (live + grow <= cap)
+                if (live + grow + slack <= cap)
                 {
                     printf("[step %u: write refused with room: live %lu "
                            "+ %lu of %lu] ", (unsigned)step,
@@ -17205,7 +17272,8 @@ static void test_sync_report(void)
 
 #if FM_USE_FMFS
     {
-        static uint8_t mem[160 * 1024];
+        /* 160 KiB of files and the two tables of a version 2 volume */
+        static uint8_t mem[168 * 1024];
         static FM_Storage st;
         static FM_FS fs;
         FM_FSInfo info;
@@ -17639,42 +17707,76 @@ static void test_sync_report(void)
 #endif /* FM_USE_FMFS */
 
 #if FM_USE_FMFS
-    TEST("FMFS: 3 x 1500 random operations on a full volume match a model");
+    TEST("FMFS: random operations on a full volume match a model");
     {
         /* data area of roughly 30 KB for up to 6 x 9000 bytes of files */
-        static uint8_t mem[36 * 1024];
+        static uint8_t mem[44 * 1024];
         static FM_Storage st;
         static FM_FS fs;
         uint32_t refused = 0;
+        uint32_t layout;
         uint32_t round;
 
-        r = RamDisk_Init(&st, "srf", mem, sizeof(mem), 512);
-        if (r == FM_OK) r = Storage_Register(&st);
-        if (r == FM_OK) r = FMFS_Init(&fs);
-        if (r == FM_OK) r = FS_Mount("/srf", &fs);
-        for (round = 0; round < 3u && r == FM_OK; round++)
+        r = FM_OK;
+        /* 3 x 1500 operations on what a format writes, and again on a
+         * version 1 volume as older releases left it */
+        for (layout = 0; layout < 2u && r == FM_OK; layout++)
         {
-            r = FS_Format("/srf");
-            if (r == FM_OK) r = srf_run(&fs, 0x1234u + round * 77u, 1500,
-                                        &refused);
+            for (round = 0; round < 3u && r == FM_OK; round++)
+            {
+                uint32_t slack = 0;
+
+                if (layout == 1u)
+                {
+                    pf_v1_image(mem, (uint32_t)sizeof(mem));
+                }
+                else
+                {
+                    memset(mem, 0, sizeof(mem));
+                }
+                r = RamDisk_Init(&st, "srf", mem, sizeof(mem), 512);
+                if (r == FM_OK) r = Storage_Register(&st);
+                if (r == FM_OK) r = FMFS_Init(&fs);
+                if (r == FM_OK) r = FS_Mount("/srf", &fs);
+                if (r == FM_OK && layout == 1u && FMFS_IsPowerSafe(&fs))
+                {
+                    r = FM_ERR_INTERNAL;
+                }
+                if (r == FM_OK && FMFS_IsPowerSafe(&fs) &&
+                    (uint64_t)(FM_FMFS_MOVE_STEPS) < SRF_MAX)
+                {
+                    /* a hole in front of a file stays when it is smaller
+                     * than 1/FM_FMFS_MOVE_STEPS of that file */
+                    slack = 2u * SRF_FILES *
+                            (uint32_t)(SRF_MAX / (FM_FMFS_MOVE_STEPS) + 1u);
+                }
+                if (r == FM_OK) r = srf_run(&fs, 0x1234u + round * 77u,
+                                            1500, slack, &refused);
+                if (r == FM_OK)
+                {
+                    /* what a remount reads back from the storage is the
+                     * same */
+                    r = FS_Unmount("/srf");
+                    if (r == FM_OK) r = FMFS_Init(&fs);
+                    if (r == FM_OK) r = FS_Mount("/srf", &fs);
+                    if (r == FM_OK) r = srf_check_all();
+                }
+                if (r != FM_OK)
+                {
+                    printf("[layout %u round %u] ", (unsigned)layout,
+                           (unsigned)round);
+                }
+                (void)FS_Unmount("/srf");
+                (void)Storage_Unregister("srf");
+            }
         }
         /* the volume must really have been full now and then, or the
          * test proved nothing about compaction */
-        if (r == FM_OK && refused < 20u)
+        if (r == FM_OK && refused < 40u)
         {
             printf("[only %u refusals] ", (unsigned)refused);
             r = FM_ERR_INTERNAL;
         }
-        if (r == FM_OK)
-        {
-            /* what a remount reads back from the storage is the same */
-            r = FS_Unmount("/srf");
-            if (r == FM_OK) r = FMFS_Init(&fs);
-            if (r == FM_OK) r = FS_Mount("/srf", &fs);
-            if (r == FM_OK) r = srf_check_all();
-        }
-        (void)FS_Unmount("/srf");
-        (void)Storage_Unregister("srf");
     }
     CHECK_RESULT(r, "fmfs model");
 #endif
@@ -18026,6 +18128,1735 @@ static void test_fmfs_rename_failure(void)
 }
 #endif /* FM_USE_FMFS */
 
+#if FM_USE_FMFS
+/* ------------------------------------------------------------------ */
+/* FMFS and power failure                                              */
+/* ------------------------------------------------------------------ */
+/* A storage that can lose power in the middle of any write: a part of
+ * that write arrives, a few bytes behind it are garbage, the rest keeps
+ * what it had, and every later call fails.  The suite replays file
+ * operations against it, cuts the power at every single storage write
+ * in turn, mounts what is left and compares it with a model. */
+#define PF_CAP_MAX   (64u * 1024u)
+#define PF_NAMES     6u
+#define PF_FILE_MAX  9000u
+
+typedef struct
+{
+    uint8_t  there;
+    uint32_t size;
+    uint8_t  data[PF_FILE_MAX];
+} PfFile;
+
+typedef struct
+{
+    PfFile f[PF_NAMES];
+} PfModel;
+
+enum
+{
+    PF_CREATE, PF_APPEND, PF_WRITE, PF_DELETE, PF_RENAME, PF_TRUNC,
+    PF_REPACK
+};
+
+typedef struct
+{
+    uint8_t  kind;
+    uint8_t  a;
+    uint8_t  b;
+    uint32_t pos;
+    uint32_t len;
+    uint32_t seed;
+} PfOp;
+
+static uint8_t    g_pf_mem[PF_CAP_MAX];
+static uint8_t    g_pf_before_mem[PF_CAP_MAX];
+static uint8_t    g_pf_after_mem[PF_CAP_MAX];
+static uint8_t    g_pf_crash_mem[PF_CAP_MAX];
+static PfModel    g_pf_model;
+static PfModel    g_pf_before;
+static PfModel    g_pf_after;
+static uint8_t    g_pf_data[PF_FILE_MAX];
+static uint8_t    g_pf_got[PF_FILE_MAX + 1u];
+static FM_Storage g_pf_st;
+static FM_FS      g_pf_fs;
+static uint32_t   g_pf_cap;
+static uint32_t   g_pf_block;
+static const char *g_pf_name = "pf";
+static const char *g_pf_mount = "/pf";
+/* a cut may take the whole block down that was being written */
+static int        g_pf_tear;
+static uint32_t   g_pf_torn;        /* ...and how often it did            */
+static long       g_pf_cut = -1;    /* the storage write that loses power */
+static long       g_pf_fail = -1;   /* the storage write that fails, once */
+static long       g_pf_writes;
+static int        g_pf_dead;
+static uint32_t   g_pf_rng;
+static uint32_t   g_pf_j_copy;      /* journal records seen, by kind      */
+static uint32_t   g_pf_j_bounce;
+static uint32_t   g_pf_j_up;
+static char       g_pf_why[200];
+
+static uint32_t pf_rand(uint32_t n)
+{
+    g_pf_rng = g_pf_rng * 1664525u + 1013904223u;
+    return (g_pf_rng >> 8) % n;
+}
+
+static uint64_t pf_le(const uint8_t *p, uint32_t n)
+{
+    uint64_t v = 0;
+    uint32_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        v |= (uint64_t)p[i] << (8u * i);
+    }
+    return v;
+}
+
+static FM_Result pf_st_read(FM_Storage *s, uint64_t off, void *buf,
+                            uint32_t len)
+{
+    (void)s;
+    if (g_pf_dead)
+    {
+        return FM_ERR_IO;
+    }
+    if (off > g_pf_cap || (uint64_t)len > g_pf_cap - off)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    memcpy(buf, g_pf_mem + (size_t)off, len);
+    return FM_OK;
+}
+
+static FM_Result pf_st_write(FM_Storage *s, uint64_t off, const void *buf,
+                             uint32_t len)
+{
+    const uint8_t *src = (const uint8_t *)buf;
+
+    (void)s;
+    if (g_pf_dead)
+    {
+        return FM_ERR_IO;
+    }
+    if (off > g_pf_cap || (uint64_t)len > g_pf_cap - off)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (g_pf_writes == g_pf_fail)
+    {
+        g_pf_writes++;
+        return FM_ERR_IO;           /* nothing written, device alive */
+    }
+    if (g_pf_writes == g_pf_cut)
+    {
+        uint32_t i;
+
+        if (g_pf_tear && g_pf_block > 1u && len != 0u && pf_rand(4u) != 0u)
+        {
+            /* A device that rewrites whole blocks (the sector of an SD
+             * card, the erase unit of a NOR flash: read, erase,
+             * program).  The blocks before the one it was working on
+             * have their new content; that one is lost as a whole --
+             * also the bytes in it that this write was not meant to
+             * change -- and reads back erased or as noise. */
+            uint32_t first = (uint32_t)(off / g_pf_block);
+            uint32_t last = (uint32_t)((off + len - 1u) / g_pf_block);
+            uint32_t victim = first + pf_rand(last - first + 1u);
+            uint32_t from = victim * g_pf_block;
+            uint32_t to = from + g_pf_block;
+            int erased = (pf_rand(2u) == 0u);
+
+            if (to > g_pf_cap) to = g_pf_cap;
+            if (from > off)
+            {
+                memcpy(g_pf_mem + (size_t)off, src, (size_t)(from - off));
+            }
+            for (i = from; i < to; i++)
+            {
+                g_pf_mem[i] = erased ? 0xFFu : (uint8_t)pf_rand(256u);
+            }
+            g_pf_torn++;
+        }
+        else
+        {
+            uint32_t part = pf_rand(len + 1u);
+            uint32_t junk = pf_rand(9u);
+
+            memcpy(g_pf_mem + (size_t)off, src, part);
+            for (i = part; i < len && i < part + junk; i++)
+            {
+                g_pf_mem[(size_t)off + i] = (uint8_t)pf_rand(256u);
+            }
+        }
+        g_pf_writes++;
+        g_pf_dead = 1;
+        return FM_ERR_IO;
+    }
+    g_pf_writes++;
+    if (len == 64u && memcmp(src, "FMJ1", 4) == 0)
+    {
+        /* a move-journal record: note which kinds the run exercised */
+        if (src[12] == 2u) g_pf_j_bounce++;
+        else g_pf_j_copy++;
+        if (pf_le(src + 24, 8) > pf_le(src + 16, 8)) g_pf_j_up++;
+    }
+    memcpy(g_pf_mem + (size_t)off, src, len);
+    return FM_OK;
+}
+
+static FM_Result pf_st_sync(FM_Storage *s)
+{
+    (void)s;
+    return g_pf_dead ? FM_ERR_IO : FM_OK;
+}
+
+/* Power comes (back) on: register the storage and mount it.  `cut` is
+ * the storage write at which it fails again, -1 for never. */
+static FM_Result pf_attach(long cut)
+{
+    FM_StorageConfig cfg;
+    FM_Result r;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.name = g_pf_name;
+    cfg.type = FM_STORAGE_NOR;      /* not volatile: never auto-formatted */
+    cfg.capacity = g_pf_cap;
+    cfg.block_size = g_pf_block;
+    cfg.read_size = g_pf_block;
+    cfg.write_size = g_pf_block;
+    cfg.erase_size = g_pf_block;
+    cfg.present = FM_TRUE;
+    cfg.read = pf_st_read;
+    cfg.write = pf_st_write;
+    cfg.sync = pf_st_sync;
+    g_pf_dead = 0;
+    g_pf_cut = cut;
+    g_pf_fail = -1;
+    r = Storage_InitDriver(&g_pf_st, &cfg);
+    if (r == FM_OK) r = Storage_Register(&g_pf_st);
+    if (r == FM_OK) r = FMFS_Init(&g_pf_fs);
+    if (r == FM_OK) r = FS_Mount(g_pf_mount, &g_pf_fs);
+    return r;
+}
+
+static void pf_detach(void)
+{
+    (void)FS_Unmount(g_pf_mount);
+    (void)Storage_Unmount(g_pf_name);
+    (void)Storage_Unregister(g_pf_name);
+}
+
+/* An empty version 1 volume, as releases before the second table wrote
+ * it. */
+static void pf_v1_image(uint8_t *mem, uint32_t cap)
+{
+    uint32_t meta = 32u + FM_FMFS_MAX_ENTRIES * (FM_PATH_MAX + 20u);
+    uint32_t i;
+
+    memset(mem, 0, cap);
+    memcpy(mem, "FMFS", 4);
+    mem[4] = 1;                             /* version                */
+    mem[6] = 1;                             /* one entry: the root    */
+    for (i = 0; i < 4u; i++)
+    {
+        mem[8 + i] = (uint8_t)(meta >> (8u * i));   /* data_start     */
+        mem[16 + i] = (uint8_t)(meta >> (8u * i));  /* data_next      */
+        mem[24 + i] = (uint8_t)(cap >> (8u * i));   /* capacity       */
+    }
+    mem[32] = 1;                            /* record 0: used         */
+    mem[33] = (uint8_t)FM_ITEM_DIR;
+}
+
+static void pf_fill(uint8_t *p, uint32_t n, uint32_t seed)
+{
+    uint32_t x = seed * 2654435761u + 12345u;
+    uint32_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        x = x * 1103515245u + 12345u;
+        p[i] = (uint8_t)(x >> 16);
+    }
+}
+
+static const char *pf_name(uint32_t i)
+{
+    static char names[PF_NAMES][16];
+
+    (void)snprintf(names[i], sizeof(names[i]), "/pf/n%u.bin", (unsigned)i);
+    return names[i];
+}
+
+/* 0: no such file, 1: there (size and g_pf_got filled), -1: unreadable */
+static int pf_read(uint32_t i, uint32_t *size)
+{
+    FM_FileInfo info;
+    size_t got = 0;
+    FM_Result r;
+
+    memset(&info, 0, sizeof(info));
+    r = File_GetInfo(pf_name(i), &info);
+    if (r == FM_ERR_NOT_FOUND)
+    {
+        return 0;
+    }
+    if (r != FM_OK || info.size > PF_FILE_MAX)
+    {
+        return -1;
+    }
+    *size = (uint32_t)info.size;
+    if (info.size == 0u)
+    {
+        return 1;
+    }
+    r = File_ReadAll(pf_name(i), g_pf_got, sizeof(g_pf_got), &got);
+    return (r == FM_OK && got == info.size) ? 1 : -1;
+}
+
+static int pf_same(const PfFile *want, int state, uint32_t size)
+{
+    if (!want->there)
+    {
+        return state == 0;
+    }
+    return state == 1 && size == want->size &&
+           (size == 0u || memcmp(g_pf_got, want->data, size) == 0);
+}
+
+static void pf_adopt(PfFile *f, int state, uint32_t size)
+{
+    f->there = (state == 1) ? 1u : 0u;
+    f->size = (state == 1) ? size : 0u;
+    if (state == 1 && size != 0u)
+    {
+        memcpy(f->data, g_pf_got, size);
+    }
+}
+
+/* Where whole blocks can be lost (g_pf_tear): byte `i` of a file is in
+ * a block that an operation writing bytes [lo, hi) of that file writes
+ * to.  Files start on block boundaries, so blocks of the file are
+ * blocks of the storage. */
+static int pf_in_torn_block(uint32_t i, uint32_t lo, uint32_t hi)
+{
+    if (!g_pf_tear || g_pf_block <= 1u || hi <= lo)
+    {
+        return 0;
+    }
+    return i / g_pf_block >= lo / g_pf_block &&
+           i / g_pf_block <= (hi - 1u) / g_pf_block;
+}
+
+/* What a write that was cut short may leave: the file between its old
+ * and its new length; every byte outside the written range untouched
+ * (a gap from a seek past the end reads as zeros); every byte that was
+ * appended and is part of the file is the byte that was written.  Only
+ * bytes the write replaced in place may be anything -- and, on a
+ * device that loses whole blocks, the rest of the blocks it was
+ * writing to: bytes of this file, never of another. */
+static int pf_write_ok(const PfFile *old, const PfOp *op, int state,
+                       uint32_t size)
+{
+    uint32_t pos = (op->kind == PF_APPEND) ? old->size : op->pos;
+    uint32_t end = pos + op->len;
+    uint32_t grown = (end > old->size) ? end : old->size;
+    uint32_t low = (pos < old->size) ? pos : old->size;
+    uint32_t i;
+
+    if (state != 1 || !old->there || size < old->size || size > grown)
+    {
+        return 0;
+    }
+    pf_fill(g_pf_data, op->len, op->seed);
+    for (i = 0; i < size; i++)
+    {
+        if (pf_in_torn_block(i, low, end))
+        {
+            continue;
+        }
+        if (i >= pos && i < end)
+        {
+            if (i >= old->size && g_pf_got[i] != g_pf_data[i - pos])
+            {
+                return 0;
+            }
+        }
+        else if (g_pf_got[i] != ((i < old->size) ? old->data[i] : 0u))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* A truncate: the new length with the old bytes (zeros behind them), or
+ * -- not reached here, pf_same() saw it -- the file as it was.  Where
+ * whole blocks can be lost, a cut while the new end was being zeroed
+ * may also leave the old length with the block the file ended in
+ * damaged. */
+static int pf_trunc_ok(const PfFile *old, const PfOp *op, int state,
+                       uint32_t size)
+{
+    uint32_t i;
+
+    if (state != 1 || !old->there)
+    {
+        return 0;
+    }
+    if (size != op->len &&
+        !(size == old->size && op->len > old->size && g_pf_tear))
+    {
+        return 0;
+    }
+    for (i = 0; i < size; i++)
+    {
+        if (op->len > old->size &&
+            pf_in_torn_block(i, old->size, op->len))
+        {
+            continue;
+        }
+        if (g_pf_got[i] != ((i < old->size) ? old->data[i] : 0u))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Compare the mounted volume with the model.  `op` is the operation
+ * that was running when the power went (or that was refused): the
+ * files it names may be as before or as it leaves them, nothing in
+ * between; every other file must be exactly as before.  The model takes
+ * over what it finds.  0 = fine. */
+static int pf_verify(PfModel *m, const PfOp *op)
+{
+    uint32_t there = 0;
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (op != NULL && op->kind == PF_RENAME)
+    {
+        uint32_t sa = 0;
+        uint32_t sb = 0;
+        int a_state = pf_read(op->a, &sa);
+        int a_old = (a_state >= 0) && pf_same(&m->f[op->a], a_state, sa);
+        int b_state = pf_read(op->b, &sb);
+        int b_old = (b_state >= 0) && pf_same(&m->f[op->b], b_state, sb);
+        int b_new = (b_state >= 0) && pf_same(&m->f[op->a], b_state, sb);
+
+        if (a_old && b_old)
+        {
+            /* the rename did not happen */
+        }
+        else if (a_state == 0 && b_new)
+        {
+            m->f[op->b] = m->f[op->a];
+            m->f[op->a].there = 0;
+            m->f[op->a].size = 0;
+        }
+        else
+        {
+            (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                           "rename n%u -> n%u left neither the old nor "
+                           "the new state", (unsigned)op->a,
+                           (unsigned)op->b);
+            return 1;
+        }
+    }
+    for (i = 0; i < PF_NAMES; i++)
+    {
+        PfFile *f = &m->f[i];
+        uint32_t size = 0;
+        int state = pf_read(i, &size);
+        int ok;
+
+        if (state < 0)
+        {
+            (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                           "n%u cannot be read", (unsigned)i);
+            return 1;
+        }
+        ok = pf_same(f, state, size);
+        if (!ok && op != NULL && op->kind != PF_RENAME && i == op->a)
+        {
+            switch (op->kind)
+            {
+            case PF_CREATE: ok = (state == 1 && size == 0u); break;
+            case PF_DELETE: ok = (state == 0); break;
+            case PF_APPEND:
+            case PF_WRITE:  ok = pf_write_ok(f, op, state, size); break;
+            case PF_TRUNC:  ok = pf_trunc_ok(f, op, state, size); break;
+            default: break;
+            }
+        }
+        if (!ok)
+        {
+            (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                           "n%u: %s, %u bytes; the model has %s, %u bytes",
+                           (unsigned)i, state ? "there" : "gone",
+                           (unsigned)size, f->there ? "there" : "gone",
+                           (unsigned)f->size);
+            return 1;
+        }
+        pf_adopt(f, state, size);
+        if (f->there) there++;
+    }
+    if (Directory_Count("/pf", 0, &count) != FM_OK || count != there)
+    {
+        (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                       "%u directory entries for %u files",
+                       (unsigned)count, (unsigned)there);
+        return 1;
+    }
+    return 0;
+}
+
+static void pf_apply(PfModel *m, const PfOp *op)
+{
+    PfFile *f = &m->f[op->a];
+
+    switch (op->kind)
+    {
+    case PF_CREATE:
+        f->there = 1;
+        f->size = 0;
+        break;
+    case PF_APPEND:
+    case PF_WRITE:
+    {
+        uint32_t pos = (op->kind == PF_APPEND) ? f->size : op->pos;
+
+        if (pos > f->size)
+        {
+            memset(f->data + f->size, 0, pos - f->size);
+        }
+        pf_fill(f->data + pos, op->len, op->seed);
+        if (pos + op->len > f->size) f->size = pos + op->len;
+        break;
+    }
+    case PF_DELETE:
+        f->there = 0;
+        f->size = 0;
+        break;
+    case PF_RENAME:
+        m->f[op->b] = *f;
+        f->there = 0;
+        f->size = 0;
+        break;
+    case PF_TRUNC:
+        if (op->len > f->size)
+        {
+            memset(f->data + f->size, 0, op->len - f->size);
+        }
+        f->size = op->len;
+        break;
+    default:
+        break;
+    }
+}
+
+static FM_Result pf_run(const PfOp *op)
+{
+    FM_File *f;
+    uint32_t wr = 0;
+    FM_Result r = FM_OK;
+    FM_Result rc;
+
+    switch (op->kind)
+    {
+    case PF_CREATE:
+        f = File_Open(pf_name(op->a), FM_OPEN_WRITE | FM_OPEN_CREATE);
+        if (f == NULL) return File_GetLastError();
+        return File_Close(f);
+    case PF_APPEND:
+    case PF_WRITE:
+        f = File_Open(pf_name(op->a), (op->kind == PF_APPEND)
+                          ? (FM_OPEN_WRITE | FM_OPEN_APPEND)
+                          : (FM_OPEN_READ | FM_OPEN_WRITE));
+        if (f == NULL) return File_GetLastError();
+        if (op->kind == PF_WRITE)
+        {
+            r = File_Seek(f, (int64_t)op->pos, FM_SEEK_SET);
+        }
+        pf_fill(g_pf_data, op->len, op->seed);
+        if (r == FM_OK) r = File_Write(f, g_pf_data, op->len, &wr);
+        rc = File_Close(f);
+        if (r == FM_OK) r = rc;
+        if (r == FM_OK && wr != op->len) r = FM_ERR_NO_SPACE;
+        return r;
+    case PF_DELETE:
+        return File_Delete(pf_name(op->a));
+    case PF_RENAME:
+    {
+        char to[16];
+
+        (void)snprintf(to, sizeof(to), "%s", pf_name(op->b));
+        return File_Rename(pf_name(op->a), to);
+    }
+    case PF_TRUNC:
+        f = File_Open(pf_name(op->a), FM_OPEN_READ | FM_OPEN_WRITE);
+        if (f == NULL) return File_GetLastError();
+        r = File_Truncate(f, op->len);
+        rc = File_Close(f);
+        return (r == FM_OK) ? rc : r;
+    default:
+        return FMFS_Repack(&g_pf_fs);
+    }
+}
+
+/* The next operation of the run: whatever keeps a small volume busy and
+ * nearly full, so that files grow in place, move to the tail, and the
+ * data area is compacted again and again. */
+static void pf_gen(const PfModel *m, PfOp *op, uint32_t k)
+{
+    uint32_t pick = pf_rand(100u);
+    const PfFile *f;
+
+    memset(op, 0, sizeof(*op));
+    op->a = (uint8_t)pf_rand(PF_NAMES);
+    op->seed = k * 7919u + 17u;
+    f = &m->f[op->a];
+    if (pick >= 76u && pick < 82u)
+    {
+        op->kind = PF_REPACK;
+        return;
+    }
+    if (!f->there)
+    {
+        op->kind = PF_CREATE;
+        return;
+    }
+    if (pick < 26u)
+    {
+        op->kind = PF_APPEND;
+        op->len = 1u + pf_rand(pf_rand(4u) == 0u ? 40u : 1500u);
+    }
+    else if (pick < 44u)
+    {
+        op->kind = PF_APPEND;
+        op->len = 2000u + pf_rand(3000u);
+    }
+    else if (pick < 56u)
+    {
+        op->kind = PF_WRITE;
+        op->pos = pf_rand(f->size + 60u);
+        op->len = 1u + pf_rand(600u);
+    }
+    else if (pick < 63u)
+    {
+        op->kind = PF_DELETE;
+    }
+    else if (pick < 69u)
+    {
+        op->kind = PF_RENAME;
+        op->b = (uint8_t)((op->a + 1u + pf_rand(PF_NAMES - 1u)) % PF_NAMES);
+    }
+    else if (pick < 76u)
+    {
+        op->kind = PF_TRUNC;
+        op->len = (pf_rand(3u) == 0u) ? pf_rand(f->size + 1u)
+                                      : f->size + pf_rand(300u);
+    }
+    else
+    {
+        op->kind = PF_APPEND;
+        op->len = 1u + pf_rand(12u);
+    }
+    if ((op->kind == PF_APPEND && f->size + op->len > PF_FILE_MAX) ||
+        (op->kind == PF_WRITE && op->pos + op->len > PF_FILE_MAX) ||
+        (op->kind == PF_TRUNC && op->len > PF_FILE_MAX))
+    {
+        op->kind = PF_DELETE;
+    }
+}
+
+/* After a recovery the volume has to be more than readable: use it. */
+static int pf_aftercare(PfModel *m)
+{
+    static uint8_t want[300];
+    static uint8_t back[301];
+    size_t got = 0;
+    FM_Result r;
+
+    r = FS_Check("/pf");
+    if (r == FM_OK)
+    {
+        pf_fill(want, sizeof(want), 4242u);
+        r = File_WriteAll("/pf/zz.bin", want, sizeof(want));
+        if (r == FM_OK)
+        {
+            r = FMFS_Repack(&g_pf_fs);
+            if (r == FM_OK) r = File_ReadAll("/pf/zz.bin", back,
+                                             sizeof(back), &got);
+            if (r == FM_OK && (got != sizeof(want) ||
+                               memcmp(back, want, sizeof(want)) != 0))
+            {
+                r = FM_ERR_CRC;
+            }
+        }
+        else if (r == FM_ERR_NO_SPACE)
+        {
+            r = FMFS_Repack(&g_pf_fs);      /* a full volume is fine */
+        }
+        (void)File_Delete("/pf/zz.bin");
+    }
+    if (r != FM_OK)
+    {
+        (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                       "the recovered volume cannot be used (%s)",
+                       FM_ResultString(r));
+        return 1;
+    }
+    if (pf_verify(m, NULL) != 0)
+    {
+        return 1;
+    }
+    /* and what it wrote while doing so mounts again */
+    pf_detach();
+    r = pf_attach(-1);
+    if (r != FM_OK)
+    {
+        (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                       "second mount: %s", FM_ResultString(r));
+        return 1;
+    }
+    return pf_verify(m, NULL);
+}
+
+/* The storage write of operation `k` that cut number `t` falls on:
+ * every write when there are few, else the first and last 80 and 80
+ * spread over the rest. */
+static long pf_cut_point(long writes, long t)
+{
+    if (writes <= 240)
+    {
+        return (t < writes) ? t : -1;
+    }
+    if (t < 80)
+    {
+        return t;
+    }
+    if (t < 160)
+    {
+        long span = (writes - 160) / 80;
+
+        return 80 + (t - 80) * span + (long)pf_rand((uint32_t)span);
+    }
+    return (t < 240) ? writes - 240 + t : -1;
+}
+
+typedef struct
+{
+    uint32_t cuts;          /* power cuts tried                        */
+    uint32_t damaged;       /* ...that left something the model forbids */
+    uint32_t recut;         /* second cuts, during the recovery         */
+    uint32_t refused;       /* operations refused for lack of space     */
+    uint32_t j_copy;
+    uint32_t j_bounce;
+    uint32_t j_up;
+    uint32_t torn;          /* cuts that took a whole block down        */
+} PfStats;
+
+/* Run `nops` operations; before going on from each, replay it with the
+ * power cut at each of its storage writes.  FM_OK unless the harness
+ * itself could not work (g_pf_why says why); what the cuts did is in
+ * `st`.  Stops after `stop` damaged volumes. */
+static FM_Result pf_campaign(uint32_t cap, uint32_t block, int v1,
+                             uint32_t seed, uint32_t nops, uint32_t stop,
+                             PfStats *st)
+{
+    FM_Result r;
+    uint32_t k;
+
+    memset(st, 0, sizeof(*st));
+    g_pf_why[0] = '\0';
+    g_pf_cap = cap;
+    g_pf_block = block;
+    g_pf_rng = seed;
+    g_pf_j_copy = 0;
+    g_pf_j_bounce = 0;
+    g_pf_j_up = 0;
+    g_pf_torn = 0;
+    g_pf_tear = (block > 1u) ? 1 : 0;
+    memset(&g_pf_model, 0, sizeof(g_pf_model));
+    if (v1)
+    {
+        pf_v1_image(g_pf_mem, cap);
+    }
+    else
+    {
+        memset(g_pf_mem, 0, cap);
+    }
+    r = pf_attach(-1);
+    if (r == FM_OK && FMFS_IsPowerSafe(&g_pf_fs) != (v1 ? FM_FALSE : FM_TRUE))
+    {
+        (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                       "the volume is not the version asked for");
+        r = FM_ERR_INTERNAL;
+    }
+    for (k = 0; k < nops && r == FM_OK && st->damaged < stop; k++)
+    {
+        PfOp op;
+        long writes;
+        long t;
+        FM_Result ro;
+
+        pf_gen(&g_pf_model, &op, k);
+        memcpy(g_pf_before_mem, g_pf_mem, cap);
+        g_pf_before = g_pf_model;
+        g_pf_writes = 0;
+        ro = pf_run(&op);
+        writes = g_pf_writes;
+        if (ro == FM_OK)
+        {
+            pf_apply(&g_pf_model, &op);
+        }
+        else
+        {
+            st->refused++;
+        }
+        if (pf_verify(&g_pf_model, (ro == FM_OK) ? NULL : &op) != 0)
+        {
+            char why[100];
+
+            (void)snprintf(why, sizeof(why), "%.99s", g_pf_why);
+            (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                           "op %u (kind %u, %s) without any cut: %s",
+                           (unsigned)k, (unsigned)op.kind,
+                           FM_ResultString(ro), why);
+            r = FM_ERR_INTERNAL;
+            break;
+        }
+        memcpy(g_pf_after_mem, g_pf_mem, cap);
+        g_pf_after = g_pf_model;
+
+        for (t = 0; r == FM_OK && st->damaged < stop; t++)
+        {
+            long cut = pf_cut_point(writes, t);
+            long recovery;
+            int bad = 0;
+
+            if (cut < 0)
+            {
+                break;
+            }
+            pf_detach();
+            memcpy(g_pf_mem, g_pf_before_mem, cap);
+            g_pf_model = g_pf_before;
+            r = pf_attach(-1);
+            if (r != FM_OK)
+            {
+                (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                               "op %u: the image before it does not mount",
+                               (unsigned)k);
+                break;
+            }
+            g_pf_writes = 0;
+            g_pf_cut = cut;
+            (void)pf_run(&op);
+            pf_detach();                    /* the power is gone */
+            memcpy(g_pf_crash_mem, g_pf_mem, cap);
+
+            g_pf_writes = 0;
+            ro = pf_attach(-1);
+            recovery = g_pf_writes;
+            if (ro == FM_OK && recovery > 0)
+            {
+                /* the mount had work to do: cut the power again in the
+                 * middle of that */
+                pf_detach();
+                memcpy(g_pf_mem, g_pf_crash_mem, cap);
+                (void)pf_attach((long)pf_rand((uint32_t)recovery));
+                pf_detach();
+                ro = pf_attach(-1);
+                st->recut++;
+            }
+            st->cuts++;
+            if (ro != FM_OK)
+            {
+                (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                               "mount: %s", FM_ResultString(ro));
+                bad = 1;
+            }
+            else if (pf_verify(&g_pf_model, &op) != 0 ||
+                     pf_aftercare(&g_pf_model) != 0)
+            {
+                bad = 1;
+            }
+            if (bad)
+            {
+                if (st->damaged == 0u)
+                {
+                    char why[120];
+
+                    (void)snprintf(why, sizeof(why), "%.119s", g_pf_why);
+                    (void)snprintf(g_pf_why, sizeof(g_pf_why),
+                                   "op %u (kind %u) cut at write %ld of "
+                                   "%ld: %s", (unsigned)k,
+                                   (unsigned)op.kind, cut, writes, why);
+                }
+                st->damaged++;
+            }
+        }
+        pf_detach();
+        memcpy(g_pf_mem, g_pf_after_mem, cap);
+        g_pf_model = g_pf_after;
+        if (r == FM_OK)
+        {
+            r = pf_attach(-1);
+        }
+    }
+    pf_detach();
+    g_pf_tear = 0;
+    st->j_copy = g_pf_j_copy;
+    st->j_bounce = g_pf_j_bounce;
+    st->j_up = g_pf_j_up;
+    st->torn = g_pf_torn;
+    return r;
+}
+
+#if FM_FMFS_POWER_SAFE
+static void pf_report(FM_Result r, const PfStats *st, int blocks)
+{
+    printf("[%u cuts, %u took a block, %u more during recovery, %u "
+           "refusals, journal %u+%u, %u upward] ", (unsigned)st->cuts,
+           (unsigned)st->torn, (unsigned)st->recut,
+           (unsigned)st->refused, (unsigned)st->j_copy,
+           (unsigned)st->j_bounce, (unsigned)st->j_up);
+    if (r != FM_OK)
+    {
+        FAIL(g_pf_why);
+    }
+    else if (st->damaged != 0u)
+    {
+        printf("[%u damaged] ", (unsigned)st->damaged);
+        FAIL(g_pf_why);
+    }
+    else if (st->cuts < 1000u || st->recut == 0u || st->refused == 0u ||
+             st->j_copy == 0u ||
+             (blocks < 2 && (st->j_bounce == 0u || st->j_up == 0u)) ||
+             (blocks && st->torn < 500u))
+    {
+        /* every kind of move has to have been cut, or the run proved
+         * less than it claims */
+        FAIL("the run did not exercise every path");
+    }
+    else
+    {
+        PASS();
+    }
+}
+#endif
+
+static void test_fmfs_powerfail(void)
+{
+    static uint8_t mem[64 * 1024];
+    static FM_Storage st;
+    static FM_FS fs;
+    PfStats stats;
+    FM_Result r;
+
+    restore_posix_root();
+
+    TEST("FMFS: a formatted volume says whether it is power-fail safe");
+    {
+        static uint8_t small[16 * 1024];
+        FM_Bool want_big = (FM_FMFS_POWER_SAFE >= 1) ? FM_TRUE : FM_FALSE;
+        FM_Bool want_small = (FM_FMFS_POWER_SAFE >= 2) ? FM_TRUE : FM_FALSE;
+        FM_Bool got_big = FM_FALSE;
+        FM_Bool got_small = FM_FALSE;
+
+        memset(mem, 0, sizeof(mem));
+        memset(small, 0, sizeof(small));
+        r = RamDisk_Init(&st, "pfa", mem, sizeof(mem), 512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/pfa", &fs);
+        if (r == FM_OK) got_big = FMFS_IsPowerSafe(&fs);
+        if (r == FM_OK) r = sr_write("/pfa/a.bin", 3000, 5);
+        if (r == FM_OK) r = sr_verify("/pfa/a.bin", 3000, 5);
+        (void)FS_Unmount("/pfa");
+        (void)Storage_Unregister("pfa");
+        if (r == FM_OK && FMFS_IsPowerSafe(&fs))
+        {
+            r = FM_ERR_INTERNAL;        /* not mounted: not anything */
+        }
+        /* 16 KiB: two tables would leave next to nothing for files */
+        if (r == FM_OK) r = RamDisk_Init(&st, "pfa", small, sizeof(small),
+                                         512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/pfa", &fs);
+        if (r == FM_OK) got_small = FMFS_IsPowerSafe(&fs);
+        if (r == FM_OK) r = sr_write("/pfa/a.bin", 1500, 6);
+        if (r == FM_OK) r = sr_verify("/pfa/a.bin", 1500, 6);
+        (void)FS_Unmount("/pfa");
+        (void)Storage_Unregister("pfa");
+        if (r == FM_OK && (got_big != want_big || got_small != want_small))
+        {
+            printf("[64K %d, 16K %d] ", (int)got_big, (int)got_small);
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    CHECK_RESULT(r, "power-safe flag");
+
+    TEST("FMFS: a version 1 volume mounts, works and stays version 1");
+    {
+        FM_Bool safe_after_format = FM_FALSE;
+
+        pf_v1_image(mem, (uint32_t)sizeof(mem));
+        r = RamDisk_Init(&st, "pfa", mem, sizeof(mem), 512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/pfa", &fs);
+        if (r == FM_OK && FMFS_IsPowerSafe(&fs)) r = FM_ERR_INTERNAL;
+        if (r == FM_OK) r = sr_write("/pfa/a.bin", 9000, 1);
+        if (r == FM_OK) r = sr_write("/pfa/b.bin", 20000, 2);
+        if (r == FM_OK) r = sr_write("/pfa/c.bin", 20000, 3);
+        if (r == FM_OK) r = File_Delete("/pfa/a.bin");
+        /* some 10 KiB are free at the tail and 9000 bytes in front of
+         * b: this only fits after a compaction */
+        if (r == FM_OK) r = sr_write("/pfa/d.bin", 16000, 4);
+        if (r == FM_OK) r = FS_Unmount("/pfa");
+        if (r == FM_OK && (memcmp(mem, "FMFS", 4) != 0 || mem[4] != 1u))
+        {
+            r = FM_ERR_INVALID_FORMAT;  /* converted behind our back */
+        }
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/pfa", &fs);
+        if (r == FM_OK && FMFS_IsPowerSafe(&fs)) r = FM_ERR_INTERNAL;
+        if (r == FM_OK) r = sr_verify("/pfa/b.bin", 20000, 2);
+        if (r == FM_OK) r = sr_verify("/pfa/c.bin", 20000, 3);
+        if (r == FM_OK) r = sr_verify("/pfa/d.bin", 16000, 4);
+        /* formatting is the way to the new layout */
+        if (r == FM_OK) r = FS_Format("/pfa");
+        if (r == FM_OK) safe_after_format = FMFS_IsPowerSafe(&fs);
+        if (r == FM_OK) r = sr_write("/pfa/e.bin", 5000, 7);
+        if (r == FM_OK) r = FS_Unmount("/pfa");
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/pfa", &fs);
+        if (r == FM_OK) r = sr_verify("/pfa/e.bin", 5000, 7);
+        if (r == FM_OK &&
+            (safe_after_format != ((FM_FMFS_POWER_SAFE >= 1) ? FM_TRUE
+                                                             : FM_FALSE) ||
+             FMFS_IsPowerSafe(&fs) != safe_after_format))
+        {
+            r = FM_ERR_INTERNAL;
+        }
+        (void)FS_Unmount("/pfa");
+        (void)Storage_Unregister("pfa");
+    }
+    CHECK_RESULT(r, "version 1 volume");
+
+#if FM_FMFS_POWER_SAFE
+    TEST("FMFS: either table alone is enough, both gone is an error");
+    {
+        uint32_t slot;
+        uint32_t step;
+        FM_Result both = FM_OK;
+
+        /* a storage that is not a RAM disk: never formatted on its own */
+        g_pf_cap = 32u * 1024u;
+        g_pf_block = 512;
+        memset(g_pf_mem, 0, g_pf_cap);
+        r = pf_attach(-1);
+        if (r == FM_OK) r = File_WriteAll("/pf/one.txt", "first", 5);
+        if (r == FM_OK) r = File_WriteAll("/pf/two.txt", "second", 6);
+        pf_detach();
+        slot = (uint32_t)pf_le(g_pf_mem + 36, 4);
+        if (r == FM_OK && (slot < 5000u || slot > 9000u ||
+                           memcmp(g_pf_mem + slot, "FMFS", 4) != 0))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        /* Tear the table that is NOT in use -- the one a save was
+         * writing when the power went -- in three different places.
+         * The volume mounts from the other one, and the save that
+         * follows repairs the torn one, so the next round tears the
+         * other slot. */
+        for (step = 0; step < 4u && r == FM_OK; step++)
+        {
+            static const char *const text[] = { "aaaa", "bbbb", "cccc",
+                                                "dddd", "eeee" };
+            uint32_t seq_a = (uint32_t)pf_le(g_pf_mem + 32, 4);
+            uint32_t seq_b = (uint32_t)pf_le(g_pf_mem + slot + 32u, 4);
+            uint8_t *older = (seq_a < seq_b) ? g_pf_mem : g_pf_mem + slot;
+
+            if (seq_a == seq_b)
+            {
+                r = FM_ERR_INTERNAL;
+                break;
+            }
+            if (step == 0u) memset(older, 0xA5, 40);        /* header  */
+            else if (step == 1u) memset(older + 700, 0x5A, 300);
+            else if (step == 2u) older[63] ^= 0x80u;        /* the CRC */
+            else memset(older + 3000, 0, 2824);             /* the end */
+            r = pf_attach(-1);
+            if (r == FM_OK && !FMFS_IsPowerSafe(&g_pf_fs))
+            {
+                r = FM_ERR_INTERNAL;
+            }
+            if (r == FM_OK && (!frn_is("/pf/two.txt", "second") ||
+                               !frn_is("/pf/one.txt",
+                                       step ? text[step - 1u] : "first")))
+            {
+                r = FM_ERR_CRC;
+            }
+            if (r == FM_OK) r = File_WriteAll("/pf/one.txt", text[step], 4);
+            pf_detach();
+        }
+        if (r == FM_OK)
+        {
+            g_pf_mem[100] ^= 0x01u;
+            g_pf_mem[slot + 100u] ^= 0x01u;
+            both = pf_attach(-1);
+            pf_detach();
+            g_pf_mem[100] ^= 0x01u;
+            g_pf_mem[slot + 100u] ^= 0x01u;
+            if (both != FM_ERR_CORRUPTED)
+            {
+                printf("[both torn: %s] ", FM_ResultString(both));
+                r = FM_ERR_INTERNAL;
+            }
+        }
+        if (r == FM_OK)
+        {
+            /* ...and that mount did not format anything */
+            r = pf_attach(-1);
+            if (r == FM_OK && (!frn_is("/pf/one.txt", "dddd") ||
+                               !frn_is("/pf/two.txt", "second")))
+            {
+                r = FM_ERR_CRC;
+            }
+            pf_detach();
+        }
+    }
+    CHECK_RESULT(r, "two tables");
+
+    TEST("FMFS: power cut at every storage write (byte storage)");
+    r = pf_campaign(30u * 1024u, 1, 0, 0x51u, 150, 1, &stats);
+    pf_report(r, &stats, 0);
+
+    /* ...on a device that rewrites whole 512-byte blocks, and loses the
+     * one it was working on */
+    TEST("FMFS: power cut at every storage write (512-byte blocks)");
+    r = pf_campaign(34u * 1024u, 512, 0, 0x9E3u, 200, 1, &stats);
+    pf_report(r, &stats, 1);
+
+    /* ...and one with the 4 KiB erase units of a serial NOR flash */
+    TEST("FMFS: power cut at every storage write (4096-byte blocks)");
+    r = pf_campaign(56u * 1024u, 4096, 0, 0x77u, 150, 1, &stats);
+    /* (with blocks this large next to the files, parking a file's
+     * bytes elsewhere never saves a step, and whether a file is ever
+     * pushed upwards depends on how File_Write splits its data: the
+     * 512-byte run above is the one that has to show both) */
+    pf_report(r, &stats, 2);
+
+    TEST("FMFS: on a block storage files start on block boundaries");
+    {
+        /* the same random run against a model as on the RAM disk, on a
+         * full volume whose files each have their blocks to themselves */
+        uint32_t refused = 0;
+        uint32_t round;
+
+        r = FM_OK;
+        g_pf_name = "srf";
+        g_pf_mount = "/srf";
+        for (round = 0; round < 2u && r == FM_OK; round++)
+        {
+            /* out of reach: a hole in front of a file that is smaller
+             * than 1/FM_FMFS_MOVE_STEPS of it, and the rest of the
+             * last block of every file */
+            uint32_t slack = SRF_FILES * 511u;
+
+            if ((uint64_t)(FM_FMFS_MOVE_STEPS) < SRF_MAX)
+            {
+                slack += 2u * SRF_FILES *
+                         (uint32_t)(SRF_MAX / (FM_FMFS_MOVE_STEPS) + 512u);
+            }
+            g_pf_cap = 40u * 1024u;
+            g_pf_block = 512;
+            memset(g_pf_mem, 0, g_pf_cap);
+            r = pf_attach(-1);
+            if (r == FM_OK) r = srf_run(&g_pf_fs, 0x4321u + round * 131u,
+                                        1500, slack, &refused);
+            if (r == FM_OK)
+            {
+                pf_detach();
+                r = pf_attach(-1);
+                if (r == FM_OK) r = srf_check_all();
+            }
+            if (r == FM_OK)
+            {
+                /* every file on a block boundary: read the table */
+                uint32_t slot = (uint32_t)pf_le(g_pf_mem + 36, 4);
+                const uint8_t *table =
+                    (pf_le(g_pf_mem + 32, 4) >
+                     pf_le(g_pf_mem + slot + 32u, 4)) ? g_pf_mem
+                                                      : g_pf_mem + slot;
+                uint32_t files = 0;
+                uint32_t i;
+
+                for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+                {
+                    const uint8_t *rec = table + 64u +
+                                         i * (FM_PATH_MAX + 20u);
+
+                    if (rec[0] && rec[1] == (uint8_t)FM_ITEM_FILE &&
+                        pf_le(rec + 12, 8) != 0u)
+                    {
+                        files++;
+                        if (pf_le(rec + 4, 8) % 512u != 0u)
+                        {
+                            printf("[a file at %lu] ",
+                                   (unsigned long)pf_le(rec + 4, 8));
+                            r = FM_ERR_INTERNAL;
+                        }
+                    }
+                }
+                if (r == FM_OK && files == 0u) r = FM_ERR_INTERNAL;
+            }
+            pf_detach();
+        }
+        g_pf_name = "pf";
+        g_pf_mount = "/pf";
+        if (r == FM_OK && refused < 10u)
+        {
+            printf("[only %u refusals] ", (unsigned)refused);
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    CHECK_RESULT(r, "block boundaries");
+
+    TEST("FMFS: an I/O error in a compaction is made good afterwards");
+    {
+        uint32_t variant;
+
+        r = FM_OK;
+        for (variant = 0; variant < 2u && r == FM_OK; variant++)
+        {
+            /* n0 (300 bytes) in front of three files.  Deleting it and
+             * compacting slides each of them down by 300 bytes, which
+             * is less than their length: journalled moves.  With
+             * hardly any free space elsewhere they go in 300-byte
+             * steps; with a larger tail, through it. */
+            PfOp setup[] = {
+                { PF_CREATE, 0, 0, 0, 0, 0 },
+                { PF_APPEND, 0, 0, 0, 300, 1 },
+                { PF_CREATE, 1, 0, 0, 0, 0 },
+                { PF_APPEND, 1, 0, 0, 6000, 2 },
+                { PF_CREATE, 2, 0, 0, 0, 0 },
+                { PF_APPEND, 2, 0, 0, 8000, 3 },
+                { PF_CREATE, 3, 0, 0, 0, 0 },
+                { PF_APPEND, 3, 0, 0, 6500, 4 },
+                { PF_DELETE, 0, 0, 0, 0, 0 }
+            };
+            uint32_t errors = 0;
+            uint32_t before_copy;
+            uint32_t before_bounce;
+            long writes = 0;
+            long j;
+            uint32_t i;
+
+            if (variant == 1u) setup[7].len = 3000;
+            g_pf_cap = 32u * 1024u;
+            g_pf_block = 1;
+            memset(g_pf_mem, 0, g_pf_cap);
+            memset(&g_pf_model, 0, sizeof(g_pf_model));
+            r = pf_attach(-1);
+            for (i = 0; i < sizeof(setup) / sizeof(setup[0]) &&
+                        r == FM_OK; i++)
+            {
+                r = pf_run(&setup[i]);
+                if (r == FM_OK) pf_apply(&g_pf_model, &setup[i]);
+            }
+            pf_detach();
+            memcpy(g_pf_before_mem, g_pf_mem, g_pf_cap);
+            before_copy = g_pf_j_copy;
+            before_bounce = g_pf_j_bounce;
+            if (r == FM_OK) r = pf_attach(-1);
+            g_pf_writes = 0;
+            if (r == FM_OK) r = FMFS_Repack(&g_pf_fs);
+            writes = g_pf_writes;
+            if (r == FM_OK && pf_verify(&g_pf_model, NULL) != 0)
+            {
+                r = FM_ERR_CRC;
+            }
+            if (r == FM_OK &&
+                ((variant == 0u && g_pf_j_copy - before_copy < 30u) ||
+                 (variant == 1u && g_pf_j_bounce == before_bounce)))
+            {
+                printf("[variant %u took another path] ",
+                       (unsigned)variant);
+                r = FM_ERR_INTERNAL;
+            }
+            for (j = 0; j < writes && r == FM_OK; j++)
+            {
+                pf_detach();
+                memcpy(g_pf_mem, g_pf_before_mem, g_pf_cap);
+                r = pf_attach(-1);
+                if (r != FM_OK) break;
+                g_pf_writes = 0;
+                g_pf_fail = j;          /* one write fails; no reset */
+                if (FMFS_Repack(&g_pf_fs) != FM_OK) errors++;
+                /* same mount, no reset in between: every file reads
+                 * back, and the compaction can be asked for again */
+                if (pf_verify(&g_pf_model, NULL) != 0)
+                {
+                    printf("[write %ld of %ld: %s] ", j, writes, g_pf_why);
+                    r = FM_ERR_CRC;
+                }
+                if (r == FM_OK) r = FMFS_Repack(&g_pf_fs);
+                if (r == FM_OK && pf_verify(&g_pf_model, NULL) != 0)
+                {
+                    printf("[after write %ld: %s] ", j, g_pf_why);
+                    r = FM_ERR_CRC;
+                }
+            }
+            pf_detach();
+            if (r == FM_OK && (writes < 20 || errors != (uint32_t)writes))
+            {
+                printf("[%ld writes, %u reported] ", writes,
+                       (unsigned)errors);
+                r = FM_ERR_INTERNAL;
+            }
+        }
+    }
+    CHECK_RESULT(r, "error in compaction");
+
+    TEST("FMFS: files go into the holes deleted files left");
+    {
+        /* 20992 bytes of data area: 9000 + 2000 + 9000, 992 left */
+        static const PfOp ops[] = {
+            { PF_CREATE, 0, 0, 0, 0, 0 },
+            { PF_APPEND, 0, 0, 0, 9000, 1 },
+            { PF_CREATE, 1, 0, 0, 0, 0 },
+            { PF_APPEND, 1, 0, 0, 2000, 2 },
+            { PF_CREATE, 2, 0, 0, 0, 0 },
+            { PF_APPEND, 2, 0, 0, 9000, 3 },
+            { PF_DELETE, 0, 0, 0, 0, 0 },
+            /* n1 cannot grow where it is (n2 is behind it) and the tail
+             * is far too small: it moves into the 9000 bytes n0 left.
+             * No other file has to move for that. */
+            { PF_APPEND, 1, 0, 0, 3000, 4 },
+            /* holes now: 4000 behind n1, the 2000 it came from, 992 at
+             * the tail.  1500 new bytes take the smallest one that
+             * holds them... */
+            { PF_CREATE, 3, 0, 0, 0, 0 },
+            { PF_APPEND, 3, 0, 0, 1500, 5 },
+            /* ...so the 4000 are still in one piece for this file */
+            { PF_CREATE, 4, 0, 0, 0, 0 },
+            { PF_APPEND, 4, 0, 0, 4000, 6 }
+        };
+        uint32_t journal;
+        uint32_t i;
+
+        g_pf_cap = 32u * 1024u;
+        g_pf_block = 1;
+        memset(g_pf_mem, 0, g_pf_cap);
+        memset(&g_pf_model, 0, sizeof(g_pf_model));
+        journal = g_pf_j_copy + g_pf_j_bounce;
+        r = pf_attach(-1);
+        for (i = 0; i < sizeof(ops) / sizeof(ops[0]) && r == FM_OK; i++)
+        {
+            r = pf_run(&ops[i]);
+            if (r == FM_OK) pf_apply(&g_pf_model, &ops[i]);
+            if (r != FM_OK) printf("[op %u] ", (unsigned)i);
+        }
+        if (r == FM_OK && pf_verify(&g_pf_model, NULL) != 0)
+        {
+            printf("[%s] ", g_pf_why);
+            r = FM_ERR_CRC;
+        }
+        if (r == FM_OK && g_pf_j_copy + g_pf_j_bounce != journal)
+        {
+            /* a journal record means a file slid over itself: the data
+             * area was compacted, with room for everything in the holes */
+            printf("[%u journal records] ",
+                   (unsigned)(g_pf_j_copy + g_pf_j_bounce - journal));
+            r = FM_ERR_INTERNAL;
+        }
+        pf_detach();
+    }
+    CHECK_RESULT(r, "holes");
+
+    TEST("FMFS: a hole too small to be worth its journal writes stays");
+    {
+        /* 100 bytes in front of 9000 + 9000 + 2800, 92 at the tail */
+        static const PfOp ops[] = {
+            { PF_CREATE, 0, 0, 0, 0, 0 },
+            { PF_APPEND, 0, 0, 0, 100, 1 },
+            { PF_CREATE, 1, 0, 0, 0, 0 },
+            { PF_APPEND, 1, 0, 0, 9000, 2 },
+            { PF_CREATE, 2, 0, 0, 0, 0 },
+            { PF_APPEND, 2, 0, 0, 9000, 3 },
+            { PF_CREATE, 3, 0, 0, 0, 0 },
+            { PF_APPEND, 3, 0, 0, 2800, 4 },
+            { PF_DELETE, 0, 0, 0, 0, 0 },
+            { PF_CREATE, 4, 0, 0, 0, 0 }
+        };
+        /* 192 bytes are free, in two pieces.  150 bytes fit only when
+         * the first hole is closed: 9000 bytes moved 100 at a time, 89
+         * journal records for the first file alone. */
+        static const PfOp wide = { PF_APPEND, 4, 0, 0, 150, 5 };
+        static const PfOp fits = { PF_APPEND, 4, 0, 0, 100, 6 };
+        int gives_up = ((uint64_t)(FM_FMFS_MOVE_STEPS) < 89u);
+        uint32_t journal;
+        uint32_t i;
+        FM_Result got;
+
+        g_pf_cap = 32u * 1024u;
+        g_pf_block = 1;
+        memset(g_pf_mem, 0, g_pf_cap);
+        memset(&g_pf_model, 0, sizeof(g_pf_model));
+        r = pf_attach(-1);
+        for (i = 0; i < sizeof(ops) / sizeof(ops[0]) && r == FM_OK; i++)
+        {
+            r = pf_run(&ops[i]);
+            if (r == FM_OK) pf_apply(&g_pf_model, &ops[i]);
+        }
+        journal = g_pf_j_copy + g_pf_j_bounce;
+        if (r == FM_OK)
+        {
+            got = pf_run(&wide);
+            journal = g_pf_j_copy + g_pf_j_bounce - journal;
+            if (gives_up)
+            {
+                /* refused, at no cost, and nothing was touched */
+                if (got != FM_ERR_NO_SPACE || journal != 0u)
+                {
+                    r = FM_ERR_INTERNAL;
+                }
+                /* what does fit in a hole is still written */
+                if (r == FM_OK) r = pf_run(&fits);
+                if (r == FM_OK) pf_apply(&g_pf_model, &fits);
+            }
+            else
+            {
+                /* FM_FMFS_MOVE_STEPS says: whatever it takes */
+                if (got != FM_OK || journal < 89u)
+                {
+                    r = FM_ERR_INTERNAL;
+                }
+                if (r == FM_OK) pf_apply(&g_pf_model, &wide);
+            }
+            if (r != FM_OK)
+            {
+                printf("[%s, %u journal records] ", FM_ResultString(got),
+                       (unsigned)journal);
+            }
+        }
+        if (r == FM_OK && pf_verify(&g_pf_model, NULL) != 0)
+        {
+            printf("[%s] ", g_pf_why);
+            r = FM_ERR_CRC;
+        }
+        if (r == FM_OK) r = FS_Check("/pf");
+        pf_detach();
+    }
+    CHECK_RESULT(r, "hole that stays");
+#endif /* FM_FMFS_POWER_SAFE */
+
+    TEST("FMFS: the same cuts do damage a version 1 volume (control)");
+    /* The harness has to be able to see damage, or the tests above
+     * prove nothing.  A version 1 volume has one table, rewritten in
+     * place: some cut must break it. */
+    r = pf_campaign(30u * 1024u, 1, 1, 0x51u, 150, 1, &stats);
+    if (r == FM_OK && stats.damaged == 0u)
+    {
+        printf("[%u cuts, none did any harm] ", (unsigned)stats.cuts);
+        r = FM_ERR_INTERNAL;
+    }
+    if (r != FM_OK)
+    {
+        FAIL(g_pf_why[0] ? g_pf_why : "the harness sees no damage");
+    }
+    else
+    {
+        PASS();
+    }
+
+    TEST("FMFS: mounts that fail do not use up the FMFS contexts");
+    {
+        uint32_t i;
+        FM_Result bad = FM_ERR_CORRUPTED;
+
+        /* a header that says FMFS, version 9 */
+        g_pf_cap = 32u * 1024u;
+        g_pf_block = 512;
+        memset(g_pf_mem, 0, g_pf_cap);
+        memcpy(g_pf_mem, "FMFS", 4);
+        g_pf_mem[4] = 9;
+        r = FM_OK;
+        for (i = 0; i < FM_MAX_FS + 3u && r == FM_OK; i++)
+        {
+            bad = pf_attach(-1);
+            pf_detach();
+            if (bad != FM_ERR_CORRUPTED)
+            {
+                printf("[mount %u: %s] ", (unsigned)i, FM_ResultString(bad));
+                r = FM_ERR_INTERNAL;
+            }
+        }
+        memset(g_pf_mem, 0, g_pf_cap);
+        if (r == FM_OK) r = pf_attach(-1);
+        if (r == FM_OK) r = File_WriteAll("/pf/ok.txt", "ok", 2);
+        pf_detach();
+    }
+    CHECK_RESULT(r, "contexts after failed mounts");
+}
+#endif /* FM_USE_FMFS */
+
+/* The filesystem adapters hand out contexts from a pool of FM_MAX_FS.
+ * A context has to come back when its volume is unmounted and when a
+ * mount fails -- and an FM_FS must never end up using a context that
+ * has meanwhile been given to another one. */
+#if FM_USE_FMFS || FM_USE_LITTLEFS
+static uint8_t g_fc_mem[2][160 * 1024];
+static FM_Storage g_fc_st[2];
+static const char *const g_fc_name[2] = { "fca", "fcb" };
+static const char *const g_fc_mount[2] = { "/fca", "/fcb" };
+
+/* kind 0: FMFS, 1: LittleFS */
+static FM_Result fc_init(int kind, FM_FS *fs)
+{
+#if FM_USE_FMFS
+    if (kind == 0) return FMFS_Init(fs);
+#endif
+#if FM_USE_LITTLEFS
+    if (kind == 1) return LittleFS_Init(fs);
+#endif
+    (void)fs;
+    return FM_ERR_UNSUPPORTED;
+}
+
+static FM_Result fc_storage(int which, int kind, int blank)
+{
+    FM_Result r;
+
+    if (blank)
+    {
+        memset(g_fc_mem[which], kind ? 0xFF : 0, sizeof(g_fc_mem[which]));
+    }
+    r = RamDisk_Init(&g_fc_st[which], g_fc_name[which], g_fc_mem[which],
+                     sizeof(g_fc_mem[which]), kind ? 4096u : 512u);
+    if (r == FM_OK) r = Storage_Register(&g_fc_st[which]);
+    return r;
+}
+
+static void fc_drop(int which)
+{
+    (void)FS_Unmount(g_fc_mount[which]);
+    (void)Storage_Unmount(g_fc_name[which]);
+    (void)Storage_Unregister(g_fc_name[which]);
+}
+
+static FM_Result fc_cycles(int kind)
+{
+    static FM_FS fs;
+    FM_Result r = FM_OK;
+    uint32_t i;
+
+    /* more mount/unmount cycles than there are contexts: a card that
+     * is taken out and put back */
+    r = fc_storage(0, kind, 1);
+    for (i = 0; i < 3u * FM_MAX_FS + 1u && r == FM_OK; i++)
+    {
+        char text[16];
+        char back[16];
+        size_t rd = 0;
+
+        (void)snprintf(text, sizeof(text), "cycle %u", (unsigned)i);
+        r = fc_init(kind, &fs);
+        if (r == FM_OK) r = FS_Mount(g_fc_mount[0], &fs);
+        if (r == FM_OK && i != 0u)
+        {
+            /* what the cycle before wrote is there */
+            memset(back, 0, sizeof(back));
+            r = File_ReadAll("/fca/n.txt", back, sizeof(back) - 1u, &rd);
+            (void)snprintf(text, sizeof(text), "cycle %u", (unsigned)(i - 1u));
+            if (r == FM_OK && strcmp(back, text) != 0) r = FM_ERR_CRC;
+            (void)snprintf(text, sizeof(text), "cycle %u", (unsigned)i);
+        }
+        if (r == FM_OK) r = File_WriteAll("/fca/n.txt", text, strlen(text));
+        if (r == FM_OK) r = FS_Unmount(g_fc_mount[0]);
+        if (r != FM_OK) printf("[cycle %u] ", (unsigned)i);
+    }
+    fc_drop(0);
+    return r;
+}
+
+static FM_Result fc_failed_mounts(int kind)
+{
+    FM_Result r = FM_OK;
+    uint32_t i;
+
+    for (i = 0; i < FM_MAX_FS + 3u && r == FM_OK; i++)
+    {
+        /* on the stack, and gone afterwards: nobody is left who could
+         * give the context back */
+        FM_FS fs;
+        FM_Result bad;
+
+        /* FMFS: a header of a version that does not exist, on a
+         * storage that is not formatted on its own; LittleFS: noise,
+         * with the automatic format switched off */
+        r = fc_storage(0, kind, 1);
+        memset(g_fc_mem[0], 0x55, 4096);
+#if FM_USE_FMFS
+        if (kind == 0)
+        {
+            memcpy(g_fc_mem[0], "FMFS", 4);
+            g_fc_mem[0][4] = 9;
+            g_fc_mem[0][5] = 0;
+            g_fc_st[0].type = FM_STORAGE_NOR;
+        }
+#endif
+        if (r == FM_OK) r = fc_init(kind, &fs);
+#if FM_USE_LITTLEFS
+        if (r == FM_OK && kind == 1) LittleFS_SetAutoFormat(&fs, FM_FALSE);
+#endif
+        if (r == FM_OK)
+        {
+            bad = FS_Mount(g_fc_mount[0], &fs);
+            if (bad != FM_ERR_CORRUPTED)
+            {
+                printf("[mount %u: %s] ", (unsigned)i, FM_ResultString(bad));
+                r = FM_ERR_INTERNAL;
+            }
+        }
+        else
+        {
+            printf("[init %u: %s] ", (unsigned)i, FM_ResultString(r));
+        }
+        fc_drop(0);
+    }
+    if (r == FM_OK)
+    {
+        static FM_FS good;
+
+        r = fc_storage(0, kind, 1);
+        if (r == FM_OK) r = fc_init(kind, &good);
+        if (r == FM_OK) r = FS_Mount(g_fc_mount[0], &good);
+        if (r == FM_OK) r = File_WriteAll("/fca/ok.txt", "ok", 2);
+        fc_drop(0);
+    }
+    return r;
+}
+
+static FM_Result fc_stale(int kind)
+{
+    static FM_FS a;
+    static FM_FS b;
+    char back[8];
+    size_t rd = 0;
+    FM_Result r;
+    FM_Result again;
+
+    r = fc_storage(0, kind, 1);
+    if (r == FM_OK) r = fc_storage(1, kind, 1);
+    if (r == FM_OK) r = fc_init(kind, &a);
+    if (r == FM_OK) r = FS_Mount(g_fc_mount[0], &a);
+    if (r == FM_OK) r = File_WriteAll("/fca/a.txt", "aaa", 3);
+    if (r == FM_OK) r = FS_Unmount(g_fc_mount[0]);
+    /* mounted again without a new init: nobody took the context */
+    if (r == FM_OK) r = FS_Mount(g_fc_mount[0], &a);
+    memset(back, 0, sizeof(back));
+    if (r == FM_OK) r = File_ReadAll("/fca/a.txt", back, sizeof(back) - 1u,
+                                     &rd);
+    if (r == FM_OK && strcmp(back, "aaa") != 0) r = FM_ERR_CRC;
+    if (r == FM_OK) r = FS_Unmount(g_fc_mount[0]);
+    if (r != FM_OK) printf("[remount: %s] ", FM_ResultString(r));
+
+    /* now another FM_FS gets that context... */
+    if (r == FM_OK) r = fc_init(kind, &b);
+    if (r == FM_OK) r = FS_Mount(g_fc_mount[1], &b);
+    if (r == FM_OK) r = File_WriteAll("/fcb/b.txt", "bbb", 3);
+    if (r == FM_OK)
+    {
+        /* ...and the first one, used again without an init, must not
+         * get to work on it: it would be a second mount on the state
+         * of the other volume */
+        again = FS_Mount(g_fc_mount[0], &a);
+        if (again != FM_ERR_NOT_READY)
+        {
+            printf("[stale mount: %s] ", FM_ResultString(again));
+            r = FM_ERR_INTERNAL;
+        }
+#if FM_USE_FMFS
+        if (kind == 0 && (FMFS_Repack(&a) != FM_ERR_NOT_READY ||
+                          FMFS_IsPowerSafe(&a)))
+        {
+            printf("[stale FM_FS reaches the volume] ");
+            r = FM_ERR_INTERNAL;
+        }
+#endif
+#if FM_USE_LITTLEFS
+        if (kind == 1) LittleFS_SetAutoFormat(&a, FM_FALSE);
+#endif
+    }
+    memset(back, 0, sizeof(back));
+    if (r == FM_OK) r = File_ReadAll("/fcb/b.txt", back, sizeof(back) - 1u,
+                                     &rd);
+    if (r == FM_OK && strcmp(back, "bbb") != 0) r = FM_ERR_CRC;
+    if (r == FM_OK)
+    {
+        /* with its own init the first one mounts next to it */
+        r = fc_init(kind, &a);
+        if (r == FM_OK) r = FS_Mount(g_fc_mount[0], &a);
+        memset(back, 0, sizeof(back));
+        if (r == FM_OK) r = File_ReadAll("/fca/a.txt", back,
+                                         sizeof(back) - 1u, &rd);
+        if (r == FM_OK && strcmp(back, "aaa") != 0) r = FM_ERR_CRC;
+    }
+    fc_drop(0);
+    fc_drop(1);
+    return r;
+}
+
+static void test_fs_contexts(void)
+{
+    static const char *const kind_name[2] = { "FMFS", "LittleFS" };
+    int kind;
+    FM_Result r;
+
+    restore_posix_root();
+    for (kind = 0; kind < 2; kind++)
+    {
+        char title[80];
+
+#if !FM_USE_FMFS
+        if (kind == 0) continue;
+#endif
+#if !FM_USE_LITTLEFS
+        if (kind == 1) continue;
+#endif
+        (void)snprintf(title, sizeof(title),
+                       "%s: more mount cycles than contexts", kind_name[kind]);
+        TEST(title);
+        r = fc_cycles(kind);
+        CHECK_RESULT(r, "mount cycles");
+
+        (void)snprintf(title, sizeof(title),
+                       "%s: failed mounts give their context back",
+                       kind_name[kind]);
+        TEST(title);
+        r = fc_failed_mounts(kind);
+        CHECK_RESULT(r, "failed mounts");
+
+        (void)snprintf(title, sizeof(title),
+                       "%s: an FM_FS never works on another one's context",
+                       kind_name[kind]);
+        TEST(title);
+        r = fc_stale(kind);
+        CHECK_RESULT(r, "stale FM_FS");
+    }
+}
+#endif /* FM_USE_FMFS || FM_USE_LITTLEFS */
+
 /* Directory_Create answered FM_OK when a FILE of that name existed. */
 static FM_Result dcf_one(const char *root)
 {
@@ -18224,6 +20055,10 @@ int main(void)
     RUN_SUITE(test_dir_create_over_file);
 #if FM_USE_FMFS
     RUN_SUITE(test_fmfs_rename_failure);
+    RUN_SUITE(test_fmfs_powerfail);
+#endif
+#if FM_USE_FMFS || FM_USE_LITTLEFS
+    RUN_SUITE(test_fs_contexts);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_hook);

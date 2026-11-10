@@ -144,16 +144,39 @@ FM_Result PosixFS_Init(FM_FS *fs);
 /* Built-in small filesystem for pointer-backed/flash storage.  It keeps
  * metadata in the storage itself and uses the storage callback table for
  * data, so the same high-level File_* API works on RAM, SDRAM, NOR/QSPI
- * adapters and custom SD drivers. */
+ * adapters and custom SD drivers.
+ *
+ * Takes one of FM_MAX_FS contexts; FS_Unmount() -- and an FS_Mount()
+ * that fails -- gives it back.  Call FMFS_Init() before each FS_Mount():
+ * an FM_FS that is mounted again without it gets its old context only
+ * if no other FM_FS has taken it meanwhile (FM_ERR_NOT_READY otherwise).
+ * LittleFS_Init() follows the same rule. */
 FM_Result FMFS_Init(FM_FS *fs);
 
 /* Compact the FMFS data area: slide the live files together from the
  * metadata region up, recovering the space of deleted, truncated and
  * relocated files.  Open handles stay valid.  Writes do this on their
  * own before reporting FM_ERR_NO_SPACE, so calling it is optional (for
- * instance at a quiet moment, to keep later writes fast).  The data is
- * moved in place: not power-fail safe. */
+ * instance at a quiet moment, to keep later writes fast).  On a
+ * power-fail safe volume (see FMFS_IsPowerSafe) a reset in the middle
+ * loses nothing, and a hole whose closing would cost more than
+ * FM_FMFS_MOVE_STEPS journal records is left where it is; on a version
+ * 1 volume the data is moved in place and a reset can damage it. */
 FM_Result FMFS_Repack(FM_FS *fs);
+
+/* FM_TRUE when the FMFS volume mounted through `fs` keeps two copies of
+ * its table and journals its moves (on-storage version 2): a reset or a
+ * power cut at any moment leaves every file either as it was before the
+ * call that was running or as that call would have left it.  The one
+ * exception is the file being written by File_Write(): bytes it already
+ * had and that the write replaces -- on a block device, the blocks the
+ * write was working on -- can be left half written.
+ *
+ * FM_FALSE for a version 1 volume -- one formatted by an older release,
+ * on a storage too small for the second table, or in a build with
+ * FM_FMFS_POWER_SAFE 0.  Such a volume is not converted by mounting it;
+ * FS_Format() writes the layout of the running build. */
+FM_Bool FMFS_IsPowerSafe(FM_FS *fs);
 
 FM_END_DECLS
 
