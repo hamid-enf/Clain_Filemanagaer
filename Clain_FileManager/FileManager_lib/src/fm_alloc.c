@@ -5,6 +5,7 @@
 #define FM_DEBUG_TAG "alloc"
 #include "fm_debug.h"
 #include "fm_alloc.h"
+#include "fm_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -65,10 +66,15 @@ static void *fallback_calloc(size_t n, size_t size, void *ctx)
     return p;
 }
 
+/* An allocator without realloc cannot grow a block through the plain
+ * FM_Realloc(): the old block size is unknown, and the former "copy
+ * `size` bytes anyway" read past the end of the old block whenever the
+ * block grew (which is the only reason anybody calls realloc).  The
+ * fallback therefore only handles the cases that need no copy; every
+ * caller inside the library knows its old size and uses
+ * FM_ReallocSized(), which is always correct. */
 static void *fallback_realloc(void *p, size_t size, void *ctx)
 {
-    void *np;
-
     if (p == NULL)
     {
         return g_allocator.alloc(size, ctx);
@@ -78,17 +84,7 @@ static void *fallback_realloc(void *p, size_t size, void *ctx)
         g_allocator.free(p, ctx);
         return NULL;
     }
-    /* The old block size is unknown here, so grow-copy conservatively:
-     * allocate the new size and copy `size` bytes worth (the caller is
-     * only allowed to rely on min(old,new) anyway; copying from a
-     * larger old block is safe because it is still allocated). */
-    np = g_allocator.alloc(size, ctx);
-    if (np != NULL)
-    {
-        memcpy(np, p, size);
-        g_allocator.free(p, ctx);
-    }
-    return np;
+    return NULL;                /* old block left untouched */
 }
 
 int FM_Allocator_Set(const FM_Allocator *a)
@@ -132,7 +128,19 @@ static const FM_Allocator *current(void)
 
 unsigned long FM_Alloc_FailureCount(void)
 {
-    return g_alloc_failures;
+    unsigned long n;
+
+    FM_Lock();
+    n = g_alloc_failures;
+    FM_Unlock();
+    return n;
+}
+
+static void alloc_failed(void)
+{
+    FM_Lock();
+    g_alloc_failures++;
+    FM_Unlock();
 }
 
 void *FM_Alloc(size_t size)
@@ -141,7 +149,7 @@ void *FM_Alloc(size_t size)
 
     if (p == NULL && size != 0)
     {
-        g_alloc_failures++;
+        alloc_failed();
     }
     return p;
 }
@@ -152,7 +160,7 @@ void *FM_Calloc(size_t n, size_t size)
 
     if (p == NULL && n != 0 && size != 0)
     {
-        g_alloc_failures++;
+        alloc_failed();
     }
     return p;
 }
@@ -163,7 +171,34 @@ void *FM_Realloc(void *p, size_t size)
 
     if (np == NULL && size != 0)
     {
-        g_alloc_failures++;
+        alloc_failed();
+    }
+    return np;
+}
+
+void *FM_ReallocSized(void *p, size_t old_size, size_t new_size)
+{
+    const FM_Allocator *a = current();
+    void *np;
+
+    if (a->realloc != fallback_realloc)
+    {
+        return FM_Realloc(p, new_size);
+    }
+    if (p == NULL)
+    {
+        return FM_Alloc(new_size);
+    }
+    if (new_size == 0)
+    {
+        a->free(p, g_allocator.ctx);
+        return NULL;
+    }
+    np = FM_Alloc(new_size);
+    if (np != NULL)
+    {
+        memcpy(np, p, (old_size < new_size) ? old_size : new_size);
+        a->free(p, g_allocator.ctx);
     }
     return np;
 }

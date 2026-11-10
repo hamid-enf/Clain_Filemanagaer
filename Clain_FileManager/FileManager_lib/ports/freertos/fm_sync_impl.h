@@ -12,6 +12,7 @@
 
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
 
 #include "fm_types.h"
 
@@ -53,6 +54,22 @@ static inline void FM_Mutex_Destroy(FM_Mutex *m)
         vSemaphoreDelete(m->handle);
         m->handle = NULL;
     }
+}
+
+/* Thread identity (optional part of a sync port, see fm_sync.h).
+ * Needs INCLUDE_xTaskGetCurrentTaskHandle (or configUSE_MUTEXES, which
+ * every build of this port already requires). */
+#define FM_SYNC_HAS_THREAD_SELF 1
+typedef TaskHandle_t FM_ThreadId;
+
+static inline FM_ThreadId FM_Thread_Self(void)
+{
+    return xTaskGetCurrentTaskHandle();
+}
+
+static inline int FM_Thread_Equal(FM_ThreadId a, FM_ThreadId b)
+{
+    return a == b;
 }
 
 #endif /* FM_SYNC_IMPL_FREERTOS_H */

@@ -664,7 +664,8 @@ static FM_Result opus_file_open(FM_Audio *a) {
                     if (pend_len == 0) {
                         pkt = data + p; pkt_len = plen;
                     } else {
-                        uint8_t *np = (uint8_t*)FM_Realloc(pend, pend_len + plen);
+                        uint8_t *np = (uint8_t*)FM_ReallocSized(pend, pend_len,
+                                                                  pend_len + plen);
                         if (np == NULL) {
                             FM_Free(pend); pend = NULL; pend_len = 0;  /* leak fix (bug #9) */
                             r = FM_ERR_NO_MEMORY; goto done;

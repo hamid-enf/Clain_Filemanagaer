@@ -13,22 +13,51 @@ static FM_Storage *g_storages[FM_MAX_STORAGES];
 static FM_StorageEventCb g_event_cb = NULL;
 static void *g_event_data = NULL;
 
-/* Dedicated registry lock.  It is intentionally separate from the VFS
- * FM_Lock: FS_Mount/FS_GetInfo hold the VFS lock while calling Storage_*
- * helpers, so reusing FM_Lock here would deadlock on non-recursive
- * mutexes.  Lock ordering is always VFS lock -> storage lock. */
+/* Two locks, both separate from the VFS FM_Lock:
+ *
+ *   g_storage_lock     the registry and the state flags of each storage
+ *                      (present / mounted / access_mode / free_space,
+ *                      the event callback).  A leaf: nothing else is
+ *                      taken and no driver or user code runs under it.
+ *   g_storage_op_lock  serialises the state transitions as a whole
+ *                      (Storage_Mount / _Unmount / _Insert / _Remove),
+ *                      so two tasks cannot both run on_mount, or mount
+ *                      a medium that is just being removed.  It is held
+ *                      across the driver's on_mount / sync / on_unmount
+ *                      hooks, but NOT across the event callback.
+ *
+ * Block I/O (Storage_ReadBlocks ...) takes neither around the driver
+ * call: a filesystem serialises its own storage through the per-mount
+ * lock, and raw access next to a mounted filesystem is the caller's
+ * to coordinate. */
 #if FM_USE_THREADS
 static FM_Mutex g_storage_lock;
 static FM_Bool  g_storage_lock_init = FM_FALSE;
+static FM_Mutex g_storage_op_lock;
+static FM_Bool  g_storage_op_lock_init = FM_FALSE;
+
+static void storage_locks_create(void)
+{
+    /* Normally done by FileManager_Init().  The lazy path creates under
+     * the VFS lock so two first-time callers cannot both make one. */
+    FM_Lock();
+    if (!g_storage_lock_init && FM_Mutex_Create(&g_storage_lock) == FM_OK)
+    {
+        g_storage_lock_init = FM_TRUE;
+    }
+    if (!g_storage_op_lock_init &&
+        FM_Mutex_Create(&g_storage_op_lock) == FM_OK)
+    {
+        g_storage_op_lock_init = FM_TRUE;
+    }
+    FM_Unlock();
+}
 
 static void storage_lock(void)
 {
     if (!g_storage_lock_init)
     {
-        if (FM_Mutex_Create(&g_storage_lock) == FM_OK)
-        {
-            g_storage_lock_init = FM_TRUE;
-        }
+        storage_locks_create();
     }
     if (g_storage_lock_init)
     {
@@ -43,10 +72,99 @@ static void storage_unlock(void)
         FM_Mutex_Unlock(&g_storage_lock);
     }
 }
+
+static void storage_op_lock(void)
+{
+    if (!g_storage_op_lock_init)
+    {
+        storage_locks_create();
+    }
+    if (g_storage_op_lock_init)
+    {
+        FM_Mutex_Lock(&g_storage_op_lock);
+    }
+}
+
+static void storage_op_unlock(void)
+{
+    if (g_storage_op_lock_init)
+    {
+        FM_Mutex_Unlock(&g_storage_op_lock);
+    }
+}
+
+void FM_Storage_SyncInit(void)
+{
+    storage_locks_create();
+}
+
+void FM_Storage_SyncDeinit(void)
+{
+    if (g_storage_lock_init)
+    {
+        FM_Mutex_Destroy(&g_storage_lock);
+        g_storage_lock_init = FM_FALSE;
+    }
+    if (g_storage_op_lock_init)
+    {
+        FM_Mutex_Destroy(&g_storage_op_lock);
+        g_storage_op_lock_init = FM_FALSE;
+    }
+}
 #else
-static void storage_lock(void)   { /* no-op */ }
-static void storage_unlock(void) { /* no-op */ }
+static void storage_lock(void)      { /* no-op */ }
+static void storage_unlock(void)    { /* no-op */ }
+static void storage_op_lock(void)   { /* no-op */ }
+static void storage_op_unlock(void) { /* no-op */ }
+void FM_Storage_SyncInit(void)      { /* no-op */ }
+void FM_Storage_SyncDeinit(void)    { /* no-op */ }
 #endif
+
+/* State flags are read and written under the registry lock. */
+FM_Bool FM_Storage_IsPresent(const FM_Storage *s)
+{
+    FM_Bool v;
+
+    storage_lock();
+    v = s->present;
+    storage_unlock();
+    return v;
+}
+
+FM_Bool FM_Storage_IsMounted(const FM_Storage *s)
+{
+    FM_Bool v;
+
+    storage_lock();
+    v = s->mounted;
+    storage_unlock();
+    return v;
+}
+
+uint64_t FM_Storage_FreeSpaceHint(const FM_Storage *s)
+{
+    uint64_t v;
+
+    storage_lock();
+    v = s->free_space;
+    storage_unlock();
+    return v;
+}
+
+static void storage_fire_event(const char *name, FM_Bool inserted)
+{
+    FM_StorageEventCb cb;
+    void *data;
+
+    storage_lock();
+    cb = g_event_cb;
+    data = g_event_data;
+    storage_unlock();
+    if (cb != NULL)
+    {
+        cb(name, inserted, data);   /* user code: no lock held */
+    }
+}
 
 static FM_Storage **storage_find_slot(const char *name)
 {
@@ -207,24 +325,17 @@ FM_Result Storage_Find(const char *name, FM_Storage **out)
     return FM_OK;
 }
 
-FM_Result Storage_Mount(const char *name)
+/* Call with the op lock held. */
+static FM_Result storage_mount_locked(FM_Storage *s, const char *name)
 {
-    FM_Storage *s;
     FM_Result r;
 
-    FM_CHECK_PTR(name, FM_ERR_INVALID_ARGUMENT);
-    r = Storage_Find(name, &s);
-    if (r != FM_OK)
-    {
-        FM_ERR_LOG("mount %s: not found (%d)", name, (int)r);
-        return r;
-    }
-    if (!s->present)
+    if (!FM_Storage_IsPresent(s))
     {
         FM_ERR_LOG("mount %s: not present", name);
         return FM_ERR_NOT_READY;
     }
-    if (s->mounted)
+    if (FM_Storage_IsMounted(s))
     {
         return FM_OK; /* idempotent */
     }
@@ -237,13 +348,53 @@ FM_Result Storage_Mount(const char *name)
             return r;
         }
     }
+    storage_lock();
     s->mounted = FM_TRUE;
     if (s->access_mode == FM_ACCESS_NONE)
     {
         s->access_mode = s->read_only ? FM_ACCESS_READ : FM_ACCESS_WRITE;
     }
+    storage_unlock();
     FM_EVENT_LOG("mounted storage %s", name);
     return FM_OK;
+}
+
+/* Call with the op lock held. */
+static void storage_unmount_locked(FM_Storage *s)
+{
+    if (!FM_Storage_IsMounted(s))
+    {
+        return;
+    }
+    if (s->sync != NULL)
+    {
+        (void)s->sync(s);
+    }
+    if (s->on_unmount != NULL)
+    {
+        (void)s->on_unmount(s);
+    }
+    storage_lock();
+    s->mounted = FM_FALSE;
+    storage_unlock();
+}
+
+FM_Result Storage_Mount(const char *name)
+{
+    FM_Storage *s;
+    FM_Result r;
+
+    FM_CHECK_PTR(name, FM_ERR_INVALID_ARGUMENT);
+    r = Storage_Find(name, &s);
+    if (r != FM_OK)
+    {
+        FM_ERR_LOG("mount %s: not found (%d)", name, (int)r);
+        return r;
+    }
+    storage_op_lock();
+    r = storage_mount_locked(s, name);
+    storage_op_unlock();
+    return r;
 }
 
 FM_Result Storage_Unmount(const char *name)
@@ -256,19 +407,9 @@ FM_Result Storage_Unmount(const char *name)
     {
         return r;
     }
-    if (!s->mounted)
-    {
-        return FM_OK;
-    }
-    if (s->sync != NULL)
-    {
-        (void)s->sync(s);
-    }
-    if (s->on_unmount != NULL)
-    {
-        (void)s->on_unmount(s);
-    }
-    s->mounted = FM_FALSE;
+    storage_op_lock();
+    storage_unmount_locked(s);
+    storage_op_unlock();
     return FM_OK;
 }
 
@@ -286,7 +427,7 @@ FM_Result Storage_Format(const char *name)
     {
         return FM_ERR_READ_ONLY;
     }
-    if (!s->present)
+    if (!FM_Storage_IsPresent(s))
     {
         return FM_ERR_NOT_READY;
     }
@@ -340,10 +481,12 @@ FM_Result Storage_GetInfo(const char *name, FM_StorageInfo *info)
     info->write_size = s->write_size;
     info->erase_size = s->erase_size;
     info->read_only = s->read_only;
+    storage_lock();
     info->present = s->present;
     info->mounted = s->mounted;
     info->access_mode = s->access_mode;
     info->free_space = s->free_space;
+    storage_unlock();
     return FM_OK;
 }
 
@@ -361,7 +504,9 @@ FM_Result Storage_IsReady(const char *name, FM_Bool *ready)
     {
         return r;
     }
+    storage_lock();
     *ready = (s->present && s->mounted) ? FM_TRUE : FM_FALSE;
+    storage_unlock();
     return FM_OK;
 }
 
@@ -400,7 +545,9 @@ FM_Result Storage_GetFreeSpace(const char *name, uint64_t *free)
     /* Until a filesystem reports its actual free space (which updates the
      * hint through FM_Storage_SetFreeSpace), claim the full capacity.
      * Once the storage is mounted the hint is meaningful. */
+    storage_lock();
     *free = s->mounted ? s->free_space : s->capacity;
+    storage_unlock();
     return FM_OK;
 }
 
@@ -410,7 +557,9 @@ FM_Result Storage_SetPresent(FM_Storage *s, FM_Bool present)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
+    storage_lock();
     s->present = present;
+    storage_unlock();
     return FM_OK;
 }
 
@@ -424,11 +573,12 @@ FM_Result Storage_Insert(const char *name)
     {
         return r;
     }
+    storage_op_lock();
+    storage_lock();
     s->present = FM_TRUE;
-    if (g_event_cb != NULL)
-    {
-        g_event_cb(name, FM_TRUE, g_event_data);
-    }
+    storage_unlock();
+    storage_op_unlock();
+    storage_fire_event(name, FM_TRUE);
     return FM_OK;
 }
 
@@ -442,15 +592,16 @@ FM_Result Storage_Remove(const char *name)
     {
         return r;
     }
-    if (s->mounted)
-    {
-        (void)Storage_Unmount(name);
-    }
+    /* unmount + "not present" as one transition: a Storage_Mount that
+     * races with the removal either completes before it or sees the
+     * medium gone, never a mounted-but-absent storage */
+    storage_op_lock();
+    storage_unmount_locked(s);
+    storage_lock();
     s->present = FM_FALSE;
-    if (g_event_cb != NULL)
-    {
-        g_event_cb(name, FM_FALSE, g_event_data);
-    }
+    storage_unlock();
+    storage_op_unlock();
+    storage_fire_event(name, FM_FALSE);
     return FM_OK;
 }
 
@@ -468,7 +619,7 @@ FM_Result Storage_IsPresent(const char *name, FM_Bool *present)
     {
         return r;
     }
-    *present = s->present;
+    *present = FM_Storage_IsPresent(s);
     return FM_OK;
 }
 
@@ -496,7 +647,7 @@ FM_Result Storage_ReadBlocks(const char *name, uint64_t offset, void *buf,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (!s->present)
+    if (!FM_Storage_IsPresent(s))
     {
         return FM_ERR_NOT_READY;
     }
@@ -530,7 +681,7 @@ FM_Result Storage_WriteBlocks(const char *name, uint64_t offset,
     {
         return FM_ERR_READ_ONLY;
     }
-    if (!s->present)
+    if (!FM_Storage_IsPresent(s))
     {
         return FM_ERR_NOT_READY;
     }
@@ -563,7 +714,7 @@ FM_Result Storage_EraseBlocks(const char *name, uint64_t offset, uint32_t len)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    if (!s->present)
+    if (!FM_Storage_IsPresent(s))
     {
         return FM_ERR_NOT_READY;
     }
@@ -618,6 +769,8 @@ void FM_Storage_SetFreeSpace(const char *name, uint64_t free)
 
     if (Storage_Find(name, &s) == FM_OK)
     {
+        storage_lock();
         s->free_space = free;
+        storage_unlock();
     }
 }

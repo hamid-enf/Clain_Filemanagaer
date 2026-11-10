@@ -68,7 +68,21 @@ FM_Result Directory_ScanRecursive(const char *path, FM_ItemCallback callback,
                                   void *user_data,
                                   volatile FM_Bool *cancel);
 
-/* Copy / move a directory tree (progress optional). */
+/* Copy / move a directory tree (progress optional).
+ *
+ * `dst` equal to `src`, or inside it, is FM_ERR_INVALID_ARGUMENT for a
+ * copy (a tree copied into itself never ends); a move onto itself is a
+ * no-op, a move into itself FM_ERR_INVALID_ARGUMENT.
+ *
+ * Directory_Copy: if `dst` did not exist and the copy fails, everything
+ * it created is removed again.  When copying INTO an existing folder
+ * nothing is removed after a failure (the files that were there before
+ * cannot be told apart from the new ones).
+ *
+ * Directory_Move across two volumes is copy + delete.  If deleting the
+ * source fails after the copy completed, the error is returned and the
+ * destination is kept: the source may be partly gone by then, so the
+ * destination is the only complete copy. */
 FM_Result Directory_Copy(const char *src, const char *dst,
                          FM_ProgressCallback progress, void *user_data);
 FM_Result Directory_Move(const char *src, const char *dst,

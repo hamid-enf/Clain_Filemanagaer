@@ -249,6 +249,11 @@
 #ifndef FM_MAX_OPEN_DIRS
 #define FM_MAX_OPEN_DIRS 4            /* directory handle pool         */
 #endif
+#ifndef FM_LAST_ERROR_THREADS
+#define FM_LAST_ERROR_THREADS 4       /* tasks with their own          */
+#endif                                /* File_GetLastError() slot      */
+                                      /* (threaded builds; 0 = one     */
+                                      /* shared slot)                  */
 #ifndef FM_DIR_MAX_DEPTH
 #define FM_DIR_MAX_DEPTH 16           /* recursion depth for scanning  */
 #endif

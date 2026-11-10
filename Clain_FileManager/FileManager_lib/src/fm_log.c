@@ -11,6 +11,7 @@
 /* تعریف خود fm_log.c نباید هشدار deprecated بدهد. */
 #define FM_LOG_ALLOW_INIT 1
 #include "fm_log.h"
+#include "fm_config.h"          /* FM_USE_THREADS */
 
 #ifndef FM_LOG_DISABLE
 
@@ -19,7 +20,17 @@ static void        *g_sink_ctx;
 
 /* بافر فرمت. ایستا و بدون malloc — روی میکرو نمی‌شود چند کیلوبایت
  * استک را برای یک پیام لاگ خرج کرد. */
+#if !FM_USE_THREADS
 static char g_buf[FM_LOG_BUF_SIZE];
+#endif
+/* With FM_USE_THREADS=1 the message is formatted on the caller's stack
+ * instead: two tasks logging at the same time used to format into the
+ * one static buffer and each sent a mix of both messages (or a string
+ * whose terminator the other task had just moved).  A lock is the wrong
+ * tool here -- a sink is allowed to call back into the library (a file
+ * sink does), which may log again, and messages from an ISR must not
+ * block -- so each call simply owns its buffer.  Cost: FM_LOG_BUF_SIZE
+ * bytes of task stack while a message is being formatted. */
 
 void FM_Log_SetSink(FM_LogSinkFn sink, void *ctx)
 {
@@ -82,6 +93,9 @@ int FM_Log_PutChar(int ch)
 
 int FM_Log_V(const char *fmt, va_list ap)
 {
+#if FM_USE_THREADS
+    char g_buf[FM_LOG_BUF_SIZE];
+#endif
     int n;
 
     if (g_sink == NULL || fmt == NULL)

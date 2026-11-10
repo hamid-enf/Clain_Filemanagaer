@@ -123,6 +123,9 @@ FM_Result FS_Find(const char *name, FM_FS **out);
 /* Mount management                                                    */
 /* ------------------------------------------------------------------ */
 FM_Result FS_Mount(const char *mount_path, FM_FS *fs);
+/* FS_Unmount and FS_Format return FM_ERR_BUSY while a file or directory
+ * of the volume is open, or (FM_USE_THREADS) while another task is in
+ * the middle of an operation on it. */
 FM_Result FS_Unmount(const char *mount_path);
 FM_Result FS_Format(const char *mount_path);
 FM_Result FS_Check(const char *mount_path);
@@ -144,9 +147,12 @@ FM_Result PosixFS_Init(FM_FS *fs);
  * adapters and custom SD drivers. */
 FM_Result FMFS_Init(FM_FS *fs);
 
-/* Compact the FMFS data area: relocate live files contiguously from the
- * metadata region, recovering space consumed by deleted files.  All open
- * file handles on this FS become invalid after a successful repack. */
+/* Compact the FMFS data area: slide the live files together from the
+ * metadata region up, recovering the space of deleted, truncated and
+ * relocated files.  Open handles stay valid.  Writes do this on their
+ * own before reporting FM_ERR_NO_SPACE, so calling it is optional (for
+ * instance at a quiet moment, to keep later writes fast).  The data is
+ * moved in place: not power-fail safe. */
 FM_Result FMFS_Repack(FM_FS *fs);
 
 FM_END_DECLS

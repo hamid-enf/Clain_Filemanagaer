@@ -803,14 +803,14 @@ static WORD fatfs_sector_size(FM_Storage *s)
 DSTATUS disk_initialize(BYTE pdrv)
 {
     FM_Storage *s = fatfs_storage_for(pdrv);
-    if (s == NULL || !s->present) return STA_NOINIT;
+    if (s == NULL || !FM_Storage_IsPresent(s)) return STA_NOINIT;
     return 0;
 }
 
 DSTATUS disk_status(BYTE pdrv)
 {
     FM_Storage *s = fatfs_storage_for(pdrv);
-    if (s == NULL || !s->present) return STA_NOINIT;
+    if (s == NULL || !FM_Storage_IsPresent(s)) return STA_NOINIT;
     if (s->read_only) return STA_PROTECT;
     return 0;
 }

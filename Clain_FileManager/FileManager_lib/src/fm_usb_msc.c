@@ -5,6 +5,7 @@
 #define FM_DEBUG_TAG "usb"
 #include "fm_debug.h"
 #include "fm_usb_msc.h"
+#include "fm_internal.h"
 #include <string.h>
 
 #if FM_USE_USB_MSC
@@ -81,7 +82,7 @@ FM_Result USB_MSC_ReadBlocks(FM_USB_MSC *msc, uint64_t lba,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (!msc->storage->present)
+    if (!FM_Storage_IsPresent(msc->storage))
     {
         return FM_ERR_NOT_READY;
     }
@@ -108,7 +109,7 @@ FM_Result USB_MSC_WriteBlocks(FM_USB_MSC *msc, uint64_t lba,
     {
         return FM_ERR_READ_ONLY;
     }
-    if (!msc->storage->present)
+    if (!FM_Storage_IsPresent(msc->storage))
     {
         return FM_ERR_NOT_READY;
     }

@@ -56,4 +56,23 @@ static inline void FM_Mutex_Destroy(FM_Mutex *m)
     }
 }
 
+/* Thread identity (optional part of a sync port, see fm_sync.h).
+ * -DFM_SYNC_PTHREAD_NO_THREAD_SELF leaves it out, which turns this into
+ * a "mutex only" port: the way to build the core's fallback for custom
+ * ports that cannot name the calling thread. */
+#ifndef FM_SYNC_PTHREAD_NO_THREAD_SELF
+#define FM_SYNC_HAS_THREAD_SELF 1
+typedef pthread_t FM_ThreadId;
+
+static inline FM_ThreadId FM_Thread_Self(void)
+{
+    return pthread_self();
+}
+
+static inline int FM_Thread_Equal(FM_ThreadId a, FM_ThreadId b)
+{
+    return pthread_equal(a, b) != 0;
+}
+#endif
+
 #endif /* FM_SYNC_IMPL_PTHREAD_H */

@@ -9,8 +9,157 @@
 #include "fm_cache.h"
 #include <string.h>
 
-#if !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)
+/* ------------------------------------------------------------------ */
+/* Backend calls on an open handle                                     */
+/*                                                                     */
+/* Every call into the filesystem adapter is made with the mount's     */
+/* backend lock held (FM_Mount_Lock): FatFs, LittleFS and FMFS keep    */
+/* per-volume state that two tasks must not enter at once.  The lock   */
+/* is held for exactly one backend call, so it is a leaf below the     */
+/* read-cache and bounce-buffer locks and is never held across a user  */
+/* callback.  An open handle keeps its mount alive (FS_Unmount returns */
+/* FM_ERR_BUSY), so f->mount / f->fs are stable here.                  */
+/* ------------------------------------------------------------------ */
+static FM_Result fop_read(FM_File *f, void *buf, uint32_t len, uint32_t *got)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_read(f->fs, f->fh, buf, len, got);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_write(FM_File *f, const void *buf, uint32_t len,
+                           uint32_t *put)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_write(f->fs, f->fh, buf, len, put);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_seek(FM_File *f, int64_t offset, FM_SeekOrigin origin)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_seek(f->fs, f->fh, offset, origin);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_tell(FM_File *f, uint64_t *pos)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_tell(f->fs, f->fh, pos);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_size(FM_File *f, uint64_t *size)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_size(f->fs, f->fh, size);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_truncate(FM_File *f, uint64_t size)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_truncate(f->fs, f->fh, size);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_flush(FM_File *f)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_flush(f->fs, f->fh);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+static FM_Result fop_close(FM_File *f)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(f->mount);
+    r = f->fs->ops.file_close(f->fs, f->fh);
+    FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+/* ------------------------------------------------------------------ */
+/* DMA bounce buffer                                                   */
+/*                                                                     */
+/* On a target, a caller buffer that the SD/DMA path cannot use        */
+/* directly (unaligned, on the stack, ...) is copied through one       */
+/* cache-line-aligned 512-byte block.  That block is shared by every   */
+/* open file, so in a threaded build each chunk is moved under its own */
+/* mutex -- without it two tasks reading different files swap sectors. */
+/*                                                                     */
+/* Host builds talk to the adapter directly; -DFM_FILE_FORCE_BOUNCE    */
+/* routes them through the bounce path as well so it can be tested.    */
+/* ------------------------------------------------------------------ */
+#if !(defined(FM_HOST_BUILD) && FM_HOST_BUILD) || defined(FM_FILE_FORCE_BOUNCE)
+#define FM_FILE_BOUNCE 1
+#else
+#define FM_FILE_BOUNCE 0
+#endif
+
+#if FM_FILE_BOUNCE
 static uint8_t g_file_bounce[512] FM_DMA_ALIGNED;
+
+#ifdef FM_FILE_FORCE_BOUNCE
+#define file_direct_ok(buf, len) ((void)(buf), (void)(len), 0)
+#else
+#define file_direct_ok(buf, len) FM_Cache_SdDirectOk((buf), (len))
+#endif
+
+#if FM_USE_THREADS
+static FM_Mutex g_bounce_lock;
+static FM_Bool  g_bounce_lock_init = FM_FALSE;
+
+static void bounce_lock(void)
+{
+    FM_Bool ready;
+
+    FM_Lock();
+    if (!g_bounce_lock_init && FM_Mutex_Create(&g_bounce_lock) == FM_OK)
+    {
+        g_bounce_lock_init = FM_TRUE;
+    }
+    ready = g_bounce_lock_init;
+    FM_Unlock();
+    if (ready)
+    {
+        FM_Mutex_Lock(&g_bounce_lock);
+    }
+}
+
+static void bounce_unlock(void)
+{
+    if (g_bounce_lock_init)
+    {
+        FM_Mutex_Unlock(&g_bounce_lock);
+    }
+}
+#else
+#define bounce_lock()   ((void)0)
+#define bounce_unlock() ((void)0)
+#endif
 
 static FM_Result file_read_backend(FM_File *f, void *buf, uint32_t len,
                                    uint32_t *got)
@@ -19,9 +168,9 @@ static FM_Result file_read_backend(FM_File *f, void *buf, uint32_t len,
     uint32_t total = 0;
     FM_Result r = FM_OK;
 
-    if (FM_Cache_SdDirectOk(buf, len))
+    if (file_direct_ok(buf, len))
     {
-        return f->fs->ops.file_read(f->fs, f->fh, buf, len, got);
+        return fop_read(f, buf, len, got);
     }
     while (total < len)
     {
@@ -32,12 +181,14 @@ static FM_Result file_read_backend(FM_File *f, void *buf, uint32_t len,
         {
             chunk = (uint32_t)sizeof(g_file_bounce);
         }
-        r = f->fs->ops.file_read(f->fs, f->fh, g_file_bounce, chunk, &rd);
+        bounce_lock();
+        r = fop_read(f, g_file_bounce, chunk, &rd);
         if (rd > 0u)
         {
             memcpy(out + total, g_file_bounce, rd);
             total += rd;
         }
+        bounce_unlock();
         if (r != FM_OK && r != FM_ERR_EOF)
         {
             break;
@@ -65,9 +216,9 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
     uint32_t total = 0;
     FM_Result r = FM_OK;
 
-    if (FM_Cache_SdDirectOk(buf, len))
+    if (file_direct_ok(buf, len))
     {
-        return f->fs->ops.file_write(f->fs, f->fh, buf, len, put);
+        return fop_write(f, buf, len, put);
     }
     while (total < len)
     {
@@ -78,8 +229,10 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
         {
             chunk = (uint32_t)sizeof(g_file_bounce);
         }
+        bounce_lock();
         memcpy(g_file_bounce, in + total, chunk);
-        r = f->fs->ops.file_write(f->fs, f->fh, g_file_bounce, chunk, &wr);
+        r = fop_write(f, g_file_bounce, chunk, &wr);
+        bounce_unlock();
         total += wr;
         if (r != FM_OK || wr == 0u)
         {
@@ -90,10 +243,8 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
     return r;
 }
 #else
-#define file_read_backend(f, buf, len, got) \
-    ((f)->fs->ops.file_read((f)->fs, (f)->fh, (buf), (len), (got)))
-#define file_write_backend(f, buf, len, put) \
-    ((f)->fs->ops.file_write((f)->fs, (f)->fh, (buf), (len), (put)))
+#define file_read_backend(f, buf, len, got)  fop_read((f), (buf), (len), (got))
+#define file_write_backend(f, buf, len, put) fop_write((f), (buf), (len), (put))
 #endif
 
 /* The adapter file handles (e.g. POSIX `int fd`) are stored in the byte
@@ -141,12 +292,17 @@ static FM_Bool  g_cache_lock_init = FM_FALSE;
 
 static void cache_lock(void)
 {
+    /* Created by FileManager_Init() (FM_File_SyncInit).  The lazy path
+     * serves applications that skip it; creating under the VFS lock
+     * keeps two first-time callers from each making a mutex. */
     if (!g_cache_lock_init)
     {
-        if (FM_Mutex_Create(&g_cache_lock) == FM_OK)
+        FM_Lock();
+        if (!g_cache_lock_init && FM_Mutex_Create(&g_cache_lock) == FM_OK)
         {
             g_cache_lock_init = FM_TRUE;
         }
+        FM_Unlock();
     }
     if (g_cache_lock_init)
     {
@@ -320,7 +476,7 @@ static FM_Result cache_fill(FM_File *f, uint64_t block_off, FM_CacheLine **out)
 
     if (f->fs->ops.file_seek != NULL)
     {
-        r = f->fs->ops.file_seek(f->fs, f->fh, (int64_t)block_off,
+        r = fop_seek(f, (int64_t)block_off,
                                  FM_SEEK_SET);
         if (r != FM_OK)
         {
@@ -332,7 +488,7 @@ static FM_Result cache_fill(FM_File *f, uint64_t block_off, FM_CacheLine **out)
     {
         uint32_t rd = 0;
 
-        r = f->fs->ops.file_read(f->fs, f->fh, line->data + got,
+        r = fop_read(f, line->data + got,
                                  FM_CACHE_LINE_SIZE - got, &rd);
         if (r == FM_OK)
         {
@@ -373,7 +529,7 @@ static FM_Result cache_fill(FM_File *f, uint64_t block_off, FM_CacheLine **out)
     /* restore the logical file position */
     if (f->fs->ops.file_seek != NULL)
     {
-        (void)f->fs->ops.file_seek(f->fs, f->fh, (int64_t)save, FM_SEEK_SET);
+        (void)fop_seek(f, (int64_t)save, FM_SEEK_SET);
     }
     f->pos = save;
     *out = line;
@@ -421,6 +577,46 @@ void File_Init(FM_File *f)
     {
         memset(f, 0, sizeof(*f));
     }
+}
+
+void FM_File_SyncInit(void)
+{
+#if FM_USE_THREADS
+    FM_Lock();
+#if FM_USE_CACHE
+    if (!g_cache_lock_init && FM_Mutex_Create(&g_cache_lock) == FM_OK)
+    {
+        g_cache_lock_init = FM_TRUE;
+    }
+#endif
+#if FM_FILE_BOUNCE
+    if (!g_bounce_lock_init && FM_Mutex_Create(&g_bounce_lock) == FM_OK)
+    {
+        g_bounce_lock_init = FM_TRUE;
+    }
+#endif
+    FM_Unlock();
+#endif
+}
+
+void FM_File_SyncDeinit(void)
+{
+#if FM_USE_THREADS
+#if FM_USE_CACHE
+    if (g_cache_lock_init)
+    {
+        FM_Mutex_Destroy(&g_cache_lock);
+        g_cache_lock_init = FM_FALSE;
+    }
+#endif
+#if FM_FILE_BOUNCE
+    if (g_bounce_lock_init)
+    {
+        FM_Mutex_Destroy(&g_bounce_lock);
+        g_bounce_lock_init = FM_FALSE;
+    }
+#endif
+#endif
 }
 
 static void external_file_remove(FM_File *f)
@@ -514,6 +710,7 @@ void File_PoolUsedSplit(uint32_t *internal, uint32_t *external)
     uint32_t used = 0u;
     uint32_t ext = 0u;
 
+    FM_Lock();
     for (i = 0; i < FM_MAX_OPEN_FILES; i++)
     {
         if (g_pool[i].used)
@@ -525,6 +722,7 @@ void File_PoolUsedSplit(uint32_t *internal, uint32_t *external)
             ext++;
         }
     }
+    FM_Unlock();
     if (internal != NULL)
     {
         *internal = used;
@@ -560,14 +758,36 @@ void File_PoolDump(void)
            (unsigned)FM_MAX_OPEN_FILES);
     for (i = 0; i < FM_MAX_OPEN_FILES; i++)
     {
-        if (g_pool[i].used)
+        char path[FM_PATH_MAX];
+        FM_Bool have;
+
+        /* Copy the name out under the VFS lock and print without it: a
+         * log sink is user code and must not run under a table lock. */
+        FM_Lock();
+        have = g_pool[i].used ? FM_TRUE : FM_FALSE;
+        if (have)
         {
-            FM_Log("  [i%lu] %s\n", (unsigned long)i, g_pool[i].path);
+            (void)strncpy(path, g_pool[i].path, sizeof(path) - 1);
+            path[sizeof(path) - 1] = '\0';
         }
-        if (g_external_files[i] != NULL && g_external_files[i]->used)
+        FM_Unlock();
+        if (have)
         {
-            FM_Log("  [x%lu] %s\n", (unsigned long)i,
-                   g_external_files[i]->path);
+            FM_Log("  [i%lu] %s\n", (unsigned long)i, path);
+        }
+
+        FM_Lock();
+        have = (g_external_files[i] != NULL && g_external_files[i]->used)
+                   ? FM_TRUE : FM_FALSE;
+        if (have)
+        {
+            (void)strncpy(path, g_external_files[i]->path, sizeof(path) - 1);
+            path[sizeof(path) - 1] = '\0';
+        }
+        FM_Unlock();
+        if (have)
+        {
+            FM_Log("  [x%lu] %s\n", (unsigned long)i, path);
         }
     }
 }
@@ -596,13 +816,16 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
         return FM_ERR_INVALID_ARGUMENT;
     }
 
-    /* The caller has prepared f (pool slots are claimed under FM_Lock by
-     * file_acquire; user handles are memset by File_OpenEx).  Mark the
-     * handle busy BEFORE the backend open so the slot cannot be grabbed
-     * by another thread while the filesystem call is in progress. */
-    f->used = 1;
-
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    /* The caller has prepared f and marked it busy under FM_Lock (pool
+     * slots by file_acquire, user handles by File_OpenEx), so the slot
+     * cannot be grabbed by another thread while the backend opens the
+     * file.  f->used is not written here: an unlocked store would race
+     * with file_acquire() scanning the pool.
+     *
+     * The mount is pinned from the lookup until the handle itself keeps
+     * it alive, so FS_Unmount cannot pull the filesystem away between
+     * "path resolved" and "file open". */
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         file_release(f);
@@ -612,6 +835,7 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
     {
         /* Opening the mount root as a file is never meaningful and the
          * adapters disagree on it (POSIX would happily open "."). */
+        FM_VFS_Unpin(mount);
         file_release(f);
         return FM_ERR_IS_DIRECTORY;
     }
@@ -626,21 +850,29 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
     f->path[sizeof(f->path) - 1] = '\0';
     if (Path_Normalize(f->path, sizeof(f->path)) != FM_OK)
     {
+        FM_VFS_Unpin(mount);
         file_release(f);
         return FM_ERR_INVALID_PATH;
     }
     (void)strcpy(f->resolved, f->path);
 
-    r = fs->ops.file_open(fs, f->fh, rel, mode);
+    /* Publish the mount on the handle before the backend call: from here
+     * on FM_File_AnyOpenOnMount() sees it (it scans under FM_Lock). */
+    FM_Lock();
+    f->mount = (void *)mount;
+    f->fs = fs;
+    FM_Unlock();
+
+    FM_FS_CALL(mount, r, file_open(fs, f->fh, rel, mode));
     if (r != FM_OK)
     {
         file_release(f);
+        FM_VFS_Unpin(mount);
         return r;
     }
+    FM_VFS_Unpin(mount);
 
     f->mode = (uint8_t)mode;
-    f->mount = (void *)mount;
-    f->fs = fs;
 #if FM_USE_CACHE
     if (mode & FM_OPEN_TRUNCATE)
     {
@@ -654,18 +886,18 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
     /* refresh cached size / position */
     if (fs->ops.file_size != NULL)
     {
-        (void)fs->ops.file_size(fs, f->fh, &f->size);
+        (void)fop_size(f, &f->size);
     }
     if (fs->ops.file_tell != NULL)
     {
-        (void)fs->ops.file_tell(fs, f->fh, &f->pos);
+        (void)fop_tell(f, &f->pos);
     }
 
     if (mode & FM_OPEN_APPEND)
     {
         if (fs->ops.file_seek != NULL)
         {
-            (void)fs->ops.file_seek(fs, f->fh, (int64_t)f->size,
+            (void)fop_seek(f, (int64_t)f->size,
                                     FM_SEEK_SET);
             f->pos = f->size;
         }
@@ -717,19 +949,21 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
         return FM_ERR_BUSY;
     }
     memset(f, 0, sizeof(*f));
-    r = file_open_internal(f, path, mode);
-    if (r == FM_OK)
     {
         uint32_t i;
-        FM_EVENT_LOG("opened %s (mode 0x%lx)", path, (unsigned long)mode);
         FM_Bool registered = FM_FALSE;
 
+        /* Register BEFORE the backend open.  The registry is what
+         * FS_Unmount consults; a handle that is entered only after its
+         * file is open leaves a window in which the filesystem can be
+         * unmounted underneath it. */
         FM_Lock();
         for (i = 0; i < FM_MAX_OPEN_FILES; i++)
         {
             if (g_external_files[i] == NULL)
             {
                 g_external_files[i] = f;
+                f->used = 1;
                 registered = FM_TRUE;
                 break;
             }
@@ -737,9 +971,19 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
         FM_Unlock();
         if (!registered)
         {
-            (void)File_Close(f);
-            r = FM_ERR_NO_MEMORY;
+            FM_Core_SetLastError(FM_ERR_NO_MEMORY);
+            return FM_ERR_NO_MEMORY;
         }
+    }
+    r = file_open_internal(f, path, mode);
+    if (r == FM_OK)
+    {
+        FM_EVENT_LOG("opened %s (mode 0x%lx)", path, (unsigned long)mode);
+    }
+    else
+    {
+        external_file_remove(f);
+        file_release(f);
     }
     FM_Core_SetLastError(r);
     return r;
@@ -755,11 +999,11 @@ FM_Result File_Close(FM_File *f)
     }
     if (f->fs != NULL && f->fs->ops.file_flush != NULL)
     {
-        r = f->fs->ops.file_flush(f->fs, f->fh);
+        r = fop_flush(f);
     }
     if (f->fs != NULL && f->fs->ops.file_close != NULL)
     {
-        FM_Result close_result = f->fs->ops.file_close(f->fs, f->fh);
+        FM_Result close_result = fop_close(f);
 
         if (r == FM_OK)
         {
@@ -873,7 +1117,7 @@ FM_Result File_Read(FM_File *f, void *buf, uint32_t len, uint32_t *read)
                     /* f->size is this handle's snapshot; another handle
                      * may have appended since (F-13).  Ask the backend
                      * before declaring EOF. */
-                    (void)f->fs->ops.file_size(f->fs, f->fh, &f->size);
+                    (void)fop_size(f, &f->size);
                 }
                 if (f->size != 0 && block_off >= f->size)
                 {
@@ -917,7 +1161,7 @@ FM_Result File_Read(FM_File *f, void *buf, uint32_t len, uint32_t *read)
         {
             /* keep the backend position in sync with f->pos so File_Tell
              * still reflects the logical position after cached reads */
-            (void)f->fs->ops.file_seek(f->fs, f->fh, (int64_t)f->pos,
+            (void)fop_seek(f, (int64_t)f->pos,
                                        FM_SEEK_SET);
         }
         /* F-14: a short read is a success only at end of file.  A hard
@@ -1001,7 +1245,7 @@ FM_Result File_Append(FM_File *f, const void *buf, uint32_t len,
     }
     if (f->fs->ops.file_seek != NULL)
     {
-        r = f->fs->ops.file_seek(f->fs, f->fh, (int64_t)f->size,
+        r = fop_seek(f, (int64_t)f->size,
                                  FM_SEEK_SET);
         if (r != FM_OK)
         {
@@ -1024,10 +1268,10 @@ FM_Result File_Seek(FM_File *f, int64_t offset, FM_SeekOrigin origin)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    r = f->fs->ops.file_seek(f->fs, f->fh, offset, origin);
+    r = fop_seek(f, offset, origin);
     if (r == FM_OK && f->fs->ops.file_tell != NULL)
     {
-        (void)f->fs->ops.file_tell(f->fs, f->fh, &f->pos);
+        (void)fop_tell(f, &f->pos);
     }
     return r;
 }
@@ -1040,7 +1284,7 @@ FM_Result File_Tell(FM_File *f, uint64_t *pos)
     }
     if (f->fs->ops.file_tell != NULL)
     {
-        FM_Result r = f->fs->ops.file_tell(f->fs, f->fh, pos);
+        FM_Result r = fop_tell(f, pos);
 
         if (r == FM_OK)
         {
@@ -1060,7 +1304,7 @@ FM_Result File_Size(FM_File *f, uint64_t *size)
     }
     if (f->fs->ops.file_size != NULL)
     {
-        FM_Result r = f->fs->ops.file_size(f->fs, f->fh, size);
+        FM_Result r = fop_size(f, size);
 
         if (r == FM_OK)
         {
@@ -1084,7 +1328,7 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    r = f->fs->ops.file_truncate(f->fs, f->fh, size);
+    r = fop_truncate(f, size);
     if (r == FM_OK)
     {
 #if FM_USE_CACHE
@@ -1109,7 +1353,7 @@ FM_Result File_Flush(FM_File *f)
     }
     if (f->fs->ops.file_flush != NULL)
     {
-        return f->fs->ops.file_flush(f->fs, f->fh);
+        return fop_flush(f);
     }
     return FM_OK;
 }
@@ -1124,7 +1368,7 @@ FM_Bool File_EOF(FM_File *f)
     {
         uint64_t size = 0;
 
-        (void)f->fs->ops.file_size(f->fs, f->fh, &size);
+        (void)fop_size(f, &size);
         f->size = size;
     }
     return (f->pos >= f->size) ? FM_TRUE : FM_FALSE;
@@ -1152,7 +1396,7 @@ FM_Result File_Delete(const char *path)
     FM_Result r;
 
     FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         FM_ERR_LOG("delete %s: resolve failed (%d)", path, (int)r);
@@ -1161,11 +1405,13 @@ FM_Result File_Delete(const char *path)
     }
     if (rel[0] == '\0')
     {
+        FM_VFS_Unpin(mount);
         FM_ERR_LOG("delete: cannot delete mount root");
         return FM_ERR_INVALID_ARGUMENT;
     }
     if (mount->fs->ops.delete_file == NULL)
     {
+        FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
 #if FM_USE_CACHE
@@ -1173,7 +1419,8 @@ FM_Result File_Delete(const char *path)
     cache_invalidate_path(mount, rel);
     cache_unlock();
 #endif
-    r = mount->fs->ops.delete_file(mount->fs, rel);
+    FM_FS_CALL(mount, r, delete_file(mount->fs, rel));
+    FM_VFS_Unpin(mount);
     if (r == FM_OK)
     {
         FM_EVENT_LOG("deleted %s", path);
@@ -1191,10 +1438,13 @@ FM_Result File_Delete(const char *path)
  * renaming an entry onto itself -- however the two paths were spelled
  * ("/a/b" vs "/a/./b") -- is a no-op that never reaches the backend, so
  * an adapter that implements rename as "delete target, then move" cannot
- * lose the file.  A missing source is still reported. */
+ * lose the file.  A missing source is still reported.
+ * `m` must be pinned by the caller (FM_VFS_Pin). */
 static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
                                       const char *to)
 {
+    FM_Result r;
+
     if (m->fs->ops.rename == NULL)
     {
         return FM_ERR_UNSUPPORTED;
@@ -1205,7 +1455,8 @@ static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
         {
             FM_FileInfo info;
 
-            return m->fs->ops.stat(m->fs, from, &info);
+            FM_FS_CALL(m, r, stat(m->fs, from, &info));
+            return r;
         }
         return FM_OK;
     }
@@ -1215,7 +1466,8 @@ static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
     cache_invalidate_path(m, to);
     cache_unlock();
 #endif
-    return m->fs->ops.rename(m->fs, from, to);
+    FM_FS_CALL(m, r, rename(m->fs, from, to));
+    return r;
 }
 
 FM_Result File_Rename(const char *old_path, const char *new_path)
@@ -1226,7 +1478,7 @@ FM_Result File_Rename(const char *old_path, const char *new_path)
     char r2[FM_PATH_MAX];
     FM_Result r;
 
-    r = FM_VFS_Resolve(old_path, &m1, r1, sizeof(r1));
+    r = FM_VFS_Pin(old_path, &m1, r1, sizeof(r1));
     if (r != FM_OK)
     {
         return r;
@@ -1234,13 +1486,16 @@ FM_Result File_Rename(const char *old_path, const char *new_path)
     r = FM_VFS_Resolve(new_path, &m2, r2, sizeof(r2));
     if (r != FM_OK)
     {
+        FM_VFS_Unpin(m1);
         return r;
     }
     if (m1 != m2)
     {
+        FM_VFS_Unpin(m1);
         return FM_ERR_UNSUPPORTED; /* cross-mount rename: use Move */
     }
     r = file_rename_resolved(m1, r1, r2);
+    FM_VFS_Unpin(m1);
     FM_Core_SetLastError(r);
     return r;
 }
@@ -1300,7 +1555,7 @@ FM_Result File_GetInfo(const char *path, FM_FileInfo *info)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         FM_Core_SetLastError(r);
@@ -1308,10 +1563,12 @@ FM_Result File_GetInfo(const char *path, FM_FileInfo *info)
     }
     if (mount->fs->ops.stat == NULL)
     {
+        FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
     memset(info, 0, sizeof(*info));
-    r = mount->fs->ops.stat(mount->fs, rel, info);
+    FM_FS_CALL(mount, r, stat(mount->fs, rel, info));
+    FM_VFS_Unpin(mount);
     if (r == FM_OK)
     {
         char norm[FM_PATH_MAX];
@@ -1645,6 +1902,7 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
     char tmp[FM_PATH_MAX];
     const char *work_path;
     FM_Bool staged = FM_FALSE;
+    FM_Bool dst_can_rename = FM_FALSE;
     FM_File *src = NULL;
     FM_File *dst = NULL;
     FM_Result r;
@@ -1662,14 +1920,17 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
         r = FM_VFS_Resolve(src_path, &src_mount, src_rel, sizeof(src_rel));
         if (r == FM_OK)
         {
-            r = FM_VFS_Resolve(dst_path, &dst_mount, dst_rel,
-                               sizeof(dst_rel));
+            /* pinned only long enough to look at the adapter */
+            r = FM_VFS_Pin(dst_path, &dst_mount, dst_rel, sizeof(dst_rel));
         }
         if (r != FM_OK)
         {
             FM_Core_SetLastError(r);
             return r;
         }
+        dst_can_rename = (dst_mount->fs->ops.rename != NULL) ? FM_TRUE
+                                                             : FM_FALSE;
+        FM_VFS_Unpin(dst_mount);
         if (src_mount == dst_mount && strcmp(src_rel, dst_rel) == 0)
         {
             FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
@@ -1685,7 +1946,7 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
      *
      * Staging needs rename support and a name that fits; otherwise the
      * copy writes the destination directly and removes it on failure. */
-    if (dst_mount->fs->ops.rename != NULL &&
+    if (dst_can_rename &&
         strlen(dst_path) + sizeof(FM_FILE_TMP_SUFFIX) <= sizeof(tmp))
     {
         (void)strcpy(tmp, dst_path);
@@ -1767,10 +2028,14 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
         FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
         return FM_ERR_INVALID_ARGUMENT;
     }
-    r = FM_VFS_Resolve(src_path, &m1, r1, sizeof(r1));
+    r = FM_VFS_Pin(src_path, &m1, r1, sizeof(r1));
     if (r == FM_OK)
     {
         r = FM_VFS_Resolve(dst_path, &m2, r2, sizeof(r2));
+        if (r != FM_OK)
+        {
+            FM_VFS_Unpin(m1);
+        }
     }
     if (r != FM_OK)
     {
@@ -1782,9 +2047,11 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
     if (m1 == m2 && m1->fs->ops.rename != NULL)
     {
         r = file_rename_resolved(m1, r1, r2);
+        FM_VFS_Unpin(m1);
         FM_Core_SetLastError(r);
         return r;
     }
+    FM_VFS_Unpin(m1);
 
     /* Cross-mount: copy then delete.  If the source delete fails after a
      * successful copy, remove the destination copy so the operation stays

@@ -105,7 +105,8 @@ static FM_Result scan_cb(const FM_FileInfo *info, void *user_data)
     if (p->count == p->capacity)
     {
         uint32_t new_cap = (p->capacity == 0) ? 16 : p->capacity * 2;
-        FM_PlayerItem *items = (FM_PlayerItem *)FM_Realloc(p->items,
+        FM_PlayerItem *items = (FM_PlayerItem *)FM_ReallocSized(p->items,
+                            (size_t)p->capacity * sizeof(FM_PlayerItem),
                             (size_t)new_cap * sizeof(FM_PlayerItem));
 
         if (items == NULL)

@@ -84,6 +84,13 @@ ifeq ($(FM_USE_THREADS),1)
 CFLAGS  += -DFM_SYNC_CUSTOM -Iports/$(FM_SYNC_IMPL)
 ifeq ($(FM_SYNC_IMPL),pthread)
 LDFLAGS += -lpthread
+else
+# freertos / cmsis_rtos2 on the host: the real port header, with the few
+# kernel calls it uses implemented on pthreads (tools/rtosstub).  This is
+# what lets the suite run through those two ports at all.
+CFLAGS    += -Itools/rtosstub/$(FM_SYNC_IMPL)
+SYNC_HOST := tools/rtosstub/$(FM_SYNC_IMPL)/rtos_host.c
+LDFLAGS   += -lpthread
 endif
 endif
 
@@ -242,7 +249,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan ports check matrix matrix-asan matrix-quick
+.PHONY: all clean test examples examples_run asan tsan ports check matrix matrix-asan matrix-quick
 
 all: $(LIBS) fm_test
 
@@ -310,7 +317,7 @@ third_party/stb/%.o: third_party/stb/%.c
 
 # Test executable
 fm_test: test/main.c $(OBJS)
-	$(CC) $(CFLAGS) -o $@ test/main.c $(OBJS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -o $@ test/main.c $(SYNC_HOST) $(OBJS) $(LDFLAGS) -lm
 
 # ------------------------------------------------------------------
 # asan — the suite under AddressSanitizer + UndefinedBehaviorSanitizer
@@ -335,6 +342,34 @@ asan:
 		echo "sanitizer active ($$n symbols)"
 	@ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
 		./build-asan/fm_test
+	@$(MAKE) --no-print-directory clean >/dev/null
+
+# tsan — the suite with FM_USE_THREADS=1 under ThreadSanitizer.  Any
+# data race or lock-order inversion makes the run fail (exit code 66).
+# -Wno-error: the instrumentation makes gcc report a false
+# "may be used uninitialized" in src/fm_video.c.
+#   make tsan                        pthread port
+#   make tsan FM_SYNC_IMPL=freertos  (or cmsis_rtos2) through that port
+tsan:
+	@$(MAKE) --no-print-directory clean >/dev/null
+	@$(MAKE) --no-print-directory fm_test FM_USE_THREADS=1 \
+		FM_SYNC_IMPL=$(FM_SYNC_IMPL) \
+		CFLAGS_EXTRA="-g -O1 -fsanitize=thread -Wno-error" \
+		LDFLAGS="-fsanitize=thread -lpthread" >fm_tsan.log 2>&1 || \
+		{ grep -E ": error|undefined reference" fm_tsan.log | head -20; exit 1; }
+	@n=$$(nm fm_test | grep -c __tsan); \
+		if [ "$$n" -eq 0 ]; then \
+			echo "ERROR: ThreadSanitizer not linked in"; exit 1; \
+		fi; \
+		echo "ThreadSanitizer active ($$n symbols)"
+	@TSAN_OPTIONS="halt_on_error=0 second_deadlock_stack=1 exitcode=66" \
+		./fm_test > fm_tsan.log 2>&1; rc=$$?; \
+		grep -E "Results:|FAIL" fm_tsan.log; \
+		echo "ThreadSanitizer warnings: $$(grep -c 'WARNING: ThreadSanitizer' fm_tsan.log)"; \
+		if [ $$rc -ne 0 ]; then \
+			grep -A12 'WARNING: ThreadSanitizer' fm_tsan.log | head -60; \
+			echo "full log: fm_tsan.log"; exit 1; \
+		fi; rm -f fm_tsan.log
 	@$(MAKE) --no-print-directory clean >/dev/null
 
 # ports — every supported MCU family must still compile
@@ -394,7 +429,7 @@ check: test cachetest videohooks ex33test tapstest asan ports
 
 clean:
 	rm -rf build-asan
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest fm_tsan.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

@@ -392,7 +392,11 @@ static FM_Result video_read_at(FM_File *f, uint64_t offset, void *data,
 static FM_VideoPriv *video_priv_alloc(void)
 {
     uint32_t i;
+    FM_VideoPriv *p = NULL;
 
+    /* The slot is claimed under the VFS lock: two tasks opening a video
+     * at the same time must not both be handed slot 0. */
+    FM_Lock();
     if (!g_video_sdram_inited)
     {
         memset(g_video, 0, sizeof(g_video));
@@ -404,10 +408,12 @@ static FM_VideoPriv *video_priv_alloc(void)
         {
             memset(&g_video[i], 0, sizeof(g_video[i]));
             g_video[i].in_use = FM_TRUE;
-            return &g_video[i];
+            p = &g_video[i];
+            break;
         }
     }
-    return NULL;
+    FM_Unlock();
+    return p;
 }
 
 /* Registry name of the decoder a compressed audio track needs, or NULL
@@ -470,7 +476,9 @@ static void video_priv_free(FM_VideoPriv *p)
         p->scratch_cap = 0u;
         p->rgb_scratch = NULL;
         p->rgb_scratch_cap = 0u;
+        FM_Lock();
         p->in_use = FM_FALSE;
+        FM_Unlock();
     }
 }
 

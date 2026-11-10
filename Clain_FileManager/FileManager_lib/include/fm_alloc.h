@@ -13,6 +13,19 @@
  *     FM_Allocator_Set(&ext);
  *
  * The default allocator is malloc/calloc/realloc/free.
+ *
+ * `calloc` and `realloc` may be NULL.  calloc is then built from
+ * alloc + memset.  realloc cannot be built from alloc/free alone (the
+ * old block size is unknown), so without it FM_Realloc() only accepts
+ * the trivial cases (NULL block, size 0) and returns NULL for a real
+ * resize, leaving the block valid; use FM_ReallocSized(), which works
+ * with every allocator.  The library itself only uses FM_ReallocSized().
+ *
+ * Thread safety (FM_USE_THREADS=1): the library calls the allocator
+ * from whichever task runs a decoder or the playlist, without holding
+ * any library lock.  A custom allocator must therefore be thread-safe
+ * itself, and FM_Allocator_Set() must not be called while another task
+ * is inside the library.
  */
 
 #ifndef FM_ALLOC_H
@@ -47,6 +60,10 @@ unsigned long FM_Alloc_FailureCount(void);
 void *FM_Alloc(size_t size);
 void *FM_Calloc(size_t n, size_t size);
 void *FM_Realloc(void *p, size_t size);
+/* Resize a block whose current size the caller knows.  Uses the
+ * allocator's realloc when it has one, alloc + copy + free otherwise.
+ * On failure NULL is returned and `p` stays valid. */
+void *FM_ReallocSized(void *p, size_t old_size, size_t new_size);
 void  FM_Free(void *p);
 
 #ifdef __cplusplus

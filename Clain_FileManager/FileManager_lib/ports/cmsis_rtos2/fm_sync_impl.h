@@ -54,4 +54,18 @@ static inline void FM_Mutex_Destroy(FM_Mutex *m)
     }
 }
 
+/* Thread identity (optional part of a sync port, see fm_sync.h). */
+#define FM_SYNC_HAS_THREAD_SELF 1
+typedef osThreadId_t FM_ThreadId;
+
+static inline FM_ThreadId FM_Thread_Self(void)
+{
+    return osThreadGetId();
+}
+
+static inline int FM_Thread_Equal(FM_ThreadId a, FM_ThreadId b)
+{
+    return a == b;
+}
+
 #endif /* FM_SYNC_IMPL_CMSIS_RTOS2_H */

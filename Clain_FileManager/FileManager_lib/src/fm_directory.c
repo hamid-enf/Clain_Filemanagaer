@@ -16,6 +16,39 @@ typedef char fm_dir_fh_aligned[
 static FM_Dir g_dir_pool[FM_MAX_OPEN_DIRS];
 static FM_Dir *g_external_dirs[FM_DIR_MAX_DEPTH + 1];
 
+/* Backend calls on an open directory handle, made with the mount's
+ * backend lock held (see fm_file.c / FM_Mount_Lock).  The handle keeps
+ * its mount alive, so d->mount / d->fs are stable. */
+static FM_Result dop_close(FM_Dir *d)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(d->mount);
+    r = d->fs->ops.dir_close(d->fs, d->fh);
+    FM_Mount_Unlock(d->mount);
+    return r;
+}
+
+static FM_Result dop_read(FM_Dir *d, FM_DirEntry *entry)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(d->mount);
+    r = d->fs->ops.dir_read(d->fs, d->fh, entry);
+    FM_Mount_Unlock(d->mount);
+    return r;
+}
+
+static FM_Result dop_open(FM_Dir *d, const char *rel)
+{
+    FM_Result r;
+
+    FM_Mount_Lock(d->mount);
+    r = d->fs->ops.dir_open(d->fs, d->fh, rel);
+    FM_Mount_Unlock(d->mount);
+    return r;
+}
+
 void Directory_Init(FM_Dir *d)
 {
     if (d != NULL)
@@ -127,7 +160,7 @@ FM_Result Directory_Create(const char *path)
     char rel[FM_PATH_MAX];
     FM_Result r;
 
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         FM_Core_SetLastError(r);
@@ -135,13 +168,15 @@ FM_Result Directory_Create(const char *path)
     }
     if (mount->fs->ops.mkdir == NULL)
     {
+        FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
 
     /* Fast path: try the full path first. */
-    r = mount->fs->ops.mkdir(mount->fs, rel);
+    FM_FS_CALL(mount, r, mkdir(mount->fs, rel));
     if (r == FM_OK || r != FM_ERR_NOT_FOUND)
     {
+        FM_VFS_Unpin(mount);
         FM_Core_SetLastError(r == FM_ERR_EXISTS ? FM_OK : r);
         return (r == FM_ERR_EXISTS) ? FM_OK : r;
     }
@@ -169,9 +204,10 @@ FM_Result Directory_Create(const char *path)
                 }
                 prefix[k] = '\0';
 
-                r = mount->fs->ops.mkdir(mount->fs, prefix);
+                FM_FS_CALL(mount, r, mkdir(mount->fs, prefix));
                 if (r != FM_OK && r != FM_ERR_EXISTS)
                 {
+                    FM_VFS_Unpin(mount);
                     FM_Core_SetLastError(r);
                     return r;
                 }
@@ -179,6 +215,7 @@ FM_Result Directory_Create(const char *path)
         }
     }
 
+    FM_VFS_Unpin(mount);
     FM_Core_SetLastError(FM_OK);
     return FM_OK;
 }
@@ -189,7 +226,7 @@ FM_Result Directory_Delete(const char *path)
     char rel[FM_PATH_MAX];
     FM_Result r;
 
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         return r;
@@ -197,13 +234,16 @@ FM_Result Directory_Delete(const char *path)
     if (rel[0] == '\0')
     {
         /* Deleting the mount root itself is never meaningful. */
+        FM_VFS_Unpin(mount);
         return FM_ERR_INVALID_ARGUMENT;
     }
     if (mount->fs->ops.rmdir == NULL)
     {
+        FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
-    r = mount->fs->ops.rmdir(mount->fs, rel);
+    FM_FS_CALL(mount, r, rmdir(mount->fs, rel));
+    FM_VFS_Unpin(mount);
     FM_Core_SetLastError(r);
     return r;
 }
@@ -239,7 +279,7 @@ FM_Result Directory_Rename(const char *old_path, const char *new_path)
     char r2[FM_PATH_MAX];
     FM_Result r;
 
-    r = FM_VFS_Resolve(old_path, &m1, r1, sizeof(r1));
+    r = FM_VFS_Pin(old_path, &m1, r1, sizeof(r1));
     if (r != FM_OK)
     {
         return r;
@@ -247,17 +287,16 @@ FM_Result Directory_Rename(const char *old_path, const char *new_path)
     r = FM_VFS_Resolve(new_path, &m2, r2, sizeof(r2));
     if (r != FM_OK)
     {
+        FM_VFS_Unpin(m1);
         return r;
     }
-    if (m1 != m2)
+    if (m1 != m2 || m1->fs->ops.rename == NULL)
     {
+        FM_VFS_Unpin(m1);
         return FM_ERR_UNSUPPORTED;
     }
-    if (m1->fs->ops.rename == NULL)
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
-    r = m1->fs->ops.rename(m1->fs, r1, r2);
+    FM_FS_CALL(m1, r, rename(m1->fs, r1, r2));
+    FM_VFS_Unpin(m1);
     FM_Core_SetLastError(r);
     return r;
 }
@@ -272,17 +311,19 @@ FM_Result Directory_GetInfo(const char *path, FM_FileInfo *info)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
     if (r != FM_OK)
     {
         return r;
     }
     if (mount->fs->ops.stat == NULL)
     {
+        FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
     memset(info, 0, sizeof(*info));
-    r = mount->fs->ops.stat(mount->fs, rel, info);
+    FM_FS_CALL(mount, r, stat(mount->fs, rel, info));
+    FM_VFS_Unpin(mount);
     if (r == FM_OK)
     {
         char normalized[FM_PATH_MAX];
@@ -316,64 +357,28 @@ FM_Result Directory_OpenEx(FM_Dir *d, const char *path)
         return FM_ERR_INVALID_ARGUMENT;
     }
     from_pool = dir_is_pool(d);
-    if (d->used && !from_pool)
-    {
-        return FM_ERR_BUSY;
-    }
-    if (!from_pool)
-    {
-        memset(d, 0, sizeof(*d));
-    }
-    /* Pool slots are claimed (used=1) by dir_acquire under FM_Lock; mark
-     * user handles busy as well so the handle stays owned while the
-     * backend opens the directory. */
-    d->used = 1;
-
-    r = FM_VFS_Resolve(path, &mount, rel, sizeof(rel));
-    if (r != FM_OK)
-    {
-        dir_release(d);
-        return r;
-    }
-    if (mount->fs->ops.dir_open == NULL)
-    {
-        dir_release(d);
-        return FM_ERR_UNSUPPORTED;
-    }
-    if (strlen(path) >= sizeof(normalized))
-    {
-        dir_release(d);
-        return FM_ERR_TOO_LARGE;
-    }
-    (void)strcpy(normalized, path);
-    if (Path_Normalize(normalized, sizeof(normalized)) != FM_OK)
-    {
-        dir_release(d);
-        return FM_ERR_INVALID_PATH;
-    }
-
-    r = mount->fs->ops.dir_open(mount->fs, d->fh, rel);
-    if (r != FM_OK)
-    {
-        dir_release(d);
-        return r;
-    }
-    d->mount = (void *)mount;
-    d->fs = mount->fs;
-    (void)strcpy(d->path, normalized);
-    (void)strcpy(d->resolved, rel);
-
     if (!from_pool)
     {
         uint32_t i;
         FM_Bool registered = FM_FALSE;
 
+        if (d->used)
+        {
+            return FM_ERR_BUSY;
+        }
+        memset(d, 0, sizeof(*d));
+
+        /* Register the user handle BEFORE the backend open: the registry
+         * is what FS_Unmount consults, so a handle entered only after
+         * its directory is open could lose the filesystem in between.
+         * Pool slots are already claimed (used=1) by dir_acquire. */
         FM_Lock();
         for (i = 0; i < FM_DIR_MAX_DEPTH + 1u; i++)
         {
             if (g_external_dirs[i] == NULL)
             {
                 g_external_dirs[i] = d;
+                d->used = 1;
                 registered = FM_TRUE;
                 break;
             }
@@ -381,22 +386,75 @@ FM_Result Directory_OpenEx(FM_Dir *d, const char *path)
         FM_Unlock();
         if (!registered)
         {
-            if (mount->fs->ops.dir_close != NULL)
-            {
-                (void)mount->fs->ops.dir_close(mount->fs, d->fh);
-            }
-            memset(d, 0, sizeof(*d));
             return FM_ERR_NO_MEMORY;
         }
     }
+
+    /* The mount stays pinned from the lookup until the handle itself
+     * keeps it alive (FM_Dir_AnyOpenOnMount). */
+    r = FM_VFS_Pin(path, &mount, rel, sizeof(rel));
+    if (r == FM_OK)
+    {
+        if (mount->fs->ops.dir_open == NULL)
+        {
+            r = FM_ERR_UNSUPPORTED;
+        }
+        else if (strlen(path) >= sizeof(normalized))
+        {
+            r = FM_ERR_TOO_LARGE;
+        }
+        else
+        {
+            (void)strcpy(normalized, path);
+            if (Path_Normalize(normalized, sizeof(normalized)) != FM_OK)
+            {
+                r = FM_ERR_INVALID_PATH;
+            }
+        }
+        if (r == FM_OK)
+        {
+            FM_Lock();
+            d->mount = (void *)mount;
+            d->fs = mount->fs;
+            FM_Unlock();
+            r = dop_open(d, rel);
+        }
+        FM_VFS_Unpin(mount);
+    }
+    if (r != FM_OK)
+    {
+        if (from_pool)
+        {
+            dir_release(d);
+        }
+        else
+        {
+            external_dir_remove(d);
+            memset(d, 0, sizeof(*d));
+        }
+        return r;
+    }
+    (void)strcpy(d->path, normalized);
+    (void)strcpy(d->resolved, rel);
     return FM_OK;
 }
 
 FM_Dir *Directory_Open(const char *path)
 {
-    FM_Dir *d = dir_acquire();
+    FM_Dir *d;
     FM_Result r;
 
+    /* Validate BEFORE claiming a pool slot: Directory_OpenEx rejects a
+     * NULL path without releasing the handle it was given, so every
+     * Directory_Open(NULL) -- and every Directory_List / Count / Size
+     * (NULL, ...) built on it -- used to leak one of the
+     * FM_MAX_OPEN_DIRS slots for good. */
+    if (path == NULL)
+    {
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+    d = dir_acquire();
     if (d == NULL)
     {
         FM_Core_SetLastError(FM_ERR_NO_MEMORY);
@@ -423,7 +481,7 @@ FM_Result Directory_Close(FM_Dir *d)
     }
     if (d->fs != NULL && d->fs->ops.dir_close != NULL)
     {
-        r = d->fs->ops.dir_close(d->fs, d->fh);
+        r = dop_close(d);
     }
     if (dir_is_pool(d))
     {
@@ -448,7 +506,7 @@ FM_Result Directory_Read(FM_Dir *d, FM_DirEntry *entry)
         return FM_ERR_UNSUPPORTED;
     }
     memset(entry, 0, sizeof(*entry));
-    return d->fs->ops.dir_read(d->fs, d->fh, entry);
+    return dop_read(d, entry);
 }
 
 FM_Result Directory_Rewind(FM_Dir *d)
@@ -459,14 +517,13 @@ FM_Result Directory_Rewind(FM_Dir *d)
     }
     /* Re-open the directory on the same handle. */
     {
-        FM_MountEntry *mount = (FM_MountEntry *)d->mount;
         FM_Result r;
 
         if (d->fs->ops.dir_close != NULL)
         {
-            (void)d->fs->ops.dir_close(d->fs, d->fh);
+            (void)dop_close(d);
         }
-        r = d->fs->ops.dir_open(mount->fs, d->fh, d->resolved);
+        r = dop_open(d, d->resolved);
         if (r != FM_OK)
         {
             if (dir_is_pool(d))
@@ -941,10 +998,91 @@ static FM_Result dir_copy_recursive(const char *src, const char *dst,
     return FM_OK;
 }
 
+/* How `b` relates to directory `a`: 0 unrelated, 1 the same path,
+ * 2 `b` lies inside `a`.  Both are normalised first, so "/x/", "/x/."
+ * and "/x" compare equal. */
+static FM_Result dir_relation(const char *a, const char *b, int *rel)
+{
+    char na[FM_PATH_MAX];
+    char nb[FM_PATH_MAX];
+    size_t la;
+
+    *rel = 0;
+    if (a == NULL || b == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (strlen(a) >= sizeof(na) || strlen(b) >= sizeof(nb))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    (void)strcpy(na, a);
+    (void)strcpy(nb, b);
+    if (Path_Normalize(na, sizeof(na)) != FM_OK ||
+        Path_Normalize(nb, sizeof(nb)) != FM_OK)
+    {
+        return FM_ERR_INVALID_PATH;
+    }
+    la = strlen(na);
+    while (la > 1u && na[la - 1u] == '/')
+    {
+        na[--la] = '\0';
+    }
+    {
+        size_t lb = strlen(nb);
+
+        while (lb > 1u && nb[lb - 1u] == '/')
+        {
+            nb[--lb] = '\0';
+        }
+    }
+    if (strcmp(na, nb) == 0)
+    {
+        *rel = 1;
+    }
+    else if (strcmp(na, "/") == 0 ||
+             (strncmp(nb, na, la) == 0 && nb[la] == '/'))
+    {
+        *rel = 2;
+    }
+    return FM_OK;
+}
+
 FM_Result Directory_Copy(const char *src, const char *dst,
                          FM_ProgressCallback progress, void *user_data)
 {
-    return dir_copy_recursive(src, dst, progress, user_data, 0);
+    FM_Bool existed = FM_FALSE;
+    int rel = 0;
+    FM_Result r;
+
+    /* A tree copied into itself never ends: every pass finds the folder
+     * the previous pass created, until the path limit or the disk stops
+     * it. */
+    r = dir_relation(src, dst, &rel);
+    if (r == FM_OK && rel != 0)
+    {
+        r = FM_ERR_INVALID_ARGUMENT;
+    }
+    if (r != FM_OK)
+    {
+        FM_Core_SetLastError(r);
+        return r;
+    }
+    if (Directory_Exists(dst, &existed) != FM_OK)
+    {
+        existed = FM_TRUE;              /* unknown: never clean up */
+    }
+    r = dir_copy_recursive(src, dst, progress, user_data, 0);
+    if (r != FM_OK && !existed)
+    {
+        /* The destination did not exist before, so everything in it is
+         * the unfinished copy: do not leave half a tree behind.  (When
+         * copying INTO an existing folder nothing is removed -- there
+         * is no telling which files were already there.) */
+        (void)Directory_DeleteRecursive(dst);
+    }
+    FM_Core_SetLastError(r);
+    return r;
 }
 
 FM_Result Directory_Move(const char *src, const char *dst,
@@ -955,28 +1093,56 @@ FM_Result Directory_Move(const char *src, const char *dst,
     char r1[FM_PATH_MAX];
     char r2[FM_PATH_MAX];
     FM_Result r;
+    int rel = 0;
 
-    if (FM_VFS_Resolve(src, &m1, r1, sizeof(r1)) != FM_OK)
+    r = dir_relation(src, dst, &rel);
+    if (r == FM_OK && rel == 2)
+    {
+        r = FM_ERR_INVALID_ARGUMENT;    /* a folder cannot move into itself */
+    }
+    if (r != FM_OK)
+    {
+        FM_Core_SetLastError(r);
+        return r;
+    }
+    if (rel == 1)
+    {
+        /* onto itself: nothing to do, as long as it exists */
+        FM_Bool there = FM_FALSE;
+
+        r = Directory_Exists(src, &there);
+        if (r == FM_OK && !there)
+        {
+            r = FM_ERR_NOT_FOUND;
+        }
+        FM_Core_SetLastError(r);
+        return r;
+    }
+    if (FM_VFS_Pin(src, &m1, r1, sizeof(r1)) != FM_OK)
     {
         return FM_ERR_NOT_FOUND;
     }
     if (FM_VFS_Resolve(dst, &m2, r2, sizeof(r2)) == FM_OK && m1 == m2 &&
         m1->fs->ops.rename != NULL)
     {
-        r = m1->fs->ops.rename(m1->fs, r1, r2);
+        FM_FS_CALL(m1, r, rename(m1->fs, r1, r2));
+        FM_VFS_Unpin(m1);
         FM_Core_SetLastError(r);
         return r;
     }
+    FM_VFS_Unpin(m1);
     r = Directory_Copy(src, dst, progress, user_data);
     if (r != FM_OK)
     {
         return r;
     }
+    /* The copy is complete.  If removing the source now fails part way,
+     * the destination is the only place that still has everything, so
+     * it must stay: the old "rollback" deleted it, and with it every
+     * file that had already been removed from the source.  The caller
+     * gets the error; the source may be partly gone, the destination is
+     * whole. */
     r = Directory_DeleteRecursive(src);
-    if (r != FM_OK)
-    {
-        (void)Directory_DeleteRecursive(dst); /* rollback: undo the copy */
-    }
     FM_Core_SetLastError(r);
     return r;
 }

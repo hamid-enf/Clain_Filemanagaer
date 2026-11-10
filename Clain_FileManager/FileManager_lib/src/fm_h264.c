@@ -642,8 +642,35 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
     return saw_slice ? FM_ERR_INVALID_FORMAT : FM_ERR_NOT_READY;
 }
 
+static FM_Result h264_decode_claimed(void *ctx, const void *compressed,
+                                     size_t size, void *frame_out,
+                                     size_t frame_cap);
+
+/* One H.264 access unit at a time, library-wide.  The decoder instance
+ * (H264Ctx) is per video, but a decode also runs on process-wide state:
+ * the last-error diagnostics (g_h264_diag, which the retry / NO_MEMORY
+ * classification below reads back), h264bsd's own failure latches
+ * (h264bsdLastActivateFail ...) and the allocator failure counter.  Two
+ * tasks decoding two clips would mix them up -- e.g. report one clip's
+ * exhausted pool as the other's FM_ERR_NO_MEMORY.  A second task waits;
+ * a nested decode from the FM_SetIdle hook gets FM_ERR_BUSY. */
 static FM_Result h264_decode(void *ctx, const void *compressed, size_t size,
                              void *frame_out, size_t frame_cap)
+{
+    FM_Result r = FM_Scratch_Enter(FM_SCRATCH_H264);
+
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    r = h264_decode_claimed(ctx, compressed, size, frame_out, frame_cap);
+    FM_Scratch_Leave(FM_SCRATCH_H264);
+    return r;
+}
+
+static FM_Result h264_decode_claimed(void *ctx, const void *compressed,
+                                     size_t size, void *frame_out,
+                                     size_t frame_cap)
 {
     H264Ctx *h = (H264Ctx *)ctx;
     const uint8_t *stream = (const uint8_t *)compressed;

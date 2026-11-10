@@ -101,8 +101,13 @@ static const FM_AudioDecoderOps g_vorbis_ops = {
     fm_vorbis_do_close
 };
 
+/* FileManager patch in third_party/stb/stb_vorbis.c */
+extern void stb_vorbis_fm_init(void);
+
 FM_Result FM_Vorbis_Init(void)
 {
+    /* build stb_vorbis' CRC table now, single threaded (see the patch) */
+    stb_vorbis_fm_init();
     return Audio_RegisterDecoder("VORBIS", &g_vorbis_ops);
 }
 

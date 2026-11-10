@@ -435,9 +435,8 @@ AudioWriter_Close(&w);
 
 ## Thread safety
 
-With `FM_USE_THREADS=1` the registries (storage, filesystem, mounts, open
-file/dir/stream pools) are protected by a small mutex abstraction
-(`fm_sync.h`).  Pick a port with `FM_SYNC_CUSTOM` + the include path:
+With `FM_USE_THREADS=1` several tasks may use the library at the same
+time.  Pick a sync port with `FM_SYNC_CUSTOM` + its include path:
 
 | Port | Path | Target |
 |------|------|--------|
@@ -445,11 +444,83 @@ file/dir/stream pools) are protected by a small mutex abstraction
 | CMSIS-RTOS2 | `ports/cmsis_rtos2` | STM32Cube, Cortex-M |
 | pthread | `ports/pthread` | host testing, desktop tools |
 
-Concurrent read/write on the *same open file* is left to the application;
-the core guarantees structural safety of the global tables, the open-file
-pools and the read-cache.  The internal scratch buffer used by
-`File_Copy`/`File_Insert`/`Json_LoadString` is thread-local in threaded
-builds (GCC-style TLS, available on arm-none-eabi-gcc and ESP-IDF).
+A port supplies a plain mutex and (all three shipped ports do) the
+identity of the calling task; a custom port is one header,
+`fm_sync_impl.h` — see `include/fm_sync.h` for the contract.
+
+**Rules for the application**
+
+- Call `FileManager_Init()` once, **before** the tasks that use the
+  library start: it creates every lock.  Call `FileManager_Deinit()`
+  only after those tasks have stopped.
+- One open handle (`FM_File`, `FM_Dir`, `FM_Stream`, `FM_Audio`,
+  `FM_Video`) belongs to one task at a time.  Different tasks may work
+  on different handles — also of the same file, on the same volume —
+  freely.
+- Install `FM_Allocator`, log sink, codec registrations and idle/busy
+  hooks before the tasks start (or from one task while the others are
+  not inside the library).  A custom `FM_Allocator` must be thread-safe
+  itself.
+
+**What the library guarantees**
+
+- Every filesystem adapter and storage driver is entered by one task at
+  a time **per mounted volume**.  FatFS, LittleFS, FMFS and your own
+  storage callbacks need no locking of their own; two volumes still run
+  in parallel.
+- Mount table, storage registry and all handle pools are consistent.
+  `FS_Unmount()` and `FS_Format()` return `FM_ERR_BUSY` while a file or
+  directory on the volume is open or another task is in the middle of
+  an operation on it — a volume can no longer disappear underneath a
+  running call.
+- The shared scratch resources — copy buffer (`File_Copy`,
+  `Directory_Copy`, `File_Insert`…), transfer buffer (`FM_Transfer_*`),
+  image codec state (PNG/JPEG/MJPEG) and the H.264 decoder — are used by
+  one task at a time.  **Another task waits its turn; a nested call from
+  the task that already holds the resource** (from a progress callback
+  or the idle hook) **gets `FM_ERR_BUSY`** instead of dead-locking or
+  corrupting the operation in flight.  With a sync port that cannot
+  name the calling task the library cannot tell the two cases apart and
+  never waits: every second user gets `FM_ERR_BUSY` and retries.
+- `File_GetLastError()` is per task (for the `FM_LAST_ERROR_THREADS`
+  most recently active tasks), so the reason for a `File_Open()` that
+  returned `NULL` is not overwritten by another task's success.
+- User callbacks (progress, idle, storage events, log sink) are never
+  called with an internal table lock held, so they may call back into
+  the library.
+- No thread-local storage is used (on bare-metal toolchains `__thread`
+  is one copy per program, not per RTOS task).
+
+Cost in RAM: one mutex per mount slot plus eleven global ones; a log
+message is formatted on the calling task's stack (`FM_LOG_BUF_SIZE`
+bytes) instead of in a shared static buffer.
+
+**How it is verified.**  `make tsan` runs the whole suite with four
+tasks hammering three mounted filesystems (POSIX, FMFS, LittleFS),
+transfers, the registries and every media decoder under ThreadSanitizer
+— zero reports is the pass criterion.  The same suite also runs through
+the FreeRTOS and CMSIS-RTOS2 port headers (`make tsan
+FM_SYNC_IMPL=freertos`, kernel calls provided by `tools/rtosstub`), and
+with every read/write forced through the DMA bounce buffer
+(`-DFM_FILE_FORCE_BOUNCE`), which host builds otherwise bypass.  What a
+host run cannot show is real interrupt/priority behaviour on the target.
+
+### FMFS notes
+
+- Space is reclaimed automatically: when the tail of the data area is
+  used up, a write compacts the area (and, if needed, rotates the
+  growing file to the end) before it reports `FM_ERR_NO_SPACE`.  A write
+  therefore fails for lack of space only when the live data really does
+  not fit, and `FS_GetFreeSpace()` reports capacity minus live data.
+  `FMFS_Repack()` does the same compaction on request; open handles stay
+  valid across it.
+- Metadata is rewritten only when it changes: reading a file, closing a
+  handle, and overwriting bytes in place do not touch the table.
+- A handle whose file was deleted or replaced by a rename returns
+  `FM_ERR_NOT_FOUND`; it can never reach the file that reuses the slot.
+- Compaction moves data in place and is **not power-fail safe**: a reset
+  in the middle of a compaction can leave files damaged.  Use LittleFS
+  where that matters.
 
 ## Examples
 

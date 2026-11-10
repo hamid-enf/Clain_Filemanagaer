@@ -146,7 +146,7 @@ FM_Result Stream_InitFile(FM_Stream *s, FM_File *f)
         {
             ctx = &g_file_pool[i];
             ctx->busy = FM_TRUE;
-            break;
+                    break;
         }
     }
     FM_Unlock();
@@ -154,7 +154,6 @@ FM_Result Stream_InitFile(FM_Stream *s, FM_File *f)
     {
         return FM_ERR_NO_MEMORY;
     }
-    ctx->stream = s;
     ctx->file = f;
     ctx->owner = FM_FALSE;
     s->ctx = ctx;
@@ -193,15 +192,21 @@ static FM_MemStreamCtx g_mem_pool[FM_STREAM_POOL];
 static FM_Bool stream_is_bound(const FM_Stream *s)
 {
     uint32_t i;
+    FM_Bool bound = FM_FALSE;
 
+    /* the .stream back-pointers are written under FM_Lock by the
+     * Stream_Init* functions and the close handlers of other tasks */
+    FM_Lock();
     for (i = 0; i < FM_STREAM_POOL; i++)
     {
         if (g_file_pool[i].stream == s || g_mem_pool[i].stream == s)
         {
-            return FM_TRUE;
+            bound = FM_TRUE;
+            break;
         }
     }
-    return FM_FALSE;
+    FM_Unlock();
+    return bound;
 }
 
 static FM_Result ms_read(FM_Stream *s, void *buf, size_t len, size_t *read)
@@ -351,7 +356,7 @@ static void ms_close(FM_Stream *s)
     memset(s, 0, sizeof(*s));
 }
 
-static FM_MemStreamCtx *mem_acquire(void)
+static FM_MemStreamCtx *mem_acquire(FM_Stream *s)
 {
     uint32_t i;
 
@@ -361,6 +366,7 @@ static FM_MemStreamCtx *mem_acquire(void)
         if (!g_mem_pool[i].busy)
         {
             g_mem_pool[i].busy = FM_TRUE;
+            g_mem_pool[i].stream = s;
             FM_Unlock();
             return &g_mem_pool[i];
         }
@@ -382,12 +388,11 @@ FM_Result Stream_InitMemoryRead(FM_Stream *s, const void *data, size_t size)
         return FM_ERR_BUSY; /* close the previous stream first */
     }
     memset(s, 0, sizeof(*s));
-    ctx = mem_acquire();
+    ctx = mem_acquire(s);
     if (ctx == NULL)
     {
         return FM_ERR_NO_MEMORY;
     }
-    ctx->stream = s;
     ctx->data = (const uint8_t *)data;
     ctx->wdata = NULL;
     ctx->size = size;
@@ -419,12 +424,11 @@ FM_Result Stream_InitMemoryWrite(FM_Stream *s, void *data, size_t capacity)
         return FM_ERR_BUSY; /* close the previous stream first */
     }
     memset(s, 0, sizeof(*s));
-    ctx = mem_acquire();
+    ctx = mem_acquire(s);
     if (ctx == NULL)
     {
         return FM_ERR_NO_MEMORY;
     }
-    ctx->stream = s;
     ctx->data = (const uint8_t *)data;
     ctx->wdata = (uint8_t *)data;
     ctx->size = 0;

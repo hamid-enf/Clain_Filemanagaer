@@ -31,30 +31,19 @@ static uint8_t g_xfer_buf[XFER_BUF_SIZE];
 #endif
 
 /* F-11 (b): the staging buffer is one static object.  A transfer started
- * while another one is running -- from the progress callback, or from a
- * second thread -- would overwrite the chunk in flight.  The nested /
- * concurrent call gets FM_ERR_BUSY instead. */
-static uint8_t g_xfer_busy;
-
+ * while another one is running would overwrite the chunk in flight, so
+ * every transfer holds the FM_SCRATCH_XFER claim: a transfer started
+ * from the progress callback (nested) gets FM_ERR_BUSY, one started by
+ * a second task waits for the first to finish.  (A sync port without
+ * thread identity cannot tell the two apart: FM_ERR_BUSY for both.) */
 static FM_Bool xfer_acquire(void)
 {
-    FM_Bool ok = FM_FALSE;
-
-    FM_Lock();
-    if (g_xfer_busy == 0u)
-    {
-        g_xfer_busy = 1u;
-        ok = FM_TRUE;
-    }
-    FM_Unlock();
-    return ok;
+    return (FM_Scratch_Enter(FM_SCRATCH_XFER) == FM_OK) ? FM_TRUE : FM_FALSE;
 }
 
 static void xfer_release(void)
 {
-    FM_Lock();
-    g_xfer_busy = 0u;
-    FM_Unlock();
+    FM_Scratch_Leave(FM_SCRATCH_XFER);
 }
 
 /* F-11 (a): cache maintenance around every chunk (what fm_transfer.h

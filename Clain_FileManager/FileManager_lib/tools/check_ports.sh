@@ -50,4 +50,28 @@ for p in $PORTS; do
     fi
 done
 
+# پورت‌های همگام‌سازی RTOS: هدر واقعی پورت در برابر امضای هدرهای کرنل
+# (tools/rtosstub) کامپایل می‌شود، با FM_USE_THREADS=1.
+for rtos in freertos cmsis_rtos2; do
+    n=0
+    bad=0
+    for f in src/*.c backends/fm_ramdisk.c backends/fm_littlefs.c; do
+        if gcc -c -Wall -Wextra -Werror -std=c99 -DFM_HOST_BUILD \
+               -DFM_USE_THREADS=1 -DFM_SYNC_CUSTOM \
+               -Iports/$rtos -Itools/rtosstub/$rtos \
+               $INC -o "$TMP/$(basename "$f" .c).o" "$f" 2>"$TMP/err"; then
+            n=$((n + 1))
+        else
+            bad=$((bad + 1))
+            echo "FAIL sync port $rtos : $f"
+            head -3 "$TMP/err"
+        fi
+    done
+    if [ "$bad" -eq 0 ]; then
+        echo "OK   sync port $rtos  ($n files, FM_USE_THREADS=1)"
+    else
+        rc=1
+    fi
+done
+
 exit $rc

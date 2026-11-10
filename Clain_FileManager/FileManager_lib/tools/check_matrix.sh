@@ -147,6 +147,22 @@ if [ "$MODE" != "quick" ]; then
     # config knob; that enables the "sizes beyond the limit" test.
     CFLAGS_EXTRA="-DFM_IMAGE_MAX_BYTES=0xFFFFFFFFu" \
         run_one "FM_IMAGE_MAX_BYTES=4GiB (32-bit size_t limit, simulated)"
+    # Thread safety: the same suite (with its multi-thread stress tests)
+    # through the FreeRTOS and CMSIS-RTOS2 port headers; the kernel calls
+    # they use are implemented on pthreads in tools/rtosstub.
+    run_one "THREADS=1 port=freertos"      FM_USE_THREADS=1 FM_SYNC_IMPL=freertos
+    run_one "THREADS=1 port=cmsis_rtos2"   FM_USE_THREADS=1 FM_SYNC_IMPL=cmsis_rtos2
+    # On the MCU every unaligned File_Read/File_Write goes through the
+    # shared 512-byte DMA bounce buffer; host builds bypass it.  Force
+    # the bounce path so it is exercised single- and multi-threaded.
+    CFLAGS_EXTRA="-DFM_FILE_FORCE_BOUNCE" run_one "FM_FILE_FORCE_BOUNCE"
+    CFLAGS_EXTRA="-DFM_FILE_FORCE_BOUNCE" run_one "FM_FILE_FORCE_BOUNCE THREADS=1" FM_USE_THREADS=1
+    # One shared File_GetLastError() slot instead of one per task.
+    CFLAGS_EXTRA="-DFM_LAST_ERROR_THREADS=0" run_one "THREADS=1 FM_LAST_ERROR_THREADS=0" FM_USE_THREADS=1
+    # A "mutex only" sync port (no thread identity): a busy scratch
+    # resource is reported as FM_ERR_BUSY instead of being waited for, so
+    # the multi-thread suites fail by design -- only the build is checked.
+    CFLAGS_EXTRA="-DFM_SYNC_PTHREAD_NO_THREAD_SELF" link_one "THREADS=1 sync port without thread identity" FM_USE_THREADS=1
 fi
 
 make clean >/dev/null 2>&1

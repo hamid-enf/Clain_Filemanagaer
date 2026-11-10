@@ -15,6 +15,38 @@
  *
  * A fully custom implementation can be provided by defining FM_SYNC_CUSTOM
  * and supplying your own fm_sync_impl.h on the include path.
+ *
+ * A port provides
+ *
+ *   FM_Mutex, FM_Mutex_Create / _Lock / _Unlock / _Destroy
+ *       a plain (non-recursive) mutex.  The core never locks one twice
+ *       from the same thread.
+ *
+ * and, optionally, the identity of the calling thread:
+ *
+ *   #define FM_SYNC_HAS_THREAD_SELF 1
+ *   typedef ... FM_ThreadId;
+ *   FM_ThreadId FM_Thread_Self(void);
+ *   int         FM_Thread_Equal(FM_ThreadId a, FM_ThreadId b);
+ *
+ * With thread identity the shared scratch resources (copy buffer, image
+ * codec state, transfer buffer) BLOCK a second thread until the first is
+ * done, and a nested call from the SAME thread (progress callback, idle
+ * hook) gets FM_ERR_BUSY.  Without it the core cannot tell the two cases
+ * apart, so it never blocks: any second user gets FM_ERR_BUSY and has to
+ * retry.  All three ready-made ports provide it.
+ *
+ * Lock hierarchy (outermost first; a thread only ever takes locks further
+ * down the list while holding one further up):
+ *
+ *   mount-table operations (FS_Mount / FS_Unmount)
+ *   transfer buffer  >  codec scratch  >  copy buffer
+ *   read cache       >  DMA bounce buffer
+ *   per-mount filesystem lock
+ *   VFS tables (FM_Lock), storage registry, last-error slot
+ *
+ * User callbacks (progress, idle, storage events, log sinks) are never
+ * invoked with a VFS-table, storage-registry or per-mount lock held.
  */
 
 #ifndef FM_SYNC_H
@@ -32,6 +64,10 @@ FM_BEGIN_DECLS
 
 #include "fm_sync_impl.h"
 
+#ifndef FM_SYNC_HAS_THREAD_SELF
+#define FM_SYNC_HAS_THREAD_SELF 0
+#endif
+
 #else /* !FM_USE_THREADS */
 
 typedef struct
@@ -43,6 +79,8 @@ static inline FM_Result FM_Mutex_Create(FM_Mutex *m) { (void)m; return FM_OK; }
 static inline void FM_Mutex_Lock(FM_Mutex *m)        { (void)m; }
 static inline void FM_Mutex_Unlock(FM_Mutex *m)      { (void)m; }
 static inline void FM_Mutex_Destroy(FM_Mutex *m)     { (void)m; }
+
+#define FM_SYNC_HAS_THREAD_SELF 0
 
 #endif /* FM_USE_THREADS */
 

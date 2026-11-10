@@ -1478,6 +1478,11 @@ static void test_cache(void)
     i = 0;
     if (r == FM_OK) r = File_Read(f, bulk, sizeof(bulk), &i);
     if (f != NULL) (void)File_Close(f);
+#ifdef FM_FILE_FORCE_BOUNCE
+    /* through the bounce buffer the same read is one backend call per
+     * 512 bytes -- that is the point of the bounce path */
+    if (ctx.reads == (uint32_t)((sizeof(bulk) + 511u) / 512u)) ctx.reads = 1;
+#endif
     if (r == FM_OK && i == sizeof(bulk) && ctx.reads == 1)
     {
         uint32_t k;
@@ -10375,6 +10380,7 @@ static void test_threads(void)
 {
     pthread_t threads[4];
     void *results[4] = {NULL, NULL, NULL, NULL};
+    int created[4] = {0, 0, 0, 0};
     int i;
     int ok = 1;
 
@@ -10386,10 +10392,16 @@ static void test_threads(void)
         {
             ok = 0;
         }
+        else
+        {
+            created[i] = 1;
+        }
     }
     for (i = 0; i < 4; i++)
     {
-        if (ok)
+        /* always join: a worker left running after a failure keeps
+         * using the library underneath the following suites */
+        if (created[i])
         {
             (void)pthread_join(threads[i], &results[i]);
         }
@@ -13129,7 +13141,7 @@ TEST_MAYBE_UNUSED static FM_Result ir_decode(const IrBuf *o, uint8_t *rgb,
     return Image_DecodePNG(o->b, o->n, &img, rgb, cap);
 }
 
-#if FM_USE_PNG && !FM_USE_THREADS
+#if FM_USE_PNG
 static const uint8_t *g_ir_nest_png;
 static size_t         g_ir_nest_len;
 static FM_Result      g_ir_nest_result;
@@ -13148,7 +13160,7 @@ static void ir_idle_png(void)
 }
 #endif
 
-#if FM_USE_JPEG && !FM_USE_THREADS
+#if FM_USE_JPEG
 static uint8_t   g_ir_jpg[2048];
 static size_t    g_ir_jpg_len;
 static FM_Result g_ir_jnest_result;
@@ -13565,7 +13577,6 @@ static void test_image_report(void)
         CHECK_RESULT(r, "ihdr crc");
     }
 
-#if !FM_USE_THREADS
     /* ---------------- D-04 ---------------- */
     TEST("D-04 png: nested decode from the idle hook gets BUSY");
     {
@@ -13613,7 +13624,6 @@ static void test_image_report(void)
         if (r == FM_OK && rgb[0] != 200u) r = FM_ERR_CRC;
     }
     CHECK_RESULT(r, "nested png");
-#endif /* !FM_USE_THREADS */
 
 #if FM_USE_THREADS && FM_HOST_BUILD
     TEST("D-04/D-06 png: 3 threads encode+decode+registry, serial results");
@@ -13648,7 +13658,7 @@ static void test_image_report(void)
 #endif
 #endif /* FM_USE_PNG */
 
-#if FM_USE_JPEG && !FM_USE_THREADS
+#if FM_USE_JPEG
     TEST("D-04 jpeg: nested decode from the idle hook gets BUSY");
     {
         static uint8_t ref[64 * 64 * 3];
@@ -14199,6 +14209,1567 @@ static void test_image_report(void)
 }
 #endif /* FM_USE_IMAGE */
 
+#if FM_USE_THREADS && FM_HOST_BUILD
+/* ================================================================ */
+/* Wide thread stress: every module that keeps shared state, hit from */
+/* several threads at once.  Each thread works on its own files and   */
+/* handles (handles are not shared between threads -- that is the     */
+/* documented contract); what must hold is that the LIBRARY's shared  */
+/* state survives: pools, registries, caches, scratch buffers, the    */
+/* filesystem drivers' own structures.  Run under ThreadSanitizer     */
+/* (`make tsan`) this is the race detector for the whole library.     */
+/* ================================================================ */
+#ifndef TW_THREADS
+#define TW_THREADS 4
+#endif
+#ifndef TW_ITERS
+#define TW_ITERS   24
+#endif
+#define TW_MEDIA   10
+
+typedef struct
+{
+    unsigned  id;
+    int       step;          /* 0 = fine, else the step that failed */
+    FM_Result r;
+} TwCtx;
+
+static uint32_t g_tw_ref[TW_MEDIA];
+static FM_Bool  g_tw_have_mfs;
+static FM_Bool  g_tw_have_lfs;
+static FM_FS   *g_tw_mfs;
+
+static uint32_t tw_fnv(const void *p, size_t n, uint32_t h)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        h = (h ^ b[i]) * 16777619u;
+    }
+    return h;
+}
+
+static void tw_pattern(uint8_t *p, size_t n, unsigned id, unsigned salt)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        p[i] = (uint8_t)(i * (2u * id + 3u) + salt + (i >> 7));
+    }
+}
+
+#if FM_USE_AUDIO
+static FM_Result tw_adec(void *ctx, const uint8_t *in, size_t in_size,
+                         int16_t *out, size_t out_count, size_t *out_samples)
+{
+    (void)ctx; (void)in; (void)in_size; (void)out; (void)out_count;
+    *out_samples = 0;
+    return FM_ERR_EOF;
+}
+#endif
+
+static FM_Result tw_count_cb(const FM_FileInfo *info, void *user_data)
+{
+    (void)info;
+    (*(uint32_t *)user_data)++;
+    return FM_OK;
+}
+
+/* Decode the shared, read-only media files; out[k] is a checksum of the
+ * decoded data (or of the error code where a codec is compiled out). */
+static void tw_media(uint32_t *out)
+{
+    static const size_t pix_cap = 64u * 64u * 3u;
+    uint8_t *pix = (uint8_t *)malloc(pix_cap);
+    int16_t *pcm = (int16_t *)malloc(4096u * sizeof(int16_t));
+    uint32_t k;
+
+    for (k = 0; k < TW_MEDIA; k++)
+    {
+        out[k] = 2166136261u;
+    }
+    if (pix == NULL || pcm == NULL)
+    {
+        free(pix); free(pcm);
+        out[0] = 1u;
+        return;
+    }
+#if FM_USE_IMAGE
+    {
+        static const char *const files[3] = {
+            "/test/vectors/tiny64.png", "/test/vectors/tiny64.jpg",
+            "/test/vectors/tiny64.bmp"
+        };
+        FM_Image img;
+        FM_ImageInfo inf;
+        FM_Result r;
+
+        for (k = 0; k < 3u; k++)
+        {
+            memset(pix, 0, pix_cap);
+            r = Image_GetInfo(files[k], &inf);
+            out[k] = tw_fnv(&r, sizeof(r), out[k]);
+            r = Image_Load(files[k], &img, pix, pix_cap);
+            out[k] = tw_fnv(&r, sizeof(r), out[k]);
+            out[k] = tw_fnv(pix, pix_cap, out[k]);
+        }
+        /* scaled load: BMP rows go through the shared line buffer */
+        memset(pix, 0, pix_cap);
+        r = Image_LoadEx("/test/vectors/tiny64.bmp", &img, pix, pix_cap,
+                         24, 24);
+        out[3] = tw_fnv(&r, sizeof(r), out[3]);
+        out[3] = tw_fnv(pix, 24u * 24u * 3u, out[3]);
+    }
+#endif
+#if FM_USE_AUDIO
+    {
+        static const char *const files[4] = {
+            "/test/vectors/tone_mono.mp3",
+            "/test/vectors/wav_adpcm_ima_22k.wav",
+            "/test/vectors/test_flac.flac",
+            "/test/vectors/test_vorbis.ogg"
+        };
+
+        for (k = 0; k < 4u; k++)
+        {
+            FM_Audio a;
+            size_t got = 0;
+            FM_Result r = Audio_Open(files[k], &a);
+
+            out[4u + k] = tw_fnv(&r, sizeof(r), out[4u + k]);
+            if (r == FM_OK)
+            {
+                memset(pcm, 0, 4096u * sizeof(int16_t));
+                r = Audio_Read(&a, pcm, 4096u, &got);
+                out[4u + k] = tw_fnv(&r, sizeof(r), out[4u + k]);
+                out[4u + k] = tw_fnv(&got, sizeof(got), out[4u + k]);
+                out[4u + k] = tw_fnv(pcm, got * sizeof(int16_t), out[4u + k]);
+                (void)Audio_Close(&a);
+            }
+        }
+    }
+#endif
+#if FM_USE_VIDEO
+    {
+        static const char *const files[2] = { "/tw_shared.mp4",
+                                              "/tw_shared.avi" };
+
+        for (k = 0; k < 2u; k++)
+        {
+            FM_Video v;
+            FM_Result r = Video_Open(files[k], &v);
+            uint32_t f;
+
+            out[8u + k] = tw_fnv(&r, sizeof(r), out[8u + k]);
+            if (r != FM_OK)
+            {
+                continue;
+            }
+#if FM_USE_H264
+            if (k == 0u) (void)Video_RegisterCodec(&v, H264_GetCodecOps());
+#endif
+#if FM_USE_MJPEG
+            if (k == 1u) (void)Video_RegisterCodec(&v, MJPEG_GetCodecOps());
+#endif
+            for (f = 0; f < 3u; f++)
+            {
+                memset(pix, 0, pix_cap);
+                r = Video_DecodeFrame(&v, pix, pix_cap);
+                out[8u + k] = tw_fnv(&r, sizeof(r), out[8u + k]);
+                if (r != FM_OK)
+                {
+                    break;
+                }
+                out[8u + k] = tw_fnv(pix, pix_cap, out[8u + k]);
+            }
+            (void)Video_Close(&v);
+        }
+    }
+#endif
+    free(pix);
+    free(pcm);
+}
+
+#define TW_STEP(n, expr) do { if (c->step == 0) { FM_Result _r = (expr); \
+        if (_r != FM_OK) { c->step = (n); c->r = _r; } } } while (0)
+#define TW_TRUE(n, cond) do { if (c->step == 0 && !(cond)) \
+        { c->step = (n); c->r = FM_ERR_CRC; } } while (0)
+
+/* File work on one mount.  `root` is "" (POSIX), "/twm" (FMFS) or
+ * "/twl" (LittleFS).  `wide` adds a second directory and a recursive
+ * copy; FMFS has FM_FMFS_MAX_ENTRIES (32) entries for all threads
+ * together, so it gets the narrow variant. */
+static void tw_files(TwCtx *c, const char *root, int base, unsigned iter,
+                     uint8_t *a, uint8_t *b, size_t n, int wide)
+{
+    char p1[96];
+    char p2[96];
+    char p3[96];
+    char dir[96];
+    char dir2[96];
+    char name[128];
+    FM_File f;
+    FM_Bool ex = FM_FALSE;
+    uint64_t sz = 0;
+    uint32_t done = 0;
+    size_t got = 0;
+    uint32_t cnt = 0;
+    FM_FileInfo fi;
+    size_t off;
+
+    (void)snprintf(p1, sizeof(p1), "%s/tw%u_a.bin", root, c->id);
+    (void)snprintf(p2, sizeof(p2), "%s/tw%u_b.bin", root, c->id);
+    (void)snprintf(p3, sizeof(p3), "%s/tw%u_c.bin", root, c->id);
+    (void)snprintf(dir, sizeof(dir), "%s/tw%u_d", root, c->id);
+    (void)snprintf(dir2, sizeof(dir2), "%s/tw%u_e", root, c->id);
+    tw_pattern(a, n, c->id, iter);
+
+    /* handle I/O in odd-sized pieces, then read back through seeks */
+    File_Init(&f);
+    TW_STEP(base + 1, File_OpenEx(&f, p1, FM_OPEN_WRITE | FM_OPEN_CREATE |
+                                         FM_OPEN_TRUNCATE));
+    for (off = 0; off < n && c->step == 0; off += 257u)
+    {
+        uint32_t len = (uint32_t)((n - off < 257u) ? (n - off) : 257u);
+
+        TW_STEP(base + 2, File_Write(&f, a + off, len, &done));
+        TW_TRUE(base + 2, done == len);
+    }
+    (void)File_Close(&f);
+    File_Init(&f);
+    TW_STEP(base + 3, File_OpenEx(&f, p1, FM_OPEN_READ));
+    TW_STEP(base + 3, File_Size(&f, &sz));
+    TW_TRUE(base + 3, sz == n);
+    TW_STEP(base + 4, File_Seek(&f, (int64_t)(n / 2u), FM_SEEK_SET));
+    TW_STEP(base + 4, File_Read(&f, b, (uint32_t)(n / 4u), &done));
+    TW_TRUE(base + 4, done == n / 4u && memcmp(b, a + n / 2u, n / 4u) == 0);
+    TW_STEP(base + 5, File_Seek(&f, 0, FM_SEEK_SET));
+    for (off = 0; off < n && c->step == 0; off += 300u)
+    {
+        uint32_t len = (uint32_t)((n - off < 300u) ? (n - off) : 300u);
+
+        TW_STEP(base + 5, File_Read(&f, b + off, len, &done));
+        TW_TRUE(base + 5, done == len);
+    }
+    TW_TRUE(base + 5, memcmp(a, b, n) == 0);
+    (void)File_Close(&f);
+
+    /* whole-file helpers, copy / move / rename / stat / delete */
+    TW_STEP(base + 6, File_Copy(p1, p2, NULL, NULL));
+    TW_STEP(base + 6, File_ReadAll(p2, b, n, &got));
+    TW_TRUE(base + 6, got == n && memcmp(a, b, n) == 0);
+    TW_STEP(base + 7, File_Move(p2, p3, NULL, NULL));
+    TW_STEP(base + 7, File_Exists(p2, &ex));
+    TW_TRUE(base + 7, !ex);
+    TW_STEP(base + 8, File_Rename(p3, p2));
+    TW_STEP(base + 8, File_SizeOf(p2, &sz));
+    TW_TRUE(base + 8, sz == n);
+    TW_STEP(base + 8, File_GetInfo(p2, &fi));
+
+    /* range edits go through the shared scratch buffer */
+    TW_STEP(base + 9, File_Insert(p2, 100u, "INSERTED", 8u));
+    TW_STEP(base + 9, File_ReadAll(p2, b, n + 8u, &got));
+    TW_TRUE(base + 9, got == n + 8u && memcmp(b, a, 100u) == 0 &&
+                      memcmp(b + 100u, "INSERTED", 8u) == 0 &&
+                      memcmp(b + 108u, a + 100u, n - 100u) == 0);
+    TW_STEP(base + 10, File_DeleteRange(p2, 100u, 8u));
+    TW_STEP(base + 10, File_ReadAll(p2, b, n + 8u, &got));
+    TW_TRUE(base + 10, got == n && memcmp(a, b, n) == 0);
+
+    /* directories */
+    (void)Directory_DeleteRecursive(dir);
+    if (wide) { (void)Directory_DeleteRecursive(dir2); }
+    TW_STEP(base + 11, Directory_Create(dir));
+    (void)snprintf(name, sizeof(name), "%s/one.bin", dir);
+    TW_STEP(base + 11, File_WriteAll(name, a, 700u));
+    (void)snprintf(name, sizeof(name), "%s/two.bin", dir);
+    TW_STEP(base + 11, File_WriteAll(name, a + 700u, 300u));
+    TW_STEP(base + 12, Directory_Count(dir, FM_ITEM_FILE, &cnt));
+    TW_TRUE(base + 12, cnt == 2u);
+    cnt = 0;
+    TW_STEP(base + 12, Directory_List(dir, NULL, tw_count_cb, &cnt));
+    TW_TRUE(base + 12, cnt == 2u);
+    TW_STEP(base + 13, Directory_Size(dir, &sz));
+    TW_TRUE(base + 13, sz == 1000u);
+    if (wide)
+    {
+        TW_STEP(base + 14, Directory_Copy(dir, dir2, NULL, NULL));
+        (void)snprintf(name, sizeof(name), "%s/two.bin", dir2);
+        TW_STEP(base + 14, File_ReadAll(name, b, n, &got));
+        TW_TRUE(base + 14, got == 300u && memcmp(b, a + 700u, 300u) == 0);
+        TW_STEP(base + 15, Directory_DeleteRecursive(dir2));
+    }
+    TW_STEP(base + 15, Directory_DeleteRecursive(dir));
+    TW_STEP(base + 16, File_Delete(p1));
+    TW_STEP(base + 16, File_Delete(p2));
+}
+
+static void *tw_thread(void *arg)
+{
+    TwCtx *c = (TwCtx *)arg;
+    const size_t n = 3000u;
+    uint8_t *a = (uint8_t *)malloc(n + 64u);
+    uint8_t *b = (uint8_t *)malloc(n + 64u);
+    char p1[64];
+    char p2[64];
+    char text[128];
+    char codec[8];
+    unsigned iter;
+
+    (void)snprintf(codec, sizeof(codec), "TW%u", c->id);
+    if (a == NULL || b == NULL)
+    {
+        c->step = 999;
+    }
+    for (iter = 0; iter < TW_ITERS && c->step == 0; iter++)
+    {
+        size_t got = 0;
+        size_t lines = 0;
+        FM_FSInfo fsi;
+        FM_StorageInfo sti;
+        FM_TransferOpts opts;
+
+        tw_files(c, "", 100, iter, a, b, n, 1);
+        if (g_tw_have_mfs)
+        {
+            tw_files(c, "/twm", 200, iter, a, b, 1500u, 0);
+#if FM_USE_FMFS
+            /* compaction next to the other threads' open files */
+            if ((iter % 4u) == c->id % 4u)
+            {
+                TW_STEP(250, FMFS_Repack(g_tw_mfs));
+            }
+#endif
+        }
+        if (g_tw_have_lfs) tw_files(c, "/twl", 300, iter, a, b, 1500u, 1);
+
+        /* transfer layer, safe-write, text helpers (POSIX root) */
+        (void)snprintf(p1, sizeof(p1), "/tw%u_t1.bin", c->id);
+        (void)snprintf(p2, sizeof(p2), "/tw%u_t2.bin", c->id);
+        tw_pattern(a, n, c->id, iter + 77u);
+        TW_STEP(401, FM_Transfer_SaveFile(p1, a, n));
+        memset(&opts, 0, sizeof(opts));
+        opts.verify = FM_USE_CRC ? FM_TRUE : FM_FALSE;
+        TW_STEP(402, FM_Transfer_Copy(p1, p2, &opts));
+        TW_STEP(403, FM_Transfer_LoadFile(p2, b, n, &got));
+        TW_TRUE(403, got == n && memcmp(a, b, n) == 0);
+#if FM_USE_SAFE_WRITE
+        TW_STEP(404, File_SafeReplace(p2, a, 512u));
+        TW_STEP(404, File_ReadAll(p2, b, n, &got));
+        TW_TRUE(404, got == 512u && memcmp(a, b, 512u) == 0);
+#endif
+        (void)File_Delete(p1);
+        (void)File_Delete(p2);
+#if FM_USE_TEXT
+        (void)snprintf(p1, sizeof(p1), "/tw%u.txt", c->id);
+        (void)snprintf(text, sizeof(text), "thread %u iteration %u", c->id,
+                       iter);
+        TW_STEP(405, File_WriteText(p1, text));
+        TW_STEP(405, Text_AppendLine(p1, "second"));
+        TW_STEP(405, Text_CountLines(p1, &lines));
+        TW_STEP(405, File_ReadText(p1, (char *)b, n, &got));
+        TW_TRUE(405, strncmp((char *)b, text, strlen(text)) == 0);
+        (void)File_Delete(p1);
+#endif
+        (void)lines;
+
+        /* tables other threads are changing meanwhile */
+        TW_STEP(406, FS_GetInfo("/", &fsi));
+        TW_STEP(406, Storage_GetInfo("ram", &sti));
+        (void)File_GetLastError();
+        (void)File_PoolUsed();
+        FM_Idle();
+
+#if FM_USE_IMAGE
+        {
+            static const FM_ImageCodecOps ops = { "tw", NULL, ir_fake_decode };
+
+            TW_STEP(407, Image_RegisterCodec(codec, &ops));
+            TW_TRUE(407, Image_GetCodec(codec) == &ops);
+            TW_STEP(407, Image_UnregisterCodec(codec));
+        }
+#endif
+#if FM_USE_AUDIO
+        {
+            static const FM_AudioDecoderOps aops = { "tw", NULL, tw_adec,
+                                                     NULL };
+
+            TW_STEP(408, Audio_RegisterDecoder(codec, &aops));
+            TW_TRUE(408, Audio_GetDecoder(codec) == &aops);
+            TW_STEP(408, Audio_UnregisterDecoder(codec));
+        }
+#endif
+        /* shared read-only media: every decode equals the reference */
+        if ((iter % 3u) == 0u)
+        {
+            uint32_t sums[TW_MEDIA];
+            uint32_t k;
+
+            tw_media(sums);
+            for (k = 0; k < TW_MEDIA; k++)
+            {
+                TW_TRUE(500 + (int)k, sums[k] == g_tw_ref[k]);
+            }
+        }
+    }
+    free(a);
+    free(b);
+    return NULL;
+}
+
+static void test_threads_wide(void)
+{
+    static uint8_t mfs_mem[256 * 1024];
+    static uint8_t lfs_mem[512 * 1024];
+    static FM_Storage mfs_storage;
+    static FM_Storage lfs_storage;
+    static FM_FS mfs;
+    static FM_FS lfs;
+    pthread_t th[TW_THREADS];
+    TwCtx ctx[TW_THREADS];
+    FM_Result r;
+    int started = 0;
+    int i;
+    int ok = 1;
+
+    restore_posix_root();
+    TEST("Threads: files, 3 filesystems, transfer, codecs, registries");
+
+    /* second and third mount: the library's own filesystem drivers */
+    g_tw_have_mfs = FM_FALSE;
+    g_tw_have_lfs = FM_FALSE;
+    g_tw_mfs = &mfs;
+#if FM_USE_FMFS
+    r = RamDisk_Init(&mfs_storage, "twm", mfs_mem, sizeof(mfs_mem), 512);
+    if (r == FM_OK) r = Storage_Register(&mfs_storage);
+    if (r == FM_OK) r = FMFS_Init(&mfs);
+    if (r == FM_OK) r = FS_Mount("/twm", &mfs);
+    if (r == FM_OK) g_tw_have_mfs = FM_TRUE;
+    else printf("[fmfs mount: %s] ", FM_ResultString(r));
+#endif
+#if FM_USE_LITTLEFS
+    memset(lfs_mem, 0xFF, sizeof(lfs_mem));
+    r = RamDisk_Init(&lfs_storage, "twl", lfs_mem, sizeof(lfs_mem), 4096);
+    if (r == FM_OK) r = Storage_Register(&lfs_storage);
+    if (r == FM_OK) r = LittleFS_Init(&lfs);
+    if (r == FM_OK) r = FS_Mount("/twl", &lfs);
+    if (r == FM_OK) g_tw_have_lfs = FM_TRUE;
+    else printf("[littlefs mount: %s] ", FM_ResultString(r));
+#endif
+    (void)mfs_mem; (void)lfs_mem; (void)mfs_storage; (void)lfs_storage;
+    (void)mfs; (void)lfs;
+
+#if FM_USE_VIDEO
+    {
+        static uint8_t raw[4096];
+        static uint8_t cont[16384];
+        size_t rd = 0;
+        size_t len = 0;
+
+#if FM_USE_H264
+        r = File_ReadAll("/test/vectors/tiny64.h264", raw, sizeof(raw), &rd);
+        if (r == FM_OK)
+        {
+            const uint8_t *nals[8];
+            uint32_t sizes[8];
+
+            if (split_nals(raw, (uint32_t)rd, nals, sizes, 8) >= 5u &&
+                build_mp4(nals[0], sizes[0], nals[1], sizes[1], nals[2],
+                          sizes[2], nals[3], sizes[3], nals[4], sizes[4],
+                          cont, &len) == FM_OK)
+            {
+                (void)File_WriteAll("/tw_shared.mp4", cont, len);
+            }
+        }
+#endif
+#if FM_USE_MJPEG
+        r = File_ReadAll("/test/vectors/mjpeg_frame.jpg", raw, sizeof(raw),
+                         &rd);
+        if (r == FM_OK && build_avi_mjpeg(raw, rd, cont, &len) == FM_OK)
+        {
+            (void)File_WriteAll("/tw_shared.avi", cont, len);
+        }
+#endif
+        (void)raw; (void)cont; (void)rd; (void)len;
+    }
+#endif
+
+    tw_media(g_tw_ref);                 /* single-threaded reference */
+
+    for (i = 0; i < TW_THREADS; i++)
+    {
+        ctx[i].id = (unsigned)i;
+        ctx[i].step = 0;
+        ctx[i].r = FM_OK;
+        if (pthread_create(&th[i], NULL, tw_thread, &ctx[i]) != 0)
+        {
+            ok = 0;
+            break;
+        }
+        started++;
+    }
+    for (i = 0; i < started; i++)
+    {
+        (void)pthread_join(th[i], NULL);
+        if (ctx[i].step != 0)
+        {
+            printf("[thread %d: step %d, %s] ", i, ctx[i].step,
+                   FM_ResultString(ctx[i].r));
+            ok = 0;
+        }
+    }
+    (void)File_Delete("/tw_shared.mp4");
+    (void)File_Delete("/tw_shared.avi");
+    if (g_tw_have_mfs) { (void)FS_Unmount("/twm"); }
+    if (g_tw_have_lfs) { (void)FS_Unmount("/twl"); }
+    (void)Storage_Unregister("twm");
+    (void)Storage_Unregister("twl");
+    if (ok) PASS();
+    else FAIL("concurrent use corrupted data or state");
+}
+#undef TW_STEP
+#undef TW_TRUE
+#endif /* FM_USE_THREADS && FM_HOST_BUILD */
+
+/* ================================================================ */
+/* Phase 5: locking, claims, FMFS compaction, allocator               */
+/* ================================================================ */
+static void sr_pattern(uint8_t *p, uint32_t n, uint32_t seed)
+{
+    uint32_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        p[i] = (uint8_t)((i * 31u + seed * 97u) ^ (i >> 7));
+    }
+}
+
+static FM_Result sr_verify(const char *path, uint32_t n, uint32_t seed)
+{
+    static uint8_t got[40000];
+    static uint8_t want[40000];
+    size_t rd = 0;
+    FM_Result r;
+
+    if (n > sizeof(got))
+    {
+        return FM_ERR_INTERNAL;
+    }
+    r = File_ReadAll(path, got, sizeof(got), &rd);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    sr_pattern(want, n, seed);
+    if (rd != n || memcmp(got, want, n) != 0)
+    {
+        return FM_ERR_CRC;
+    }
+    return FM_OK;
+}
+
+static FM_Result sr_write(const char *path, uint32_t n, uint32_t seed)
+{
+    static uint8_t buf[40000];
+
+    if (n > sizeof(buf))
+    {
+        return FM_ERR_INTERNAL;
+    }
+    sr_pattern(buf, n, seed);
+    return File_WriteAll(path, buf, n);
+}
+
+static void *sr_alloc_only(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void sr_free_only(void *p, void *ctx)
+{
+    (void)ctx;
+    free(p);
+}
+
+#if FM_USE_FMFS
+/* Random file operations on a small FMFS volume, checked against a
+ * plain in-memory model after every few steps.  The volume is kept
+ * nearly full so the compaction, move-to-tail and rotate-in-place paths
+ * all run many times. */
+#define SRF_FILES 6u
+#define SRF_MAX   9000u
+static uint8_t  g_srf_model[SRF_FILES][SRF_MAX];
+static uint32_t g_srf_size[SRF_FILES];
+static uint8_t  g_srf_there[SRF_FILES];
+static uint32_t g_srf_rng;
+
+static uint32_t srf_rand(uint32_t n)
+{
+    g_srf_rng = g_srf_rng * 1664525u + 1013904223u;
+    return (g_srf_rng >> 8) % n;
+}
+
+static FM_Result srf_check_all(void)
+{
+    static uint8_t got[SRF_MAX + 1u];
+    uint32_t i;
+
+    for (i = 0; i < SRF_FILES; i++)
+    {
+        char path[32];
+        size_t rd = 0;
+        FM_Bool there = FM_FALSE;
+        FM_Result r;
+
+        (void)snprintf(path, sizeof(path), "/srf/f%u.bin", (unsigned)i);
+        r = File_Exists(path, &there);
+        if (r != FM_OK) return r;
+        if ((there ? 1 : 0) != (int)g_srf_there[i]) return FM_ERR_EXISTS;
+        if (!there) continue;
+        r = File_ReadAll(path, got, sizeof(got), &rd);
+        if (r != FM_OK) return r;
+        if (rd != g_srf_size[i] ||
+            memcmp(got, g_srf_model[i], g_srf_size[i]) != 0)
+        {
+            uint32_t at = 0;
+
+            while (at < g_srf_size[i] && at < rd &&
+                   got[at] == g_srf_model[i][at])
+            {
+                at++;
+            }
+            printf("[f%u differs at %u: size %u, read %u] ", (unsigned)i,
+                   (unsigned)at, (unsigned)g_srf_size[i], (unsigned)rd);
+            return FM_ERR_CRC;
+        }
+    }
+    return FM_OK;
+}
+
+static FM_Result srf_run(FM_FS *fs, uint32_t seed, uint32_t steps,
+                         uint32_t *no_space_seen)
+{
+    FM_FSInfo info;
+    uint64_t cap;
+    uint32_t step;
+    FM_Result r;
+
+    memset(&info, 0, sizeof(info));
+    r = FS_GetInfo("/srf", &info);
+    if (r != FM_OK) return r;
+    cap = info.free_space;              /* empty volume: the data area */
+    memset(g_srf_size, 0, sizeof(g_srf_size));
+    memset(g_srf_there, 0, sizeof(g_srf_there));
+    g_srf_rng = seed;
+
+    for (step = 0; step < steps && r == FM_OK; step++)
+    {
+        uint32_t i = srf_rand(SRF_FILES);
+        uint32_t op = srf_rand(10);
+        uint64_t live = 0;
+        uint32_t k;
+        char path[32];
+        FM_File *f;
+
+        for (k = 0; k < SRF_FILES; k++) live += g_srf_size[k];
+        (void)snprintf(path, sizeof(path), "/srf/f%u.bin", (unsigned)i);
+
+        if (op == 0)                                    /* delete */
+        {
+            r = File_Delete(path);
+            if (!g_srf_there[i] && r == FM_ERR_NOT_FOUND) r = FM_OK;
+            g_srf_there[i] = 0;
+            g_srf_size[i] = 0;
+        }
+        else if (op == 1)                               /* compact */
+        {
+            r = FMFS_Repack(fs);
+        }
+        else if (op == 2 && g_srf_there[i])             /* truncate */
+        {
+            uint32_t ns = srf_rand(SRF_MAX + 1u);
+            uint64_t grow = (ns > g_srf_size[i]) ? ns - g_srf_size[i] : 0u;
+
+            f = File_Open(path, FM_OPEN_READ | FM_OPEN_WRITE);
+            if (f == NULL) return File_GetLastError();
+            r = File_Truncate(f, ns);
+            (void)File_Close(f);
+            if (r == FM_ERR_NO_SPACE)
+            {
+                (*no_space_seen)++;
+                if (live + grow <= cap)
+                {
+                    printf("[step %u: truncate refused with room] ",
+                           (unsigned)step);
+                    return FM_ERR_NO_SPACE;
+                }
+                r = FM_OK;
+            }
+            else if (r == FM_OK)
+            {
+                if (ns > g_srf_size[i])
+                {
+                    memset(g_srf_model[i] + g_srf_size[i], 0,
+                           ns - g_srf_size[i]);
+                }
+                g_srf_size[i] = ns;
+            }
+        }
+        else                                    /* write at a position */
+        {
+            static uint8_t data[2500];
+            uint32_t n = 1u + srf_rand(sizeof(data));
+            uint32_t pos = (op < 7u) ? g_srf_size[i]          /* append */
+                                     : srf_rand(g_srf_size[i] + 400u);
+            uint32_t end;
+            uint64_t grow;
+            uint32_t wr = 0;
+
+            if (pos + n > SRF_MAX)
+            {
+                if (pos >= SRF_MAX) pos = SRF_MAX - 1u;
+                n = SRF_MAX - pos;
+            }
+            end = pos + n;
+            grow = (end > g_srf_size[i]) ? end - g_srf_size[i] : 0u;
+            for (k = 0; k < n; k++)
+            {
+                data[k] = (uint8_t)srf_rand(256);
+            }
+            f = File_Open(path, FM_OPEN_READ | FM_OPEN_WRITE |
+                                FM_OPEN_CREATE);
+            if (f == NULL) return File_GetLastError();
+            g_srf_there[i] = 1;
+            r = File_Seek(f, (int64_t)pos, FM_SEEK_SET);
+            if (r == FM_OK) r = File_Write(f, data, n, &wr);
+            (void)File_Close(f);
+            if (r == FM_ERR_NO_SPACE)
+            {
+                (*no_space_seen)++;
+                if (live + grow <= cap)
+                {
+                    printf("[step %u: write refused with room: live %lu "
+                           "+ %lu of %lu] ", (unsigned)step,
+                           (unsigned long)live, (unsigned long)grow,
+                           (unsigned long)cap);
+                    return FM_ERR_NO_SPACE;
+                }
+                /* a write that goes to the filesystem in several pieces
+                 * (DMA bounce buffer) may have stored the first ones:
+                 * *written says how much, and that much is in the file */
+                if (wr > n) return FM_ERR_IO;
+                n = wr;
+                end = pos + n;
+                r = FM_OK;
+            }
+            else if (r == FM_OK && wr != n)
+            {
+                return FM_ERR_IO;
+            }
+            if (r == FM_OK && n != 0u)
+            {
+                if (pos > g_srf_size[i])
+                {
+                    memset(g_srf_model[i] + g_srf_size[i], 0,
+                           pos - g_srf_size[i]);
+                }
+                memcpy(g_srf_model[i] + pos, data, n);
+                if (end > g_srf_size[i]) g_srf_size[i] = end;
+            }
+        }
+        if (r == FM_OK && (step % 7u) == 6u)
+        {
+            r = srf_check_all();
+        }
+        if (r != FM_OK)
+        {
+            printf("[step %u op %u] ", (unsigned)step, (unsigned)op);
+        }
+    }
+    if (r == FM_OK) r = srf_check_all();
+    return r;
+}
+#endif /* FM_USE_FMFS */
+
+/* storage write wrapper: lets `g_sr_wr_allow` writes through, then fails */
+static FM_Storage_WriteFn g_sr_wr_real;
+static long               g_sr_wr_allow = -1;      /* -1 = no limit */
+static unsigned long      g_sr_wr_count;
+
+static FM_Result sr_storage_write(FM_Storage *st, uint64_t offset,
+                                  const void *buf, uint32_t len)
+{
+    g_sr_wr_count++;
+    if (g_sr_wr_allow == 0)
+    {
+        return FM_ERR_IO;
+    }
+    if (g_sr_wr_allow > 0)
+    {
+        g_sr_wr_allow--;
+    }
+    return g_sr_wr_real(st, offset, buf, len);
+}
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+#include <time.h>
+#include <sched.h>
+
+static void sr_sleep_ms(long ms)
+{
+    struct timespec ts;
+
+    ts.tv_sec = 0;
+    ts.tv_nsec = ms * 1000000L;
+    (void)nanosleep(&ts, NULL);
+}
+
+static volatile int g_sr_started;
+static volatile int g_sr_done;
+static volatile int g_sr_done_while_held;
+static FM_Result    g_sr_nested;
+static FM_Result    g_sr_second;
+static int          g_sr_cb_calls;
+static pthread_t    g_sr_thread;
+static int          g_sr_thread_ok;
+
+static void *sr_second_copy(void *arg)
+{
+    (void)arg;
+    __atomic_store_n(&g_sr_started, 1, __ATOMIC_SEQ_CST);
+    g_sr_second = File_Copy("/sr_b.bin", "/sr_b2.bin", NULL, NULL);
+    __atomic_store_n(&g_sr_done, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+static void sr_copy_cb(uint64_t cur, uint64_t total, void *user)
+{
+    (void)cur; (void)total; (void)user;
+    if (g_sr_cb_calls++ != 0)
+    {
+        return;
+    }
+    /* same task, nested: must be refused, never deadlock */
+    g_sr_nested = File_Copy("/sr_b.bin", "/sr_n.bin", NULL, NULL);
+    /* another task: must wait for us, not fail */
+    if (pthread_create(&g_sr_thread, NULL, sr_second_copy, NULL) == 0)
+    {
+        int spins = 0;
+
+        g_sr_thread_ok = 1;
+        while (__atomic_load_n(&g_sr_started, __ATOMIC_SEQ_CST) == 0 &&
+               spins++ < 2000)
+        {
+            sr_sleep_ms(1);
+        }
+        sr_sleep_ms(60);
+        g_sr_done_while_held =
+            __atomic_load_n(&g_sr_done, __ATOMIC_SEQ_CST);
+    }
+}
+
+#if FM_SYNC_HAS_THREAD_SELF && (FM_LAST_ERROR_THREADS > 0)
+static volatile int g_sr_stop;
+
+static void *sr_ok_opener(void *arg)
+{
+    (void)arg;
+    while (__atomic_load_n(&g_sr_stop, __ATOMIC_SEQ_CST) == 0)
+    {
+        FM_File *f = File_Open("/sr_b.bin", FM_OPEN_READ);
+
+        if (f != NULL)
+        {
+            (void)File_Close(f);
+        }
+    }
+    return NULL;
+}
+#endif
+#endif /* FM_USE_THREADS && FM_HOST_BUILD */
+
+static void test_sync_report(void)
+{
+    FM_Result r;
+    uint32_t i;
+
+    restore_posix_root();
+
+#if FM_USE_FMFS
+    {
+        static uint8_t mem[160 * 1024];
+        static FM_Storage st;
+        static FM_FS fs;
+        FM_FSInfo info;
+        FM_Bool mounted = FM_FALSE;
+
+        r = RamDisk_Init(&st, "srm", mem, sizeof(mem), 512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/srm", &fs);
+        if (r == FM_OK) mounted = FM_TRUE;
+
+        TEST("FMFS: Repack after a file moved past its neighbour");
+        if (r == FM_OK) r = sr_write("/srm/a.bin", 6000, 1);
+        if (r == FM_OK) r = sr_write("/srm/b.bin", 9000, 2);
+        if (r == FM_OK)
+        {
+            /* growing A relocates it behind B: table order A,B but
+             * offsets B,A.  The old repack walked the table and slid A
+             * (now bigger than the hole it left) over the head of B. */
+            static uint8_t more[20000];
+            FM_File *f = File_Open("/srm/a.bin",
+                                   FM_OPEN_WRITE | FM_OPEN_APPEND);
+            uint32_t wr = 0;
+
+            sr_pattern(more, 20000, 1);       /* bytes 0..19999 of A */
+            if (f == NULL)
+            {
+                r = File_GetLastError();
+            }
+            else
+            {
+                r = File_Write(f, more + 6000, 14000, &wr);
+                if (r == FM_OK && wr != 14000u) r = FM_ERR_NO_SPACE;
+                (void)File_Close(f);
+            }
+        }
+        if (r == FM_OK) r = sr_verify("/srm/b.bin", 9000, 2);
+        if (r == FM_OK) r = FMFS_Repack(&fs);
+        if (r == FM_OK) r = sr_verify("/srm/b.bin", 9000, 2);
+        if (r == FM_OK) r = sr_verify("/srm/a.bin", 20000, 1);
+        CHECK_RESULT(r, "repack order");
+
+        TEST("FMFS: Repack keeps an open handle usable");
+        {
+            FM_File *f = File_Open("/srm/b.bin", FM_OPEN_READ);
+            uint8_t head[64];
+            uint8_t want[64];
+            uint32_t rd = 0;
+
+            r = (f != NULL) ? FM_OK : File_GetLastError();
+            if (r == FM_OK) r = File_Delete("/srm/a.bin");
+            if (r == FM_OK) r = sr_write("/srm/c.bin", 5000, 3);
+            if (r == FM_OK) r = FMFS_Repack(&fs);
+            if (r == FM_OK) r = File_Read(f, head, sizeof(head), &rd);
+            sr_pattern(want, sizeof(want), 2);
+            if (r == FM_OK && (rd != sizeof(head) ||
+                               memcmp(head, want, sizeof(head)) != 0))
+            {
+                r = FM_ERR_CRC;
+            }
+            if (f != NULL) (void)File_Close(f);
+            if (r == FM_OK) r = sr_verify("/srm/c.bin", 5000, 3);
+            (void)File_Delete("/srm/b.bin");
+            (void)File_Delete("/srm/c.bin");
+        }
+        CHECK_RESULT(r, "repack with open handle");
+
+        TEST("FMFS: write reuses the space of deleted files");
+        memset(&info, 0, sizeof(info));
+        r = mounted ? FS_GetInfo("/srm", &info) : FM_ERR_NOT_MOUNTED;
+        if (r == FM_OK)
+        {
+            uint32_t q = (uint32_t)(info.free_space / 4u);
+
+            if (q > 36000u) q = 36000u;
+            r = sr_write("/srm/f1.bin", q, 11);
+            if (r == FM_OK) r = sr_write("/srm/f2.bin", q, 12);
+            if (r == FM_OK) r = sr_write("/srm/f3.bin", q, 13);
+            if (r == FM_OK) r = File_Delete("/srm/f1.bin");
+            if (r == FM_OK) r = File_Delete("/srm/f2.bin");
+            /* 3/4 of the area was handed out once; two more files of
+             * the same size only fit if the dead space is reclaimed */
+            if (r == FM_OK) r = sr_write("/srm/f4.bin", q, 14);
+            if (r == FM_OK) r = sr_write("/srm/f5.bin", q, 15);
+            if (r == FM_OK) r = sr_verify("/srm/f3.bin", q, 13);
+            if (r == FM_OK) r = sr_verify("/srm/f4.bin", q, 14);
+            if (r == FM_OK) r = sr_verify("/srm/f5.bin", q, 15);
+        }
+        CHECK_RESULT(r, "space reuse");
+
+        TEST("FMFS: free space counts reclaimable bytes");
+        {
+            FM_FSInfo before;
+            FM_FSInfo after;
+
+            memset(&before, 0, sizeof(before));
+            memset(&after, 0, sizeof(after));
+            r = FS_GetInfo("/srm", &before);
+            if (r == FM_OK) r = File_Delete("/srm/f3.bin");
+            if (r == FM_OK) r = FS_GetInfo("/srm", &after);
+            /* f3 sits below f4/f5: the bump allocator reported nothing
+             * back for it */
+            if (r == FM_OK && after.free_space <= before.free_space)
+            {
+                printf("[%lu -> %lu] ", (unsigned long)before.free_space,
+                       (unsigned long)after.free_space);
+                r = FM_ERR_NO_SPACE;
+            }
+        }
+        CHECK_RESULT(r, "free space");
+
+        TEST("FMFS: a file in the middle grows when only the total fits");
+        memset(&info, 0, sizeof(info));
+        r = FS_GetInfo("/srm", &info);
+        if (r == FM_OK && info.free_space < 80000u) r = FM_ERR_NO_SPACE;
+        if (r == FM_OK) r = sr_write("/srm/g2.bin", 30000, 72);
+        if (r == FM_OK) r = sr_write("/srm/g1.bin", 40000, 71);
+        if (r == FM_OK) r = FS_GetInfo("/srm", &info);
+        if (r == FM_OK)
+        {
+            /* g2 is not the last file, and what is free is smaller than
+             * g2 itself: there is no room for a second copy of it, yet
+             * g2 + 8000 bytes fits the volume */
+            static uint8_t pat[38000];
+            FM_File *f;
+            uint32_t wr = 0;
+
+            if (info.free_space < 8000u || info.free_space >= 30000u)
+            {
+                printf("[free %lu] ", (unsigned long)info.free_space);
+                r = FM_ERR_INTERNAL;
+            }
+            sr_pattern(pat, sizeof(pat), 72);
+            f = (r == FM_OK) ? File_Open("/srm/g2.bin",
+                                         FM_OPEN_WRITE | FM_OPEN_APPEND)
+                             : NULL;
+            if (r == FM_OK && f == NULL) r = File_GetLastError();
+            if (r == FM_OK) r = File_Write(f, pat + 30000, 8000, &wr);
+            if (r == FM_OK && wr != 8000u) r = FM_ERR_NO_SPACE;
+            if (f != NULL) (void)File_Close(f);
+        }
+        if (r == FM_OK) r = sr_verify("/srm/g2.bin", 38000, 72);
+        if (r == FM_OK) r = sr_verify("/srm/g1.bin", 40000, 71);
+        if (r == FM_OK) r = sr_verify("/srm/f4.bin", 36000, 14);
+        if (r == FM_OK) r = sr_verify("/srm/f5.bin", 36000, 15);
+        (void)File_Delete("/srm/g1.bin");
+        (void)File_Delete("/srm/g2.bin");
+        CHECK_RESULT(r, "grow in the middle");
+
+        TEST("FMFS: overwriting in place does not rewrite the metadata");
+        {
+            static const uint8_t patch[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+            FM_File *f;
+            uint32_t wr = 0;
+            static uint8_t back[1000];
+            static uint8_t want[1000];
+            size_t got = 0;
+
+            r = sr_write("/srm/ow.bin", 1000, 73);
+            g_sr_wr_real = st.write;
+            g_sr_wr_allow = -1;
+            st.write = sr_storage_write;
+            f = (r == FM_OK) ? File_Open("/srm/ow.bin",
+                                         FM_OPEN_READ | FM_OPEN_WRITE)
+                             : NULL;
+            if (r == FM_OK && f == NULL) r = File_GetLastError();
+            g_sr_wr_count = 0;
+            if (r == FM_OK) r = File_Write(f, patch, sizeof(patch), &wr);
+            if (f != NULL) (void)File_Close(f);
+            st.write = g_sr_wr_real;
+            /* one write for the data; the table (33 writes) is untouched */
+            if (r == FM_OK && g_sr_wr_count > 2u)
+            {
+                printf("[%lu storage writes] ", g_sr_wr_count);
+                r = FM_ERR_IO;
+            }
+            if (r == FM_OK) r = File_ReadAll("/srm/ow.bin", back,
+                                             sizeof(back), &got);
+            sr_pattern(want, sizeof(want), 73);
+            memcpy(want, patch, sizeof(patch));
+            if (r == FM_OK && (got != sizeof(want) ||
+                               memcmp(back, want, sizeof(want)) != 0))
+            {
+                r = FM_ERR_CRC;
+            }
+            (void)File_Delete("/srm/ow.bin");
+        }
+        CHECK_RESULT(r, "in-place write");
+
+        TEST("FMFS: handle of a deleted file cannot touch its successor");
+        {
+            static const uint8_t junk[16] = {
+                0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+                0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE
+            };
+            FM_File *f;
+            uint32_t n = 0;
+            uint8_t b[16];
+
+            r = sr_write("/srm/x.bin", 3000, 31);
+            f = (r == FM_OK) ? File_Open("/srm/x.bin",
+                                         FM_OPEN_READ | FM_OPEN_WRITE)
+                             : NULL;
+            if (r == FM_OK && f == NULL) r = File_GetLastError();
+            if (r == FM_OK) r = File_Delete("/srm/x.bin");
+            /* y takes the table slot x just gave up */
+            if (r == FM_OK) r = sr_write("/srm/y.bin", 3000, 32);
+            if (r == FM_OK)
+            {
+                if (File_Write(f, junk, sizeof(junk), &n) == FM_OK ||
+                    File_Read(f, b, sizeof(b), &n) == FM_OK)
+                {
+                    r = FM_ERR_EXISTS;
+                }
+            }
+            if (f != NULL) (void)File_Close(f);
+            if (r == FM_OK) r = sr_verify("/srm/y.bin", 3000, 32);
+            (void)File_Delete("/srm/y.bin");
+        }
+        CHECK_RESULT(r, "stale handle");
+
+        TEST("Directory_Copy: refuses a destination inside the source");
+        (void)Directory_DeleteRecursive("/sr_tree");
+        (void)Directory_DeleteRecursive("/sr_tree2");
+        r = Directory_Create("/sr_tree/sub");
+        if (r == FM_OK) r = sr_write("/sr_tree/a.bin", 40000, 41);
+        if (r == FM_OK) r = sr_write("/sr_tree/b.bin", 40000, 42);
+        if (r == FM_OK) r = sr_write("/sr_tree/sub/c.bin", 40000, 43);
+        if (r == FM_OK)
+        {
+            FM_Bool there = FM_TRUE;
+
+            if (Directory_Copy("/sr_tree", "/sr_tree/sub/x", NULL, NULL)
+                    != FM_ERR_INVALID_ARGUMENT ||
+                Directory_Copy("/sr_tree", "/sr_tree/", NULL, NULL)
+                    != FM_ERR_INVALID_ARGUMENT ||
+                Directory_Move("/sr_tree", "/sr_tree/sub/y", NULL, NULL)
+                    != FM_ERR_INVALID_ARGUMENT)
+            {
+                r = FM_ERR_INTERNAL;
+            }
+            if (r == FM_OK) r = Directory_Exists("/sr_tree/sub/x", &there);
+            if (r == FM_OK && there) r = FM_ERR_EXISTS;
+            /* moving onto itself is a no-op, the tree stays */
+            if (r == FM_OK) r = Directory_Move("/sr_tree", "/sr_tree/.",
+                                               NULL, NULL);
+            /* "/sr_tree2" only shares a prefix: a normal copy */
+            if (r == FM_OK) r = Directory_Copy("/sr_tree", "/sr_tree2",
+                                               NULL, NULL);
+            if (r == FM_OK) r = sr_verify("/sr_tree2/sub/c.bin", 40000, 43);
+            if (r == FM_OK) r = sr_verify("/sr_tree/a.bin", 40000, 41);
+        }
+        (void)Directory_DeleteRecursive("/sr_tree2");
+        CHECK_RESULT(r, "copy into itself");
+
+        TEST("Directory_Copy: a failed copy leaves no half tree behind");
+        {
+            FM_FSInfo before;
+            FM_FSInfo after;
+            FM_Bool there = FM_TRUE;
+            FM_Result rc;
+
+            memset(&before, 0, sizeof(before));
+            memset(&after, 0, sizeof(after));
+            r = FS_GetInfo("/srm", &before);
+            /* 120 KB into what is left of a 160 KB volume */
+            rc = Directory_Copy("/sr_tree", "/srm/t", NULL, NULL);
+            if (r == FM_OK && rc == FM_OK) r = FM_ERR_INTERNAL;
+            if (r == FM_OK) r = Directory_Exists("/srm/t", &there);
+            if (r == FM_OK && there) r = FM_ERR_EXISTS;
+            if (r == FM_OK) r = FS_GetInfo("/srm", &after);
+            if (r == FM_OK && after.free_space != before.free_space)
+            {
+                r = FM_ERR_NO_SPACE;
+            }
+            /* an existing destination is merged into, never removed */
+            if (r == FM_OK) r = Directory_Create("/srm/keep");
+            if (r == FM_OK) r = sr_write("/srm/keep/mine.bin", 100, 44);
+            if (r == FM_OK &&
+                Directory_Copy("/sr_tree", "/srm/keep", NULL, NULL) == FM_OK)
+            {
+                r = FM_ERR_INTERNAL;
+            }
+            if (r == FM_OK) r = sr_verify("/srm/keep/mine.bin", 100, 44);
+            (void)Directory_DeleteRecursive("/srm/keep");
+        }
+        (void)Directory_DeleteRecursive("/sr_tree");
+        CHECK_RESULT(r, "partial copy");
+
+        TEST("FMFS: reading a file writes nothing to the storage");
+        {
+            r = sr_write("/srm/ro.bin", 2000, 61);
+            g_sr_wr_real = st.write;
+            g_sr_wr_allow = -1;
+            st.write = sr_storage_write;
+            g_sr_wr_count = 0;
+            if (r == FM_OK) r = sr_verify("/srm/ro.bin", 2000, 61);
+            if (r == FM_OK)
+            {
+                FM_File *f = File_Open("/srm/ro.bin", FM_OPEN_READ);
+                uint8_t b[32];
+                uint32_t n = 0;
+
+                if (f == NULL)
+                {
+                    r = File_GetLastError();
+                }
+                else
+                {
+                    r = File_Read(f, b, sizeof(b), &n);
+                    if (r == FM_OK) r = File_Flush(f);
+                    (void)File_Close(f);
+                }
+            }
+            st.write = g_sr_wr_real;
+            if (r == FM_OK && g_sr_wr_count != 0u)
+            {
+                printf("[%lu storage writes] ", g_sr_wr_count);
+                r = FM_ERR_IO;
+            }
+            (void)File_Delete("/srm/ro.bin");
+        }
+        CHECK_RESULT(r, "read-only wear");
+
+        TEST("Directory_Move: destination survives a failed source delete");
+        {
+            unsigned long per_delete;
+            FM_Result rc;
+
+            (void)Directory_DeleteRecursive("/sr_mv");
+            r = Directory_Create("/srm/mv");
+            if (r == FM_OK) r = sr_write("/srm/mv/a.bin", 3000, 51);
+            if (r == FM_OK) r = sr_write("/srm/mv/b.bin", 3000, 52);
+            if (r == FM_OK) r = sr_write("/srm/probe.bin", 10, 53);
+            g_sr_wr_real = st.write;
+            g_sr_wr_allow = -1;
+            st.write = sr_storage_write;
+            g_sr_wr_count = 0;
+            if (r == FM_OK) r = File_Delete("/srm/probe.bin");
+            per_delete = g_sr_wr_count;
+            if (r == FM_OK && per_delete == 0u) r = FM_ERR_INTERNAL;
+            if (r == FM_OK)
+            {
+                /* the first delete goes through, the second one fails */
+                g_sr_wr_allow = (long)per_delete;
+                rc = Directory_Move("/srm/mv", "/sr_mv", NULL, NULL);
+                g_sr_wr_allow = -1;
+                if (rc == FM_OK) r = FM_ERR_INTERNAL;
+            }
+            st.write = g_sr_wr_real;
+            /* one source file is gone for good: the copy must be whole */
+            if (r == FM_OK) r = sr_verify("/sr_mv/a.bin", 3000, 51);
+            if (r == FM_OK) r = sr_verify("/sr_mv/b.bin", 3000, 52);
+            if (r == FM_OK)
+            {
+                /* a failed delete is not a delete: what the volume still
+                 * lists is really readable */
+                FM_Bool ea = FM_FALSE;
+                FM_Bool eb = FM_FALSE;
+
+                (void)File_Exists("/srm/mv/a.bin", &ea);
+                (void)File_Exists("/srm/mv/b.bin", &eb);
+                if (ea == eb) r = FM_ERR_CORRUPTED;     /* exactly one left */
+                if (r == FM_OK && ea) r = sr_verify("/srm/mv/a.bin", 3000, 51);
+                if (r == FM_OK && eb) r = sr_verify("/srm/mv/b.bin", 3000, 52);
+            }
+            (void)Directory_DeleteRecursive("/sr_mv");
+            (void)Directory_DeleteRecursive("/srm/mv");
+        }
+        CHECK_RESULT(r, "move rollback");
+
+        TEST("FS_Unmount / FS_Format refuse while a handle is open");
+        {
+            FM_File *f = File_Open("/srm/f4.bin", FM_OPEN_READ);
+            uint8_t b4[16];
+            uint8_t w4[16];
+            uint32_t rd = 0;
+
+            r = (f != NULL) ? FM_OK : File_GetLastError();
+            if (r == FM_OK && FS_Unmount("/srm") != FM_ERR_BUSY)
+            {
+                r = FM_ERR_INTERNAL;
+            }
+            if (r == FM_OK && FS_Format("/srm") != FM_ERR_BUSY)
+            {
+                r = FM_ERR_EXISTS;
+            }
+            /* the handle still works and the data is still there */
+            if (r == FM_OK) r = File_Read(f, b4, sizeof(b4), &rd);
+            sr_pattern(w4, sizeof(w4), 14);
+            if (r == FM_OK && (rd != sizeof(b4) ||
+                               memcmp(b4, w4, sizeof(b4)) != 0))
+            {
+                r = FM_ERR_CRC;
+            }
+            if (f != NULL) (void)File_Close(f);
+            if (r == FM_OK)
+            {
+                FM_Dir *d = Directory_Open("/srm");
+
+                if (d == NULL)
+                {
+                    r = File_GetLastError();
+                }
+                else
+                {
+                    if (FS_Unmount("/srm") != FM_ERR_BUSY)
+                    {
+                        r = FM_ERR_INTERNAL;
+                    }
+                    (void)Directory_Close(d);
+                }
+            }
+            /* nothing open any more: both work */
+            if (r == FM_OK) r = FS_Format("/srm");
+            if (r == FM_OK)
+            {
+                FM_Bool there = FM_TRUE;
+
+                r = File_Exists("/srm/f4.bin", &there);
+                if (r == FM_OK && there) r = FM_ERR_EXISTS;
+            }
+            if (r == FM_OK) r = FS_Unmount("/srm");
+            if (r == FM_OK) mounted = FM_FALSE;
+        }
+        CHECK_RESULT(r, "busy mount");
+
+        if (mounted) (void)FS_Unmount("/srm");
+        (void)Storage_Unregister("srm");
+    }
+#endif /* FM_USE_FMFS */
+
+#if FM_USE_FMFS
+    TEST("FMFS: 3 x 1500 random operations on a full volume match a model");
+    {
+        /* data area of roughly 30 KB for up to 6 x 9000 bytes of files */
+        static uint8_t mem[36 * 1024];
+        static FM_Storage st;
+        static FM_FS fs;
+        uint32_t refused = 0;
+        uint32_t round;
+
+        r = RamDisk_Init(&st, "srf", mem, sizeof(mem), 512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/srf", &fs);
+        for (round = 0; round < 3u && r == FM_OK; round++)
+        {
+            r = FS_Format("/srf");
+            if (r == FM_OK) r = srf_run(&fs, 0x1234u + round * 77u, 1500,
+                                        &refused);
+        }
+        /* the volume must really have been full now and then, or the
+         * test proved nothing about compaction */
+        if (r == FM_OK && refused < 20u)
+        {
+            printf("[only %u refusals] ", (unsigned)refused);
+            r = FM_ERR_INTERNAL;
+        }
+        if (r == FM_OK)
+        {
+            /* what a remount reads back from the storage is the same */
+            r = FS_Unmount("/srf");
+            if (r == FM_OK) r = FMFS_Init(&fs);
+            if (r == FM_OK) r = FS_Mount("/srf", &fs);
+            if (r == FM_OK) r = srf_check_all();
+        }
+        (void)FS_Unmount("/srf");
+        (void)Storage_Unregister("srf");
+    }
+    CHECK_RESULT(r, "fmfs model");
+#endif
+
+    TEST("Directory_Open(NULL) does not leak a pool slot");
+    r = FM_OK;
+    for (i = 0; i < (uint32_t)FM_MAX_OPEN_DIRS + 4u; i++)
+    {
+        if (Directory_Open(NULL) != NULL)
+        {
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    if (r == FM_OK)
+    {
+        FM_Dir *d = Directory_Open("/");
+
+        if (d == NULL)
+        {
+            r = File_GetLastError();
+        }
+        else
+        {
+            (void)Directory_Close(d);
+        }
+    }
+    CHECK_RESULT(r, "dir pool");
+
+    TEST("Allocator without realloc: FM_ReallocSized keeps the data");
+    {
+        FM_Allocator saved = *FM_Allocator_Get();
+        FM_Allocator only;
+        uint8_t *p;
+        uint8_t *q;
+
+        memset(&only, 0, sizeof(only));
+        only.alloc = sr_alloc_only;
+        only.free = sr_free_only;
+        r = (FM_Allocator_Set(&only) == 0) ? FM_OK : FM_ERR_INTERNAL;
+        p = (r == FM_OK) ? (uint8_t *)FM_Alloc(24) : NULL;
+        if (r == FM_OK && p == NULL) r = FM_ERR_NO_MEMORY;
+        if (r == FM_OK)
+        {
+            for (i = 0; i < 24u; i++) p[i] = (uint8_t)(i + 1u);
+            /* a real resize is impossible without the old size: refuse
+             * it (the old code copied 4096 bytes out of a 24-byte
+             * block) and leave the block alone */
+            q = (uint8_t *)FM_Realloc(p, 4096);
+            if (q != NULL)
+            {
+                p = q;
+                r = FM_ERR_INTERNAL;
+            }
+        }
+        if (r == FM_OK)
+        {
+            q = (uint8_t *)FM_ReallocSized(p, 24, 4096);
+            if (q == NULL)
+            {
+                r = FM_ERR_NO_MEMORY;
+            }
+            else
+            {
+                p = q;
+                for (i = 0; i < 24u; i++)
+                {
+                    if (p[i] != (uint8_t)(i + 1u)) r = FM_ERR_CRC;
+                }
+                memset(p + 24, 0xA5, 4096 - 24);
+            }
+        }
+        if (r == FM_OK)
+        {
+            q = (uint8_t *)FM_ReallocSized(p, 4096, 8);     /* shrink */
+            if (q == NULL)
+            {
+                r = FM_ERR_NO_MEMORY;
+            }
+            else
+            {
+                p = q;
+                for (i = 0; i < 8u; i++)
+                {
+                    if (p[i] != (uint8_t)(i + 1u)) r = FM_ERR_CRC;
+                }
+            }
+        }
+        if (r == FM_OK)
+        {
+            /* the trivial cases still work through FM_Realloc */
+            q = (uint8_t *)FM_Realloc(NULL, 32);
+            if (q == NULL) r = FM_ERR_NO_MEMORY;
+            else if (FM_Realloc(q, 0) != NULL) r = FM_ERR_INTERNAL;
+        }
+        if (p != NULL) FM_Free(p);
+        if (saved.alloc != NULL)
+        {
+            (void)FM_Allocator_Set(&saved);
+        }
+        else
+        {
+            FM_Allocator d;
+
+            memset(&d, 0, sizeof(d));
+            d.alloc = def_alloc;
+            d.calloc = def_calloc;
+            d.realloc = def_realloc;
+            d.free = def_free;
+            (void)FM_Allocator_Set(&d);
+        }
+    }
+    CHECK_RESULT(r, "sized realloc");
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+    TEST("Threads: nested copy is refused, a second task waits");
+    r = sr_write("/sr_a.bin", 30000, 21);
+    if (r == FM_OK) r = sr_write("/sr_b.bin", 30000, 22);
+    g_sr_started = 0;
+    g_sr_done = 0;
+    g_sr_done_while_held = 0;
+    g_sr_nested = FM_OK;
+    g_sr_second = FM_ERR_INTERNAL;
+    g_sr_cb_calls = 0;
+    g_sr_thread_ok = 0;
+    if (r == FM_OK) r = File_Copy("/sr_a.bin", "/sr_a2.bin", sr_copy_cb, NULL);
+    if (g_sr_thread_ok)
+    {
+        (void)pthread_join(g_sr_thread, NULL);
+    }
+    if (r == FM_OK && (g_sr_cb_calls == 0 || !g_sr_thread_ok))
+    {
+        r = FM_ERR_INTERNAL;
+    }
+    if (r == FM_OK && g_sr_nested != FM_ERR_BUSY)
+    {
+        printf("[nested: %s] ", FM_ResultString(g_sr_nested));
+        r = FM_ERR_BUSY;
+    }
+    if (r == FM_OK && g_sr_done_while_held != 0)
+    {
+        printf("[second task did not wait] ");
+        r = FM_ERR_BUSY;
+    }
+    if (r == FM_OK && g_sr_second != FM_OK)
+    {
+        printf("[second task: %s] ", FM_ResultString(g_sr_second));
+        r = g_sr_second;
+    }
+    if (r == FM_OK) r = sr_verify("/sr_a2.bin", 30000, 21);
+    if (r == FM_OK) r = sr_verify("/sr_b2.bin", 30000, 22);
+    (void)File_Delete("/sr_a.bin");
+    (void)File_Delete("/sr_a2.bin");
+    (void)File_Delete("/sr_b2.bin");
+    (void)File_Delete("/sr_n.bin");
+    CHECK_RESULT(r, "claims");
+
+#if FM_SYNC_HAS_THREAD_SELF && (FM_LAST_ERROR_THREADS > 0)
+    TEST("Threads: File_GetLastError is per task");
+    {
+        pthread_t th;
+        int bad = 0;
+
+        g_sr_stop = 0;
+        r = sr_write("/sr_b.bin", 64, 22);
+        if (r == FM_OK && pthread_create(&th, NULL, sr_ok_opener, NULL) != 0)
+        {
+            r = FM_ERR_INTERNAL;
+        }
+        if (r == FM_OK)
+        {
+            for (i = 0; i < 400u; i++)
+            {
+                if (File_Open("/sr_no_such_file.bin", FM_OPEN_READ) != NULL)
+                {
+                    bad = -1;
+                    break;
+                }
+                (void)sched_yield();
+                if (File_GetLastError() != FM_ERR_NOT_FOUND)
+                {
+                    bad++;
+                }
+            }
+            __atomic_store_n(&g_sr_stop, 1, __ATOMIC_SEQ_CST);
+            (void)pthread_join(th, NULL);
+            if (bad != 0)
+            {
+                printf("[%d of 400 reads saw the other task's result] ",
+                       bad);
+                r = FM_ERR_BUSY;
+            }
+        }
+        (void)File_Delete("/sr_b.bin");
+    }
+    CHECK_RESULT(r, "last error");
+#endif
+#endif /* FM_USE_THREADS && FM_HOST_BUILD */
+}
+
 /* ================================================================ */
 /* The file-handle pool is a fixed FM_MAX_OPEN_FILES array: one handle
  * leaked by an error path is gone until reset, and the suites after it
@@ -14310,8 +15881,10 @@ int main(void)
     RUN_SUITE(test_allocator);
     RUN_SUITE(test_regressions);
     RUN_SUITE(test_coverage);
+    RUN_SUITE(test_sync_report);
 #if FM_USE_THREADS && FM_HOST_BUILD
     RUN_SUITE(test_threads);
+    RUN_SUITE(test_threads_wide);
 #endif
 
     printf("\n  Results: %d/%d passed, %d failures\n",

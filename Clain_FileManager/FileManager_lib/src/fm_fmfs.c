@@ -47,6 +47,14 @@ typedef struct
     uint64_t     data_start;
     uint64_t     data_next;
     FMFS_Entry   entries[FM_FMFS_MAX_ENTRIES];
+    /* RAM only: bumped whenever a table slot is freed.  An open handle
+     * remembers the value it was opened with, so a handle whose file
+     * was deleted (or replaced by a rename) can never read or write the
+     * unrelated file that reuses the slot later. */
+    uint32_t     gen[FM_FMFS_MAX_ENTRIES];
+    /* RAM only: the table in RAM may differ from the one on the
+     * storage (a write is in progress, or the last save failed). */
+    uint8_t      dirty;
 } FMFS_Context;
 
 typedef struct
@@ -54,6 +62,7 @@ typedef struct
     uint16_t index;
     uint8_t  mode;
     uint8_t  used;
+    uint32_t gen;
     uint64_t pos;
 } FMFS_FileHandle;
 
@@ -146,6 +155,55 @@ static FM_Result fmfs_range(FMFS_Context *ctx, uint64_t offset,
 static FMFS_Context *fmfs_ctx(FM_FS *fs)
 {
     return (FMFS_Context *)fs->user;
+}
+
+static FM_Result fmfs_save(FMFS_Context *ctx);
+
+static void fmfs_bump_all(FMFS_Context *ctx)
+{
+    uint32_t i;
+
+    for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+    {
+        ctx->gen[i]++;
+    }
+}
+
+/* The table entry behind an open handle, or NULL when the file is gone. */
+static FMFS_Entry *fmfs_handle_entry(FMFS_Context *ctx,
+                                     const FMFS_FileHandle *handle)
+{
+    FMFS_Entry *entry;
+
+    if (handle->index >= FM_FMFS_MAX_ENTRIES)
+    {
+        return NULL;
+    }
+    entry = &ctx->entries[handle->index];
+    if (!entry->used || entry->type != FM_ITEM_FILE ||
+        ctx->gen[handle->index] != handle->gen)
+    {
+        return NULL;
+    }
+    return entry;
+}
+
+/* Free one slot and persist; on a failed save the slot is put back so
+ * the table in RAM keeps describing what is actually on the storage. */
+static FM_Result fmfs_remove_entry(FMFS_Context *ctx, int index)
+{
+    FMFS_Entry saved = ctx->entries[index];
+    FM_Result r;
+
+    memset(&ctx->entries[index], 0, sizeof(ctx->entries[index]));
+    r = fmfs_save(ctx);
+    if (r != FM_OK)
+    {
+        ctx->entries[index] = saved;
+        return r;
+    }
+    ctx->gen[index]++;
+    return FM_OK;
 }
 
 static int fmfs_find(FMFS_Context *ctx, const char *path)
@@ -256,6 +314,7 @@ static FM_Result fmfs_save(FMFS_Context *ctx)
     uint32_t i;
     uint16_t count = 0;
 
+    ctx->dirty = 1;
     if (fmfs_range(ctx, 0, FMFS_METADATA_SIZE) != FM_OK)
     {
         return FM_ERR_NO_SPACE;
@@ -299,12 +358,14 @@ static FM_Result fmfs_save(FMFS_Context *ctx)
     {
         return FM_ERR_IO;
     }
+    ctx->dirty = 0;
     return FM_OK;
 }
 
 static FM_Result fmfs_reset(FMFS_Context *ctx)
 {
     memset(ctx->entries, 0, sizeof(ctx->entries));
+    fmfs_bump_all(ctx);
     ctx->data_start = FMFS_METADATA_SIZE;
     ctx->data_next = ctx->data_start;
     ctx->entries[0].used = 1;
@@ -422,7 +483,16 @@ static FM_Result fmfs_add(FMFS_Context *ctx, const char *path, uint8_t type,
             ctx->entries[i].type = type;
             (void)strcpy(ctx->entries[i].path, path);
             if (index_out != NULL) *index_out = (int)i;
-            return fmfs_save(ctx);
+            {
+                FM_Result r = fmfs_save(ctx);
+
+                if (r != FM_OK)
+                {
+                    /* not on the storage: not in the table either */
+                    memset(&ctx->entries[i], 0, sizeof(ctx->entries[i]));
+                }
+                return r;
+            }
         }
     }
     return FM_ERR_NO_MEMORY;
@@ -467,14 +537,225 @@ static FM_Result fmfs_zero_data(FMFS_Context *ctx, uint64_t offset,
     return FM_OK;
 }
 
+/* Compact the data area in place: slide every live file down so they sit
+ * back to back from data_start, and pull data_next back to the end of
+ * the last one.  The space of deleted, truncated and relocated files is
+ * recovered.
+ *
+ * Files are moved in ASCENDING OFFSET order, never in entry-table order.
+ * A slot's index says nothing about where its data lives (slots are
+ * reused, and a file that grows is relocated to the end of the data
+ * area), so walking the table could slide a file from high up down onto
+ * a live file that has not been moved yet -- and destroy it.  In offset
+ * order every move goes to an address at or below the file's own, and
+ * everything below that address has already been moved.
+ *
+ * Open handles stay valid: they hold the entry index and a position,
+ * not a storage offset.  Does not write the metadata (the caller saves
+ * it together with its own change). */
+static FM_Result fmfs_repack(FMFS_Context *ctx)
+{
+    uint64_t dest = ctx->data_start;
+    uint64_t floor = 0;             /* offsets below this are done */
+    FM_Result r;
+
+    ctx->dirty = 1;
+
+    for (;;)
+    {
+        FMFS_Entry *next = NULL;
+        uint32_t i;
+
+        for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+        {
+            FMFS_Entry *e = &ctx->entries[i];
+
+            if (e->used && e->type == FM_ITEM_FILE && e->size != 0u &&
+                e->offset >= floor &&
+                (next == NULL || e->offset < next->offset))
+            {
+                next = e;
+            }
+        }
+        if (next == NULL)
+        {
+            break;
+        }
+        floor = next->offset + next->size;
+        if (next->offset != dest)
+        {
+            /* dest < offset: a forward, chunk-by-chunk copy is safe even
+             * when the two ranges overlap */
+            r = fmfs_copy_data(ctx, dest, next->offset, next->size);
+            if (r != FM_OK)
+            {
+                return r;
+            }
+            next->offset = dest;
+        }
+        dest += next->size;
+    }
+    /* wipe the freed tail so stale data doesn't linger */
+    if (dest < ctx->data_next)
+    {
+        r = fmfs_zero_data(ctx, dest, ctx->data_next - dest);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+    }
+    ctx->data_next = dest;
+    return FM_OK;
+}
+
+static FM_Result fmfs_relocate_once(FMFS_Context *ctx, FMFS_Entry *entry,
+                                    uint64_t new_size);
+
+/* Exchange two equally long, non-overlapping byte ranges. */
+static FM_Result fmfs_swap_data(FMFS_Context *ctx, uint64_t a, uint64_t b,
+                                uint64_t size)
+{
+    uint8_t ba[FMFS_COPY_BUF_SIZE];
+    uint8_t bb[FMFS_COPY_BUF_SIZE];
+    uint64_t done = 0;
+
+    while (done < size)
+    {
+        uint32_t chunk = (uint32_t)((size - done < sizeof(ba))
+                                        ? size - done : sizeof(ba));
+        FM_Result r = fmfs_read(ctx, a + done, ba, chunk);
+
+        if (r == FM_OK) r = fmfs_read(ctx, b + done, bb, chunk);
+        if (r == FM_OK) r = fmfs_write(ctx, a + done, bb, chunk);
+        if (r == FM_OK) r = fmfs_write(ctx, b + done, ba, chunk);
+        if (r != FM_OK) return r;
+        done += chunk;
+    }
+    return FM_OK;
+}
+
+/* Turn the adjacent ranges [A: a_len][B: b_len] starting at `base` into
+ * [B][A] without any spare room (block-swap rotation: exchange the
+ * shorter range with the matching part of the longer one, which puts
+ * the shorter one in its final place, and repeat on what is left). */
+static FM_Result fmfs_rotate_data(FMFS_Context *ctx, uint64_t base,
+                                  uint64_t a_len, uint64_t b_len)
+{
+    while (a_len != 0u && b_len != 0u)
+    {
+        FM_Result r;
+
+        if (a_len <= b_len)
+        {
+            /* [A][B1][B2] -> [B1][A][B2]; B1 is final */
+            r = fmfs_swap_data(ctx, base, base + a_len, a_len);
+            base += a_len;
+            b_len -= a_len;
+        }
+        else
+        {
+            /* [A1][A2][B] -> [B][A2][A1]; B is final */
+            r = fmfs_swap_data(ctx, base, base + a_len, b_len);
+            base += b_len;
+            a_len -= b_len;
+        }
+        if (r != FM_OK)
+        {
+            return r;
+        }
+    }
+    return FM_OK;
+}
+
+/* Make `entry` the last file of a freshly compacted data area, so it
+ * can grow into the free tail.  Everything stored behind it moves down
+ * by its size. */
+static FM_Result fmfs_move_last(FMFS_Context *ctx, FMFS_Entry *entry)
+{
+    uint64_t start = entry->offset;
+    uint64_t size = entry->size;
+    uint64_t behind = ctx->data_next - (start + size);
+    uint32_t i;
+    FM_Result r;
+
+    ctx->dirty = 1;
+    r = fmfs_rotate_data(ctx, start, size, behind);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+    {
+        FMFS_Entry *e = &ctx->entries[i];
+
+        if (e->used && e->type == FM_ITEM_FILE && e != entry &&
+            e->size != 0u && e->offset > start)
+        {
+            e->offset -= size;
+        }
+    }
+    entry->offset = ctx->data_next - size;
+    return FM_OK;
+}
+
+/* Give `entry` room for new_size bytes.  The data area is a bump
+ * allocator, so "no space" at the tail usually only means that dead
+ * space sits between the files.  Before reporting FM_ERR_NO_SPACE:
+ * compact; then either move the file to the (now larger) tail, or --
+ * when even that does not hold a second copy of it -- rotate it to the
+ * end of the packed data and let it grow in place.  A write therefore
+ * fails for lack of space only when the live data really does not fit. */
 static FM_Result fmfs_relocate(FMFS_Context *ctx, FMFS_Entry *entry,
                                uint64_t new_size)
+{
+    FM_Result r = fmfs_relocate_once(ctx, entry, new_size);
+
+    if (r == FM_ERR_NO_SPACE && fmfs_repack(ctx) == FM_OK)
+    {
+        FM_Bool last = (entry->size != 0u &&
+                        entry->offset + entry->size == ctx->data_next)
+                           ? FM_TRUE : FM_FALSE;
+
+        if (!last && fmfs_range(ctx, ctx->data_next, new_size) == FM_OK)
+        {
+            return fmfs_relocate_once(ctx, entry, new_size);
+        }
+        if (!last && entry->size != 0u && new_size > entry->size &&
+            fmfs_range(ctx, ctx->data_next,
+                       new_size - entry->size) == FM_OK)
+        {
+            r = fmfs_move_last(ctx, entry);
+            if (r != FM_OK)
+            {
+                return r;
+            }
+            last = FM_TRUE;
+        }
+        r = FM_ERR_NO_SPACE;
+        if (last && new_size > entry->size &&
+            fmfs_range(ctx, entry->offset, new_size) == FM_OK)
+        {
+            r = fmfs_zero_data(ctx, entry->offset + entry->size,
+                               new_size - entry->size);
+            if (r == FM_OK)
+            {
+                ctx->data_next = entry->offset + new_size;
+                entry->size = new_size;
+            }
+        }
+    }
+    return r;
+}
+
+static FM_Result fmfs_relocate_once(FMFS_Context *ctx, FMFS_Entry *entry,
+                                    uint64_t new_size)
 {
     uint64_t new_offset;
     FM_Result r;
 
     if (new_size == 0)
     {
+        ctx->dirty = 1;
         entry->size = 0;
         return FM_OK;
     }
@@ -487,6 +768,7 @@ static FM_Result fmfs_relocate(FMFS_Context *ctx, FMFS_Entry *entry,
     {
         return r;
     }
+    ctx->dirty = 1;
     new_offset = ctx->data_next;
     ctx->data_next += new_size;
     if (entry->size > 0)
@@ -530,15 +812,20 @@ static FM_Result fmfs_prepare_write(FMFS_Context *ctx, FMFS_Entry *entry,
 
         if (r == FM_OK)
         {
-            if (end > entry->size)
+            /* Only a gap left by a seek past the end has to read back
+             * as zeros; the rest of the extension is about to be
+             * written by the caller.  (Zero-filling all of it wrote
+             * every appended byte to the flash twice.) */
+            if (pos > entry->size)
             {
                 r = fmfs_zero_data(ctx, entry->offset + entry->size,
-                                   end - entry->size);
+                                   pos - entry->size);
                 if (r != FM_OK)
                 {
                     return r;
                 }
             }
+            ctx->dirty = 1;
             ctx->data_next = entry->offset + end;
             entry->size = end;
             return FM_OK;
@@ -636,12 +923,23 @@ static FM_Result fmfs_file_open(FM_FS *fs, void *fh, const char *path,
     memset(handle, 0, FM_FS_HANDLE_SIZE);
     handle->index = (uint16_t)index;
     handle->mode = (uint8_t)mode;
+    handle->gen = ctx->gen[index];
     handle->used = 1;
     if (mode & FM_OPEN_TRUNCATE)
     {
+        uint64_t old_size = ctx->entries[index].size;
+        uint64_t old_offset = ctx->entries[index].offset;
+
         ctx->entries[index].size = 0;
         ctx->entries[index].offset = ctx->data_next;
-        (void)fmfs_save(ctx);
+        r = fmfs_save(ctx);
+        if (r != FM_OK)
+        {
+            ctx->entries[index].size = old_size;
+            ctx->entries[index].offset = old_offset;
+            handle->used = 0;
+            return r;
+        }
     }
     if (mode & FM_OPEN_APPEND)
     {
@@ -678,7 +976,11 @@ static FM_Result fmfs_file_read(FM_FS *fs, void *fh, void *data,
         return FM_ERR_INVALID_ARGUMENT;
     }
     if (read != NULL) *read = 0;
-    entry = &ctx->entries[handle->index];
+    entry = fmfs_handle_entry(ctx, handle);
+    if (entry == NULL)
+    {
+        return FM_ERR_NOT_FOUND;        /* deleted while open */
+    }
     if (handle->pos >= entry->size)
     {
         return FM_ERR_EOF;
@@ -700,6 +1002,7 @@ static FM_Result fmfs_file_write(FM_FS *fs, void *fh, const void *data,
     FMFS_Context *ctx = fmfs_ctx(fs);
     FMFS_FileHandle *handle = (FMFS_FileHandle *)fh;
     FMFS_Entry *entry;
+    uint64_t old_size;
     FM_Result r;
 
     if (handle == NULL || !handle->used || data == NULL)
@@ -711,13 +1014,39 @@ static FM_Result fmfs_file_write(FM_FS *fs, void *fh, const void *data,
     {
         return FM_ERR_ACCESS;
     }
-    entry = &ctx->entries[handle->index];
+    entry = fmfs_handle_entry(ctx, handle);
+    if (entry == NULL)
+    {
+        return FM_ERR_NOT_FOUND;        /* deleted while open */
+    }
+    old_size = entry->size;
     r = fmfs_prepare_write(ctx, entry, handle->pos, len);
-    if (r != FM_OK) return r;
-    r = fmfs_write(ctx, entry->offset + handle->pos, data, len);
-    if (r != FM_OK) return r;
-    handle->pos += len;
-    r = fmfs_save(ctx);
+    if (r == FM_OK)
+    {
+        r = fmfs_write(ctx, entry->offset + handle->pos, data, len);
+        if (r != FM_OK && entry->size > old_size)
+        {
+            /* the extension never received its data: do not let the
+             * file grow by whatever was lying in that space */
+            entry->size = old_size;
+            ctx->dirty = 1;
+        }
+    }
+    if (r == FM_OK)
+    {
+        handle->pos += len;
+    }
+    /* The metadata only changes when the file grew or data moved; an
+     * overwrite in place leaves it alone (it used to cost a rewrite of
+     * the whole table per File_Write).  It IS saved after a failure
+     * that compacted the area on the way, so the storage never keeps a
+     * table that points at the old places. */
+    if (ctx->dirty)
+    {
+        FM_Result rs = fmfs_save(ctx);
+
+        if (r == FM_OK) r = rs;
+    }
     if (r == FM_OK && written != NULL) *written = len;
     return r;
 }
@@ -733,6 +1062,10 @@ static FM_Result fmfs_file_seek(FM_FS *fs, void *fh, int64_t offset,
     if (handle == NULL || !handle->used)
     {
         return FM_ERR_NOT_OPEN;
+    }
+    if (fmfs_handle_entry(ctx, handle) == NULL)
+    {
+        return FM_ERR_NOT_FOUND;        /* deleted while open */
     }
     base = (origin == FM_SEEK_SET) ? 0 :
            (origin == FM_SEEK_CUR ? (int64_t)handle->pos :
@@ -777,6 +1110,10 @@ static FM_Result fmfs_file_size(FM_FS *fs, void *fh, uint64_t *size)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
+    if (fmfs_handle_entry(ctx, handle) == NULL)
+    {
+        return FM_ERR_NOT_FOUND;        /* deleted while open */
+    }
     *size = ctx->entries[handle->index].size;
     return FM_OK;
 }
@@ -796,18 +1133,32 @@ static FM_Result fmfs_file_truncate(FM_FS *fs, void *fh, uint64_t size)
     {
         return FM_ERR_ACCESS;
     }
-    entry = &ctx->entries[handle->index];
+    entry = fmfs_handle_entry(ctx, handle);
+    if (entry == NULL)
+    {
+        return FM_ERR_NOT_FOUND;        /* deleted while open */
+    }
+    r = FM_OK;
     if (size < entry->size)
     {
         entry->size = size;
+        ctx->dirty = 1;
     }
     else if (size > entry->size)
     {
         r = fmfs_relocate(ctx, entry, size);
-        if (r != FM_OK) return r;
     }
-    if (handle->pos > size) handle->pos = size;
-    return fmfs_save(ctx);
+    if (r == FM_OK && handle->pos > size)
+    {
+        handle->pos = size;
+    }
+    if (ctx->dirty)
+    {
+        FM_Result rs = fmfs_save(ctx);
+
+        if (r == FM_OK) r = rs;
+    }
+    return r;
 }
 
 static FM_Result fmfs_file_flush(FM_FS *fs, void *fh)
@@ -817,6 +1168,15 @@ static FM_Result fmfs_file_flush(FM_FS *fs, void *fh)
     if (handle == NULL || !handle->used)
     {
         return FM_ERR_NOT_OPEN;
+    }
+    /* Every change is saved when it is made, so there is normally
+     * nothing left to do.  Saving unconditionally rewrote the whole
+     * metadata table on every flush and every close -- including the
+     * close of a file that was only read -- which on NOR flash is pure
+     * wear. */
+    if (!fmfs_ctx(fs)->dirty)
+    {
+        return FM_OK;
     }
     return fmfs_save(fmfs_ctx(fs));
 }
@@ -859,8 +1219,7 @@ static FM_Result fmfs_delete(FM_FS *fs, const char *path)
     {
         return FM_ERR_IS_DIRECTORY;
     }
-    memset(&ctx->entries[index], 0, sizeof(ctx->entries[index]));
-    return fmfs_save(ctx);
+    return fmfs_remove_entry(ctx, index);
 }
 
 static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
@@ -918,6 +1277,7 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
             }
         }
         memset(&ctx->entries[new_index], 0, sizeof(ctx->entries[new_index]));
+        ctx->gen[new_index]++;
     }
 
     r = fmfs_parent_path(new_clean, parent, sizeof(parent));
@@ -983,8 +1343,7 @@ static FM_Result fmfs_rmdir(FM_FS *fs, const char *path)
     if (index < 0) return FM_ERR_NOT_FOUND;
     if (ctx->entries[index].type != FM_ITEM_DIR) return FM_ERR_NOT_DIRECTORY;
     if (fmfs_has_child(ctx, clean)) return FM_ERR_NOT_EMPTY;
-    memset(&ctx->entries[index], 0, sizeof(ctx->entries[index]));
-    return fmfs_save(ctx);
+    return fmfs_remove_entry(ctx, index);
 }
 
 static FM_Result fmfs_dir_open(FM_FS *fs, void *dh, const char *path)
@@ -1057,8 +1416,24 @@ static FM_Result fmfs_get_free(FM_FS *fs, uint64_t *free_bytes,
         return FM_ERR_INVALID_ARGUMENT;
     }
     *total_bytes = ctx->storage->capacity;
-    *free_bytes = (ctx->data_next <= ctx->storage->capacity)
-                      ? ctx->storage->capacity - ctx->data_next : 0;
+    {
+        /* Free = capacity minus metadata minus live file data.  The dead
+         * space between files counts as free: a write that runs out of
+         * tail compacts the data area and reuses it (fmfs_relocate). */
+        uint64_t live = ctx->data_start;
+        uint32_t i;
+
+        for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+        {
+            if (ctx->entries[i].used &&
+                ctx->entries[i].type == FM_ITEM_FILE)
+            {
+                live += ctx->entries[i].size;
+            }
+        }
+        *free_bytes = (live <= ctx->storage->capacity)
+                          ? ctx->storage->capacity - live : 0;
+    }
     return FM_OK;
 }
 
@@ -1075,12 +1450,16 @@ static FM_Result fmfs_get_type(FM_FS *fs, char *type, size_t type_size)
 
 /* Compact the data area: relocate every live file contiguously from
  * data_start, so that space consumed by deleted files is recovered.
- * All open file handles become invalid because offsets change. */
+ * Open file handles stay valid.  The filesystem does this by itself
+ * when a write would otherwise fail with FM_ERR_NO_SPACE; call it
+ * explicitly to do the work at a convenient time instead.
+ *
+ * Takes the mount's backend lock, so it is safe next to file activity
+ * of other tasks on the same FMFS. */
 FM_Result FMFS_Repack(FM_FS *fs)
 {
     FMFS_Context *ctx;
-    uint64_t dest;
-    uint32_t i;
+    FM_MountEntry *mount;
     FM_Result r;
 
     if (fs == NULL)
@@ -1088,45 +1467,25 @@ FM_Result FMFS_Repack(FM_FS *fs)
         return FM_ERR_INVALID_ARGUMENT;
     }
     ctx = fmfs_ctx(fs);
-    if (ctx == NULL || ctx->storage == NULL)
+    if (ctx == NULL)
     {
         return FM_ERR_NOT_READY;
     }
-
-    dest = ctx->data_start;
-    for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+    mount = FM_VFS_EnterFS(fs);         /* NULL: not mounted through VFS */
+    if (ctx->storage == NULL)
     {
-        FMFS_Entry *e = &ctx->entries[i];
-
-        if (!e->used || e->type != FM_ITEM_FILE || e->size == 0)
-        {
-            continue;
-        }
-        if (e->offset == dest)
-        {
-            /* already at the right place */
-            dest += e->size;
-            continue;
-        }
-        r = fmfs_copy_data(ctx, dest, e->offset, e->size);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        e->offset = dest;
-        dest += e->size;
+        r = FM_ERR_NOT_READY;
     }
-    /* wipe the freed tail so stale data doesn't linger */
-    if (dest < ctx->data_next)
+    else
     {
-        r = fmfs_zero_data(ctx, dest, ctx->data_next - dest);
-        if (r != FM_OK)
+        r = fmfs_repack(ctx);
+        if (r == FM_OK)
         {
-            return r;
+            r = fmfs_save(ctx);
         }
     }
-    ctx->data_next = dest;
-    return fmfs_save(ctx);
+    FM_VFS_LeaveFS(mount);
+    return r;
 }
 
 FM_Result FMFS_Init(FM_FS *fs)

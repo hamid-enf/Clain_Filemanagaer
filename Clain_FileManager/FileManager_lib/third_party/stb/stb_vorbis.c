@@ -989,15 +989,31 @@ static void setup_temp_free(vorb *f, void *p, int sz)
 #define CRC32_POLY    0x04c11db7   // from spec
 
 static uint32 crc_table[256];
+// FileManager patch: build the table once.  Upstream rebuilds it on every
+// open "to avoid multithread race conditions", which is itself a data
+// race: one thread rewrites crc_table[] while another, already decoding,
+// reads it.  stb_vorbis_fm_init() is called from FM_Vorbis_Init(), i.e.
+// from FileManager_Init() while the application is still single threaded;
+// after that every later crc32_init() only reads the flag.
+static int crc_table_ready;
 static void crc32_init(void)
 {
    int i,j;
    uint32 s;
+   if (crc_table_ready)
+      return;
    for(i=0; i < 256; i++) {
       for (s=(uint32) i << 24, j=0; j < 8; ++j)
          s = (s << 1) ^ (s >= (1U<<31) ? CRC32_POLY : 0);
       crc_table[i] = s;
    }
+   crc_table_ready = 1;
+}
+
+void stb_vorbis_fm_init(void);
+void stb_vorbis_fm_init(void)
+{
+   crc32_init();
 }
 
 static __forceinline uint32 crc32_update(uint32 crc, uint8 byte)

@@ -82,3 +82,4 @@ examples/json_example
 examples/safe_write
 examples/setup
 examples/text_lines
+fm_tsan.log

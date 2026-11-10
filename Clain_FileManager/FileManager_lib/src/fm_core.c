@@ -34,49 +34,110 @@ static FM_Mutex g_core_lock;
 static uint8_t  g_core_lock_ready = 0;
 #endif
 
-#if FM_USE_IMAGE || FM_USE_MJPEG
-#if FM_USE_THREADS
-static FM_Mutex g_codec_lock;
-static uint8_t  g_codec_lock_ready = 0;
-#else
-static uint8_t  g_codec_busy = 0;
-#endif
+/* ------------------------------------------------------------------ */
+/* Scratch claims                                                      */
+/*                                                                     */
+/* A handful of large work areas exist once for the whole library: the */
+/* File_Copy / File_Insert buffer, the still-image / MJPEG codec state */
+/* and the transfer buffer.  A claim gives one user at a time          */
+/* exclusive use of one of them.                                       */
+/*                                                                     */
+/* Two different things can ask for a claim that is already taken:     */
+/*                                                                     */
+/*   another task   -- it simply has to wait its turn;                 */
+/*   the same task  -- a nested call from a progress callback, the     */
+/*                     FM_SetIdle hook or a codec callback.  Waiting   */
+/*                     would never end, so it gets FM_ERR_BUSY and the */
+/*                     outer operation is left intact.                 */
+/*                                                                     */
+/* Telling them apart needs the identity of the calling thread, which  */
+/* the sync port supplies (FM_SYNC_HAS_THREAD_SELF).  Thread-local     */
+/* storage is deliberately not used: on bare-metal toolchains __thread */
+/* is one block shared by every RTOS task.  A port without thread      */
+/* identity, and every FM_USE_THREADS == 0 build, falls back to "never */
+/* wait": whoever finds the claim taken gets FM_ERR_BUSY.              */
+/* ------------------------------------------------------------------ */
+#define FM_SCRATCH_BLOCKING (FM_USE_THREADS && FM_SYNC_HAS_THREAD_SELF)
 
-FM_Result FM_CodecScratch_Enter(void)
+typedef struct
 {
-#if FM_USE_THREADS
-    uint8_t ready;
+#if FM_SCRATCH_BLOCKING
+    FM_Mutex    mtx;
+    FM_ThreadId owner;      /* valid while held != 0 */
+    uint8_t     ready;
+#endif
+    uint8_t     held;
+} FM_Scratch;
+
+static FM_Scratch g_scratch[FM_SCRATCH_COUNT];
+
+FM_Result FM_Scratch_Enter(FM_ScratchId id)
+{
+    FM_Scratch *c = &g_scratch[id];
+    FM_Result r = FM_OK;
+
+#if FM_SCRATCH_BLOCKING
+    FM_ThreadId self = FM_Thread_Self();
 
     FM_Lock();
-    if (!g_codec_lock_ready && FM_Mutex_Create(&g_codec_lock) == FM_OK)
+    if (!c->ready && FM_Mutex_Create(&c->mtx) == FM_OK)
     {
-        g_codec_lock_ready = 1;
+        c->ready = 1;
     }
-    ready = g_codec_lock_ready;
+    if (!c->ready)
+    {
+        r = FM_ERR_INTERNAL;
+    }
+    else if (c->held != 0u && FM_Thread_Equal(c->owner, self))
+    {
+        r = FM_ERR_BUSY;            /* nested on the owning thread */
+    }
     FM_Unlock();
-    if (!ready)
+    if (r != FM_OK)
     {
-        return FM_ERR_INTERNAL;
+        return r;
     }
-    FM_Mutex_Lock(&g_codec_lock);
-    return FM_OK;
+    FM_Mutex_Lock(&c->mtx);         /* waits for another thread */
+    FM_Lock();
+    c->owner = self;
+    c->held = 1u;
+    FM_Unlock();
 #else
-    if (g_codec_busy != 0u)
+    FM_Lock();
+    if (c->held != 0u)
     {
-        return FM_ERR_BUSY;
+        r = FM_ERR_BUSY;
     }
-    g_codec_busy = 1u;
-    return FM_OK;
+    else
+    {
+        c->held = 1u;
+    }
+    FM_Unlock();
 #endif
+    return r;
+}
+
+void FM_Scratch_Leave(FM_ScratchId id)
+{
+    FM_Scratch *c = &g_scratch[id];
+
+    FM_Lock();
+    c->held = 0u;
+    FM_Unlock();
+#if FM_SCRATCH_BLOCKING
+    FM_Mutex_Unlock(&c->mtx);
+#endif
+}
+
+#if FM_USE_IMAGE || FM_USE_MJPEG
+FM_Result FM_CodecScratch_Enter(void)
+{
+    return FM_Scratch_Enter(FM_SCRATCH_CODEC);
 }
 
 void FM_CodecScratch_Leave(void)
 {
-#if FM_USE_THREADS
-    FM_Mutex_Unlock(&g_codec_lock);
-#else
-    g_codec_busy = 0u;
-#endif
+    FM_Scratch_Leave(FM_SCRATCH_CODEC);
 }
 #endif /* FM_USE_IMAGE || FM_USE_MJPEG */
 
@@ -94,19 +155,30 @@ const char *FileManager_GetVersionString(void)
 
 void FileManager_Deinit(void)
 {
+    /* Call once every task has stopped using the library. */
 #if FM_USE_THREADS
+#if FM_SCRATCH_BLOCKING
+    {
+        uint32_t i;
+
+        for (i = 0; i < (uint32_t)FM_SCRATCH_COUNT; i++)
+        {
+            if (g_scratch[i].ready && g_scratch[i].held == 0u)
+            {
+                FM_Mutex_Destroy(&g_scratch[i].mtx);
+                g_scratch[i].ready = 0;
+            }
+        }
+    }
+#endif
+    FM_File_SyncDeinit();
+    FM_Storage_SyncDeinit();
+    FM_VFS_SyncDeinit();
     if (g_core_lock_ready)
     {
         FM_Mutex_Destroy(&g_core_lock);
         g_core_lock_ready = 0;
     }
-#if FM_USE_IMAGE || FM_USE_MJPEG
-    if (g_codec_lock_ready)
-    {
-        FM_Mutex_Destroy(&g_codec_lock);
-        g_codec_lock_ready = 0;
-    }
-#endif
 #else
     /* nothing to do */
 #endif
@@ -114,47 +186,87 @@ void FileManager_Deinit(void)
 
 void FM_SetIdle(void (*fn)(void))
 {
+    FM_Lock();
     g_idle = fn;
+    FM_Unlock();
 }
 
 void FM_Idle(void)
 {
-    if (g_idle != NULL && g_idle_busy == 0u)
+    void (*fn)(void);
+
+    /* One run of the hook at a time: a nested call (the hook reaching a
+     * decoder that polls FM_Idle again) and a call from a second task
+     * while the hook is already running are both ignored.  The flag is
+     * tested and set under the VFS lock so two tasks cannot both see it
+     * clear; the hook itself runs with no lock held. */
+    FM_Lock();
+    fn = g_idle;
+    if (fn != NULL && g_idle_busy == 0u)
     {
         g_idle_busy = 1u;
-        g_idle();
+    }
+    else
+    {
+        fn = NULL;
+    }
+    FM_Unlock();
+    if (fn != NULL)
+    {
+        fn();
+        FM_Lock();
         g_idle_busy = 0u;
+        FM_Unlock();
     }
 }
 
 void FM_SetBusyHooks(void (*enter)(void), void (*leave)(void))
 {
+    FM_Lock();
     g_busy_enter = enter;
     g_busy_leave = leave;
+    FM_Unlock();
 }
 
+/* The depth is counted under the VFS lock so that enter/leave pairs of
+ * several tasks add up; the hooks run with no lock held. */
 void FM_BusyEnter(void)
 {
-    if (g_busy_depth == 0u && g_busy_enter != NULL)
+    void (*fn)(void) = NULL;
+
+    FM_Lock();
+    if (g_busy_depth == 0u)
     {
-        g_busy_enter();
+        fn = g_busy_enter;
     }
     if (g_busy_depth != 255u)
     {
         g_busy_depth++;
     }
+    FM_Unlock();
+    if (fn != NULL)
+    {
+        fn();
+    }
 }
 
 void FM_BusyLeave(void)
 {
-    if (g_busy_depth == 0u)
+    void (*fn)(void) = NULL;
+
+    FM_Lock();
+    if (g_busy_depth != 0u)
     {
-        return;
+        g_busy_depth--;
+        if (g_busy_depth == 0u)
+        {
+            fn = g_busy_leave;
+        }
     }
-    g_busy_depth--;
-    if (g_busy_depth == 0u && g_busy_leave != NULL)
+    FM_Unlock();
+    if (fn != NULL)
     {
-        g_busy_leave();
+        fn();
     }
 }
 
@@ -169,6 +281,45 @@ FM_Result FileManager_Init(void)
                  FileManager_GetVersionString(), FM_PORT_NAME,
                  FM_Debug_LevelName());
 
+#if FM_USE_THREADS
+    /* Create every lock now, while the application is still single
+     * threaded.  (They are also created on first use, for applications
+     * that never call this function -- but two tasks making their very
+     * first FileManager call at the same instant could then each create
+     * the mutex.  Call FileManager_Init() before starting tasks.) */
+    if (!g_core_lock_ready)
+    {
+        FM_Result r = FM_Mutex_Create(&g_core_lock);
+        if (r != FM_OK)
+        {
+            FM_ERR_LOG("mutex create failed (%d)", (int)r);
+            return r;
+        }
+        g_core_lock_ready = 1;
+    }
+    FM_VFS_SyncInit();
+    FM_Storage_SyncInit();
+    FM_File_SyncInit();
+#if FM_SCRATCH_BLOCKING
+    {
+        uint32_t i;
+
+        FM_Lock();
+        for (i = 0; i < (uint32_t)FM_SCRATCH_COUNT; i++)
+        {
+            if (!g_scratch[i].ready &&
+                FM_Mutex_Create(&g_scratch[i].mtx) == FM_OK)
+            {
+                g_scratch[i].ready = 1;
+            }
+        }
+        FM_Unlock();
+    }
+#endif
+#else
+    /* single threaded: nothing to initialize */
+#endif
+
     /* Reset the global last-error slot. */
     g_last_error = (int32_t)FM_OK;
 
@@ -182,23 +333,35 @@ FM_Result FileManager_Init(void)
     (void)FM_Opus_Init();
 #endif
 
-#if FM_USE_THREADS
-    if (!g_core_lock_ready)
-    {
-        FM_Result r = FM_Mutex_Create(&g_core_lock);
-        if (r != FM_OK)
-        {
-            FM_ERR_LOG("mutex create failed (%d)", (int)r);
-            return r;
-        }
-        g_core_lock_ready = 1;
-    }
-#else
-    /* single threaded: nothing to initialize */
-#endif
-
     return FM_OK;
 }
+
+/* ------------------------------------------------------------------ */
+/* Last error                                                          */
+/*                                                                     */
+/* File_Open() / Directory_Open() return NULL and leave the reason     */
+/* here, errno style.  One slot for the whole process is useless once  */
+/* two tasks use the library: task A's failed open would read back     */
+/* task B's FM_OK.  With a sync port that can name the calling thread, */
+/* every thread therefore gets its own slot (the FM_LAST_ERROR_THREADS */
+/* most recently active ones; an evicted or never-seen thread reads    */
+/* the process-wide value, which is also what a port without thread    */
+/* identity and every single-threaded build use).  No TLS involved.    */
+/* ------------------------------------------------------------------ */
+#if FM_USE_THREADS && FM_SYNC_HAS_THREAD_SELF && (FM_LAST_ERROR_THREADS > 0)
+#define FM_LAST_ERROR_PER_THREAD 1
+typedef struct
+{
+    FM_ThreadId owner;
+    int32_t     err;
+    uint32_t    stamp;      /* 0 = free; larger = used more recently */
+} FM_LastErrorSlot;
+
+static FM_LastErrorSlot g_last_error_tab[FM_LAST_ERROR_THREADS];
+static uint32_t g_last_error_clock;
+#else
+#define FM_LAST_ERROR_PER_THREAD 0
+#endif
 
 /* Internal: record the last error (used by all modules). */
 void FM_Core_SetLastError(FM_Result err)
@@ -209,6 +372,44 @@ void FM_Core_SetLastError(FM_Result err)
         FM_Mutex_Lock(&g_core_lock);
     }
     g_last_error = (int32_t)err;
+#if FM_LAST_ERROR_PER_THREAD
+    {
+        FM_ThreadId self = FM_Thread_Self();
+        FM_LastErrorSlot *slot = NULL;
+        uint32_t i;
+
+        for (i = 0; i < (uint32_t)FM_LAST_ERROR_THREADS; i++)
+        {
+            FM_LastErrorSlot *t = &g_last_error_tab[i];
+
+            if (t->stamp != 0u && FM_Thread_Equal(t->owner, self))
+            {
+                slot = t;
+                break;
+            }
+            if (slot == NULL || t->stamp < slot->stamp)
+            {
+                slot = t;           /* free, else least recently used */
+            }
+        }
+        g_last_error_clock++;
+        if (g_last_error_clock == 0u)
+        {
+            /* wrapped: age everything to "old", keep 0 meaning free */
+            for (i = 0; i < (uint32_t)FM_LAST_ERROR_THREADS; i++)
+            {
+                if (g_last_error_tab[i].stamp != 0u)
+                {
+                    g_last_error_tab[i].stamp = 1u;
+                }
+            }
+            g_last_error_clock = 2u;
+        }
+        slot->owner = self;
+        slot->err = (int32_t)err;
+        slot->stamp = g_last_error_clock;
+    }
+#endif
     if (g_core_lock_ready)
     {
         FM_Mutex_Unlock(&g_core_lock);
@@ -227,6 +428,22 @@ FM_Result File_GetLastError(void)
         FM_Mutex_Lock(&g_core_lock);
     }
     err = (FM_Result)g_last_error;
+#if FM_LAST_ERROR_PER_THREAD
+    {
+        FM_ThreadId self = FM_Thread_Self();
+        uint32_t i;
+
+        for (i = 0; i < (uint32_t)FM_LAST_ERROR_THREADS; i++)
+        {
+            if (g_last_error_tab[i].stamp != 0u &&
+                FM_Thread_Equal(g_last_error_tab[i].owner, self))
+            {
+                err = (FM_Result)g_last_error_tab[i].err;
+                break;
+            }
+        }
+    }
+#endif
     if (g_core_lock_ready)
     {
         FM_Mutex_Unlock(&g_core_lock);
@@ -357,7 +574,7 @@ FM_Result FileManager_MountStorage(FM_Storage *storage, FM_FS *fs)
         return (r == FM_OK) ? FM_ERR_EXISTS : r;
     }
 
-    if (!storage->mounted)
+    if (!FM_Storage_IsMounted(storage))
     {
         r = Storage_Mount(storage->name);
         if (r != FM_OK)
@@ -385,19 +602,20 @@ FM_Result FileManager_MountStorage(FM_Storage *storage, FM_FS *fs)
 /* ------------------------------------------------------------------ */
 /* Internal scratch buffer                                             */
 /*                                                                     */
-/* The buffer is handed out by pointer (FM_InternalBuffer) and used    */
-/* across several calls, so it cannot be protected by a mutex around   */
-/* the accessor.  In threaded builds each thread gets its own copy     */
-/* (thread-local storage), which makes concurrent File_Copy /          */
-/* File_Insert / Json_LoadString / audio recording safe.  GCC-style    */
-/* TLS is available on STM32 (arm-none-eabi-gcc) and ESP32 (ESP-IDF).  */
+/* One buffer for the whole library, handed out by pointer and used    */
+/* across several calls (File_Copy, File_Insert / DeleteRange /        */
+/* ReplaceRange).  Exclusive use goes through the FM_SCRATCH_IOBUF     */
+/* claim: a second task waits, a nested call on the same task gets     */
+/* NULL (-> FM_ERR_BUSY).                                              */
+/*                                                                     */
+/* It used to be `__thread` in threaded builds.  That is one copy per  */
+/* thread on a desktop OS only: on arm-none-eabi the TLS block is not  */
+/* switched with the RTOS task (the link fails without                 */
+/* __aeabi_read_tp, or every task shares one block), so two tasks      */
+/* copying at once shared the buffer with nothing guarding it.         */
 /* ------------------------------------------------------------------ */
 #if FM_USE_INTERNAL_BUFFER
-#if FM_USE_THREADS && defined(__GNUC__)
-static __thread uint8_t FM_DMA_ALIGNED g_io_buf[FM_INTERNAL_BUFFER_SIZE];
-#else
 static uint8_t FM_DMA_ALIGNED g_io_buf[FM_INTERNAL_BUFFER_SIZE];
-#endif
 #endif
 
 uint8_t *FM_InternalBuffer(void)
@@ -418,39 +636,18 @@ size_t FM_InternalBufferSize(void)
 #endif
 }
 
-/* In-use flag next to the buffer.  It has the same storage class as the
- * buffer: thread-local where the buffer is thread-local (each thread
- * owns its copy, so only recursion on that thread can collide), shared
- * otherwise (then the test-and-set runs under the core lock). */
-#if FM_USE_INTERNAL_BUFFER
-#if FM_USE_THREADS && defined(__GNUC__)
-static __thread uint8_t g_io_buf_busy;
-#define IO_BUF_LOCK()   ((void)0)
-#define IO_BUF_UNLOCK() ((void)0)
-#else
-static uint8_t g_io_buf_busy;
-#define IO_BUF_LOCK()   FM_Lock()
-#define IO_BUF_UNLOCK() FM_Unlock()
-#endif
-#endif
-
 uint8_t *FM_InternalBufferAcquire(size_t *size)
 {
 #if FM_USE_INTERNAL_BUFFER
-    uint8_t *p = NULL;
-
-    IO_BUF_LOCK();
-    if (g_io_buf_busy == 0u)
+    if (FM_Scratch_Enter(FM_SCRATCH_IOBUF) != FM_OK)
     {
-        g_io_buf_busy = 1u;
-        p = g_io_buf;
+        return NULL;
     }
-    IO_BUF_UNLOCK();
-    if (p != NULL && size != NULL)
+    if (size != NULL)
     {
         *size = sizeof(g_io_buf);
     }
-    return p;
+    return g_io_buf;
 #else
     (void)size;
     return NULL;
@@ -460,8 +657,6 @@ uint8_t *FM_InternalBufferAcquire(size_t *size)
 void FM_InternalBufferRelease(void)
 {
 #if FM_USE_INTERNAL_BUFFER
-    IO_BUF_LOCK();
-    g_io_buf_busy = 0u;
-    IO_BUF_UNLOCK();
+    FM_Scratch_Leave(FM_SCRATCH_IOBUF);
 #endif
 }
