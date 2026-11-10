@@ -138,6 +138,155 @@
 #include "fm_h264.h"
 #endif
 
+#if !FM_USE_VIDEO
+/* ================================================================== */
+/* FM_USE_VIDEO == 0                                                   */
+/*                                                                     */
+/* The video path is compiled out of the library, so nothing of the    */
+/* player may exist here either: no frame buffers (sv_rgb / sv_frame   */
+/* alone are SIMPLE_VIDEO_MAX_W x MAX_H x 3 + 4 bytes per pixel --     */
+/* 11 MB with the default 1000x1000), no player state, no I2S ring.    */
+/* The public API keeps its exact signatures so application code that  */
+/* calls it still compiles and links; every call reports               */
+/* FM_ERR_UNSUPPORTED (or a neutral value) and touches no memory.      */
+/*                                                                     */
+/* Keep the typedefs below identical to the ones in the real section.  */
+/* ================================================================== */
+typedef void (*SimpleVideo_PresentFn)(const void *pixels, uint16_t width,
+                                      uint16_t height, FM_PixelFormat format,
+                                      size_t bytes);
+typedef void (*SimpleVideo_TrackStartFn)(void *ctx, const char *path,
+                                         uint32_t width, uint32_t height,
+                                         uint32_t fps);
+typedef void (*SimpleVideo_TrackEndFn)(void *ctx, const char *path);
+typedef void (*SimpleVideo_FrameFn)(void *ctx, const void *pixels,
+                                    uint16_t width, uint16_t height,
+                                    FM_PixelFormat format, size_t bytes);
+typedef void (*SimpleVideo_PcmTapFn)(void *ctx, int16_t *pcm, size_t samples,
+                                     uint32_t rate, uint16_t channels);
+typedef struct
+{
+    char     name[FM_PATH_MAX];
+    char     container[8];
+    uint16_t width;
+    uint16_t height;
+    uint32_t fps;
+    uint32_t frame_count;
+    uint32_t frame_index;
+    double   position;
+    double   duration;
+    uint8_t  paused;
+    uint8_t  has_audio;
+    uint8_t  volume_pct;
+    uint32_t audio_rate;
+    uint16_t audio_channels;
+    uint32_t playlist_count;
+    uint32_t playlist_index;
+    const void *pixels;
+    size_t   bytes;
+    FM_PixelFormat format;
+} SimpleVideoInfo;
+
+FM_Result SimpleVideo_Begin(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Poll(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Stop(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Next(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Start(void)
+{ return FM_ERR_UNSUPPORTED; }
+void SimpleVideo_SetAutoPlay(int8_t on)
+{ (void)on; }
+FM_Result SimpleVideo_SetPlayMode(FM_PlayMode mode)
+{ (void)mode; return FM_ERR_UNSUPPORTED; }
+FM_PlayMode SimpleVideo_GetPlayMode(void)
+{ return FM_PLAY_MODE_STOP; }
+void SimpleVideo_SetRepeatMode(int mode)
+{ (void)mode; }
+FM_PlayMode SimpleVideo_GetRepeatMode(void)
+{ return FM_PLAY_MODE_STOP; }
+FM_Result SimpleVideo_SetVolume(uint8_t percent)
+{ (void)percent; return FM_ERR_UNSUPPORTED; }
+uint8_t SimpleVideo_GetVolume(void)
+{ return 0u; }
+void SimpleVideo_EnableAudio(uint8_t enable)
+{ (void)enable; }
+uint8_t SimpleVideo_IsAudioEnabled(void)
+{ return 0u; }
+void SimpleVideo_SetAudioEnabled(uint8_t enable)
+{ (void)enable; }
+void SimpleVideo_SetPrePcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetPostPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetAudioPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+const void *SimpleVideo_GetFrame(uint16_t *w, uint16_t *h)
+{ (void)w; (void)h; return NULL; }
+FM_Result SimpleVideo_ReadAudio(int16_t *pcm,
+        size_t frames,
+        size_t *got_frames)
+{ (void)pcm; (void)frames; (void)got_frames; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_GetAudioInfo(FM_AudioTrackInfo *info)
+{ (void)info; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Prev(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Play(const char *path)
+{ (void)path; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Pause(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_Resume(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_TogglePause(void)
+{ return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_SeekTo(double seconds)
+{ (void)seconds; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_SeekBy(double seconds)
+{ (void)seconds; return FM_ERR_UNSUPPORTED; }
+void SimpleVideo_SetPresent(SimpleVideo_PresentFn fn)
+{ (void)fn; }
+void SimpleVideo_SetTrackStartCallback(SimpleVideo_TrackStartFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetTrackEndCallback(SimpleVideo_TrackEndFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetFrameCallback(SimpleVideo_FrameFn fn, void *ctx)
+{ (void)fn; (void)ctx; }
+void SimpleVideo_SetPresentWait(void (*fn)(void))
+{ (void)fn; }
+FM_Result SimpleVideo_SetOutputSize(uint16_t width, uint16_t height)
+{ (void)width; (void)height; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_SetOutputFormat(FM_PixelFormat format)
+{ (void)format; return FM_ERR_UNSUPPORTED; }
+void SimpleVideo_SetSwap16(int8_t swap)
+{ (void)swap; }
+FM_Result SimpleVideo_AudioRead(uint8_t *buf, size_t cap, size_t *got)
+{ (void)buf; (void)cap; (void)got; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_SaveFrame(const char *path)
+{ (void)path; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecStart(const char *path,
+        uint16_t width,
+        uint16_t height,
+        uint32_t fps,
+        uint32_t expected_frames)
+{ (void)path; (void)width; (void)height; (void)fps; (void)expected_frames; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecWrite(const void *rgb888, size_t bytes)
+{ (void)rgb888; (void)bytes; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecStop(void)
+{ return FM_ERR_UNSUPPORTED; }
+const void *SimpleVideo_Frame(uint16_t *width,
+        uint16_t *height,
+        FM_PixelFormat *format,
+        size_t *bytes)
+{ (void)width; (void)height; (void)format; (void)bytes; return NULL; }
+void SimpleVideo_Info(SimpleVideoInfo *out)
+{ if (out != NULL) { memset(out, 0, sizeof(*out)); } }
+
+#else /* FM_USE_VIDEO */
+
 #ifndef SIMPLE_VIDEO_FOLDER
 #define SIMPLE_VIDEO_FOLDER "/videos"
 #endif
@@ -2645,6 +2794,13 @@ FM_Result SimpleVideo_Poll(void)
                 sv.fail_count = 0u;
                 return sv_playlist_advance();
             }
+            if (r == FM_ERR_NOT_READY)
+            {
+                /* The packet held no picture (parameter sets / SEI
+                 * only).  It was consumed and nothing is wrong: keep
+                 * showing the previous frame and go on. */
+                continue;
+            }
             if (r != FM_OK)
             {
                 uint32_t count = Player_Count(&sv.player);
@@ -3319,5 +3475,7 @@ void SimpleVideo_Info(SimpleVideoInfo *out)
     out->pixels = sv.have_frame ? sv_frame[sv_show] : NULL;
     (void)Image_BufferSize(sv.out_w, sv.out_h, sv.format, &out->bytes);
 }
+
+#endif /* FM_USE_VIDEO */
 
 #endif /* SIMPLE_VIDEO_H_ */

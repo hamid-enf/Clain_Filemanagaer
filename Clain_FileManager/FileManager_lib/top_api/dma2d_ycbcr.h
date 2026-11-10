@@ -290,7 +290,9 @@ static inline FM_Result SimpleImage_UseDma2dHandle(DMA2D_HandleTypeDef *h)
     si_dma2d_ready = 1u;
     si_color_hw = si_dma2d_convert;   /* YCbCr → RGB روی DMA2D */
 #ifdef SIMPLE_VIDEO_H_
+#if FM_USE_VIDEO
     sv_rgb565_hw = si_dma2d_rgb565;   /* RGB888 → RGB565 هم روی DMA2D */
+#endif
 #endif
     FM_Log("SimpleImage: DMA2D active for YCbCr conversion\n");
     return FM_OK;

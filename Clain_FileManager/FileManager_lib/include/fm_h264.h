@@ -69,6 +69,13 @@ typedef struct
 
 const FM_H264Diag *H264_GetLastError(void);
 
+/* Size of the picture the last successful decode wrote for decoder
+ * context `ctx` (the cropped display size from the SPS -- not the
+ * 16-pixel-aligned coded size, and not necessarily what the container
+ * claims).  FM_ERR_NOT_READY until a picture has been decoded.
+ * Video_DecodeFrame() uses it to keep FM_VideoInfo.width/height true. */
+FM_Result H264_GetOutputSize(void *ctx, uint16_t *width, uint16_t *height);
+
 #endif /* FM_USE_H264 */
 
 FM_END_DECLS

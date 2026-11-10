@@ -366,6 +366,18 @@
 #define FM_VIDEO_MAX_FRAMES 4096
 #endif
 #endif
+#ifndef FM_VIDEO_MAX_AUDIO_FRAMES
+/* Audio packet index of an open video, sized independently of the video
+ * frame index: a compressed track has several packets per picture.
+ * Packets past the index are streamed from the container (AVI movi /
+ * MKV clusters); MP4 and FLV stop at this limit and say so in the log. */
+#define FM_VIDEO_MAX_AUDIO_FRAMES FM_VIDEO_MAX_FRAMES
+#endif
+#ifndef FM_VIDEO_AUDIO_PRIVATE_MAX
+/* Codec setup data kept per open video (MKV CodecPrivate, MP4 dfLa /
+ * dOps).  Vorbis setup headers are routinely 3-4 KB. */
+#define FM_VIDEO_AUDIO_PRIVATE_MAX 4096
+#endif
 #ifndef FM_MAX_VIDEO
 #define FM_MAX_VIDEO 4                 /* simultaneously open videos      */
 #endif

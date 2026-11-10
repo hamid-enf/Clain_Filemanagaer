@@ -69,6 +69,8 @@ typedef struct
     uint32_t  frame_copy_len;
     uint32_t  kf_len;        /* cached keyframe byte count             */
     uint32_t  bad_run;       /* consecutive frames without a picture   */
+    uint16_t  out_w;         /* size of the last picture written       */
+    uint16_t  out_h;
     uint32_t  resets;        /* self-heal decoder resets so far        */
 } H264Ctx;
 
@@ -100,6 +102,23 @@ const FM_VideoCodecOps *H264_GetCodecOps(void)
     return &g_h264_ops;
 }
 
+FM_Result H264_GetOutputSize(void *ctx, uint16_t *width, uint16_t *height)
+{
+    const H264Ctx *h = (const H264Ctx *)ctx;
+
+    if (h == NULL || width == NULL || height == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (h->out_w == 0u || h->out_h == 0u)
+    {
+        return FM_ERR_NOT_READY;
+    }
+    *width = h->out_w;
+    *height = h->out_h;
+    return FM_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* YUV420p -> RGB888 (BT.601 full range, integer math)                 */
 /* ------------------------------------------------------------------ */
@@ -110,7 +129,15 @@ static int clamp8(int v)
     return v;
 }
 
+/* Converts the crop_w x crop_h window whose top-left corner is at
+ * (left, top) of a w x h picture.  The caller guarantees
+ * left + crop_w <= w and top + crop_h <= h.
+ *
+ * The window origin used to be ignored (conversion always started at
+ * 0,0): a stream cropped on the left/top came out shifted by the crop
+ * offset, with the padding the encoder wanted hidden shown instead. */
 static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
+                             uint32_t left, uint32_t top,
                              uint32_t crop_w, uint32_t crop_h, uint8_t *rgb)
 {
     const uint8_t *Y = yuv;
@@ -121,11 +148,17 @@ static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
 
     for (y = 0; y < crop_h; y++)
     {
+        const size_t sy = (size_t)top + y;
+        const uint8_t *yrow = Y + sy * w;
+        const uint8_t *urow = U + (sy / 2u) * (w / 2u);
+        const uint8_t *vrow = V + (sy / 2u) * (w / 2u);
+
         for (x = 0; x < crop_w; x++)
         {
-            int yy = Y[y * w + x];
-            int uu = U[(y / 2u) * (w / 2u) + (x / 2u)] - 128;
-            int vv = V[(y / 2u) * (w / 2u) + (x / 2u)] - 128;
+            const size_t sx = (size_t)left + x;
+            int yy = yrow[sx];
+            int uu = urow[sx / 2u] - 128;
+            int vv = vrow[sx / 2u] - 128;
             int r = yy + ((359 * vv) >> 8);
             int g = yy - ((88 * uu + 183 * vv) >> 8);
             int b = yy + ((454 * uu) >> 8);
@@ -376,6 +409,10 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
     uint32_t len = size;
     uint32_t no_progress = 0;
     unsigned long alloc_fail_start = FM_Alloc_FailureCount();
+    /* Did the input carry picture data at all?  A packet of parameter
+     * sets / SEI / AUD only legitimately yields no picture; that must
+     * not be reported like a damaged frame (see the end of the loop). */
+    FM_Bool saw_slice = FM_FALSE;
 
     while (len > 0)
     {
@@ -402,6 +439,10 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
             {
                 uint32_t t = (uint32_t)(*nal & 0x1Fu);
 
+                if (t >= 1u && t <= 5u)
+                {
+                    saw_slice = FM_TRUE;   /* coded slice (VCL) NAL */
+                }
                 if (t == 7u)
                 {
                     g_h264_diag.sps_seen++;
@@ -440,14 +481,31 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
                                   &top, &ch);
             if (!crop_flag)
             {
+                left = 0u;
+                top = 0u;
                 cw = buf_w;
                 ch = buf_h;
             }
-            if ((uint64_t)cw * ch * 3u > frame_cap)
+            /* The cropping rectangle comes from the bitstream: one that
+             * does not lie inside the decoded picture would read past
+             * the picture buffer.  Fall back to the whole picture. */
+            if (cw == 0u || ch == 0u || left > buf_w || top > buf_h ||
+                cw > buf_w - left || ch > buf_h - top)
+            {
+                left = 0u;
+                top = 0u;
+                cw = buf_w;
+                ch = buf_h;
+            }
+            if (cw > 0xFFFFu || ch > 0xFFFFu ||
+                (uint64_t)cw * ch * 3u > frame_cap)
             {
                 return FM_ERR_TOO_LARGE;
             }
-            yuv420_to_rgb888(pic, buf_w, buf_h, cw, ch, (uint8_t *)frame_out);
+            yuv420_to_rgb888(pic, buf_w, buf_h, left, top, cw, ch,
+                             (uint8_t *)frame_out);
+            h->out_w = (uint16_t)cw;
+            h->out_h = (uint16_t)ch;
             return FM_OK;
         }
         if (res == H264BSD_ERROR)
@@ -502,7 +560,11 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
                 }
                 if (k + 2 >= len)
                 {
-                    return FM_ERR_INVALID_FORMAT;
+                    /* The NAL h264bsd choked on was the last one.  If
+                     * no slice was involved it was trailing SEI/filler:
+                     * nothing is wrong with the reference chain. */
+                    return saw_slice ? FM_ERR_INVALID_FORMAT
+                                     : FM_ERR_NOT_READY;
                 }
                 read_bytes = k;
             }
@@ -569,10 +631,15 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
         /* Long decode: let the application pump audio DMA etc. */
         FM_Idle();
     }
-    /* No picture became ready from this input (e.g. parameter sets only). */
+    /* No picture became ready from this input. */
     g_h264_diag.bsd_result = 0xFFFFFFFFu; /* consumed all, no picture */
     g_h264_diag.consumed = in_len;
-    return FM_ERR_INVALID_FORMAT;
+    /* Input with no slice NAL in it (parameter sets, SEI, AUD) cannot
+     * produce a picture: that is "nothing to show yet", not a damaged
+     * frame.  Reporting it as INVALID_FORMAT made h264_decode() take it
+     * for a broken reference chain and reset the decoder + replay the
+     * keyframe -- on a perfectly healthy stream. */
+    return saw_slice ? FM_ERR_INVALID_FORMAT : FM_ERR_NOT_READY;
 }
 
 static FM_Result h264_decode(void *ctx, const void *compressed, size_t size,
@@ -648,7 +715,9 @@ static FM_Result h264_decode(void *ctx, const void *compressed, size_t size,
     {
         return FM_ERR_NO_MEMORY;
     }
-    /* Non-recoverable or resource errors: do not "heal" over them. */
+    /* Non-recoverable or resource errors: do not "heal" over them.
+     * FM_ERR_NOT_READY (packet held no picture) is not an error at all:
+     * it neither counts towards bad_run nor resets the decoder. */
     if (r != FM_ERR_INVALID_FORMAT)
     {
         return r;

@@ -44,7 +44,8 @@ typedef enum
     FM_VIDEO_CODEC_VP8,       /* VP8  (VP80 / MKV)                   */
     FM_VIDEO_CODEC_VP9,       /* VP9  (VP90 / MKV/WebM)              */
     FM_VIDEO_CODEC_AV1,       /* AV1  (AV01 / MKV/WebM)              */
-    FM_VIDEO_CODEC_THEORA     /* Theora (legacy OGG)                 */
+    FM_VIDEO_CODEC_THEORA,    /* Theora (legacy OGG)                 */
+    FM_VIDEO_CODEC_COUNT      /* number of codec ids (not a codec)   */
 } FM_VideoCodec;
 
 typedef struct
@@ -64,7 +65,15 @@ typedef struct
  *   init()   - allocate/reset decoder state for the given stream info.
  *   decode_frame() - decode one frame payload into RGB888 pixels
  *                    (frame_cap must be >= width*height*3).
+ *                    FM_ERR_NOT_READY = the payload was consumed but held
+ *                    no picture (parameter sets / SEI only): not an
+ *                    error, the previous picture stays valid.
  *   close()  - release decoder state.
+ *
+ * The bundled H.264 decoder writes the picture at the size the stream
+ * itself declares (SPS + cropping rectangle); Video_DecodeFrame() copies
+ * that into info.width/height after the first decoded frame, so read the
+ * size from Video_GetInfo() AFTER decoding when it matters.
  */
 typedef struct FM_VideoCodecOps
 {
