@@ -13261,6 +13261,18 @@ static void *ir_thread(void *arg)
 }
 #endif
 
+static uint32_t g_ir_rows;
+static uint32_t g_ir_row_sum;
+
+static void ir_line_cb(const void *line, uint32_t y, void *user_data)
+{
+    const uint8_t *px = (const uint8_t *)line;
+
+    (void)user_data;
+    g_ir_rows++;
+    g_ir_row_sum += (uint32_t)px[0] + y;
+}
+
 static void test_image_report(void)
 {
     static uint8_t rgb[64 * 64 * 3];
@@ -13842,6 +13854,76 @@ static void test_image_report(void)
         (void)wide;
     }
     CHECK_RESULT(r, "image save");
+
+    /* ---------------- O-01 ---------------- */
+    TEST("O-01 Image_StreamDecode: callback-only mode reports geometry");
+    {
+        const uint16_t w_fit = (uint16_t)(FM_INTERNAL_BUFFER_SIZE / 3u);
+        const size_t cap = ((size_t)w_fit + 2u) * 3u * 2u + 64u;
+        uint8_t *pix = (uint8_t *)malloc(((size_t)w_fit + 1u) * 3u * 2u);
+        uint8_t *bmp = (uint8_t *)malloc(cap);
+        FM_Image src;
+        FM_Image out;
+        FM_Stream st;
+        size_t n = 0;
+
+        if (pix == NULL || bmp == NULL)
+        {
+            r = FM_ERR_NO_MEMORY;
+        }
+        else
+        {
+            /* widest row the on-stack line buffer holds; 2 rows whose
+             * first pixels are 10 and 20 */
+            memset(pix, 0, ((size_t)w_fit + 1u) * 3u * 2u);
+            memset(&src, 0, sizeof(src));
+            src.width = w_fit; src.height = 2;
+            src.format = FM_PIXEL_RGB888;
+            src.data = pix;
+            src.data_capacity = (size_t)w_fit * 3u * 2u;
+            pix[0] = 10; pix[(size_t)w_fit * 3u] = 20;
+            r = Image_EncodeBMP(&src, bmp, cap, &n);
+            if (r == FM_OK) r = Stream_InitMemoryRead(&st, bmp, n);
+            if (r == FM_OK)
+            {
+                memset(&out, 0, sizeof(out));       /* data == NULL */
+                out.data_size = 99u;
+                g_ir_rows = 0; g_ir_row_sum = 0;
+                r = Image_StreamDecode(&st, &out, ir_line_cb, NULL, NULL);
+                Stream_Close(&st);
+                if (r == FM_OK &&
+                    (out.width != w_fit || out.height != 2u ||
+                     out.format != FM_PIXEL_RGB888 || out.channels != 3u ||
+                     out.data_size != 0u || strcmp(out.codec, "BMP") != 0 ||
+                     g_ir_rows != 2u || g_ir_row_sum != 10u + 20u + 1u))
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+            }
+            /* one pixel wider: does not fit the line buffer */
+            if (r == FM_OK)
+            {
+                src.width = (uint16_t)(w_fit + 1u);
+                src.data_capacity = ((size_t)w_fit + 1u) * 3u * 2u;
+                r = Image_EncodeBMP(&src, bmp, cap, &n);
+            }
+            if (r == FM_OK) r = Stream_InitMemoryRead(&st, bmp, n);
+            if (r == FM_OK)
+            {
+                memset(&out, 0, sizeof(out));
+                g_ir_rows = 0;
+                if (Image_StreamDecode(&st, &out, ir_line_cb, NULL, NULL)
+                        != FM_ERR_TOO_LARGE || g_ir_rows != 0u)
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                Stream_Close(&st);
+            }
+        }
+        free(pix);
+        free(bmp);
+    }
+    CHECK_RESULT(r, "stream decode");
 
     /* ---------------- O-02 ---------------- */
     TEST("O-02 BMP header: biSizeImage counts the row padding");

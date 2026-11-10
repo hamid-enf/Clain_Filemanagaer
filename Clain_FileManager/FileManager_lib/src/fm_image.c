@@ -1031,19 +1031,20 @@ FM_Result Image_StreamDecode(FM_Stream *s, FM_Image *img,
         return r;
     }
     row_bytes = (size_t)info.width * info.channels;
+    /* The picture's geometry is reported in both modes.  It used to be
+     * filled in only when the pixels were kept in img->data, so a
+     * callback-only caller (img->data == NULL: the whole point of
+     * streaming) got rows without knowing how wide they were. */
+    img->width = info.width;
+    img->height = info.height;
+    img->format = (info.channels == 3) ? FM_PIXEL_RGB888 : FM_PIXEL_GRAY8;
+    img->bit_depth = info.bit_depth;
+    img->channels = info.channels;
+    img->compression = info.compression;
+    (void)strcpy(img->codec, info.codec);
     if (img->data != NULL && info.data_size <= img->data_capacity)
     {
-        img->width = info.width;
-        img->height = info.height;
-        img->format = (info.channels == 3) ? FM_PIXEL_RGB888 : FM_PIXEL_GRAY8;
-        img->bit_depth = info.bit_depth;
-        img->channels = info.channels;
-        img->compression = info.compression;
         img->data_size = info.data_size;
-        (void)strcpy(img->codec, info.codec);
-    }
-    if (img->data != NULL && info.data_size <= img->data_capacity)
-    {
         line = img->data;
     }
     else
@@ -1053,6 +1054,7 @@ FM_Result Image_StreamDecode(FM_Stream *s, FM_Image *img,
             Image_CloseDecoder(&dec);
             return FM_ERR_TOO_LARGE;
         }
+        img->data_size = 0u;                 /* nothing stored in img */
         line = internal;
     }
     for (y = 0; y < info.height; y++)

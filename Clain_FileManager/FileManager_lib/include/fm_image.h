@@ -158,6 +158,15 @@ FM_Result Image_OpenStream(FM_Stream *s, FM_ImageDecoder *dec,
                            FM_ImageInfo *info);
 FM_Result Image_ReadLine(FM_ImageDecoder *dec, void *line_out,
                          size_t line_cap);
+/* Decode a BMP row by row; line_cb gets every row (top-down, RGB888 or
+ * GRAY8).  img->width / height / format / channels / codec are always
+ * filled in.  Two modes:
+ *   - img->data points at a buffer that holds the whole picture: the
+ *     rows are kept there and img->data_size is set;
+ *   - otherwise (img->data == NULL or too small) nothing is kept,
+ *     img->data_size is 0, and each row passes through an on-stack
+ *     buffer of FM_INTERNAL_BUFFER_SIZE bytes -- a wider row is
+ *     FM_ERR_TOO_LARGE. */
 FM_Result Image_StreamDecode(FM_Stream *s, FM_Image *img,
                              FM_ImageLineCb line_cb, void *user_data,
                              FM_ProgressCallback progress);
