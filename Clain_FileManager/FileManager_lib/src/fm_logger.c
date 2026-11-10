@@ -125,7 +125,7 @@ static void float_to_str(float v, char *out, size_t out_size)
     uint32_t ip;
     uint32_t fp;
     char int_s[16];
-    char frac_s[8];
+    char frac_s[12];    /* fp < 1000, but u32_to_str can write 11 bytes */
     size_t l;
     size_t i;
     size_t n = 0;

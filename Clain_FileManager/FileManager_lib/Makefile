@@ -249,7 +249,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan tsan ports check matrix matrix-asan matrix-quick
+.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick
 
 all: $(LIBS) fm_test
 
@@ -376,6 +376,12 @@ tsan:
 ports:
 	@sh tools/check_ports.sh
 
+# cmake — CMakeLists.txt really configured, built and tested (13
+# configurations, incl. the three sync ports).  Skipped with a message
+# when cmake is not installed.
+cmake:
+	@sh tools/check_cmake.sh
+
 # matrix — every FM_USE_* combination must build (-Werror), pass its
 # tests and leave no static memory behind for a disabled subsystem.
 #   make matrix        plain build of all 27 configurations
@@ -426,6 +432,7 @@ tapstest: $(LIBS)
 # check — everything: tests, sanitizers, ports, examples
 check: test cachetest videohooks ex33test tapstest asan ports
 	@sh tools/check_examples.sh
+	@sh tools/check_cmake.sh
 
 clean:
 	rm -rf build-asan

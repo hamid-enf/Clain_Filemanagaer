@@ -1222,6 +1222,35 @@ static FM_Result fmfs_delete(FM_FS *fs, const char *path)
     return fmfs_remove_entry(ctx, index);
 }
 
+/* Give `from` and everything below it the prefix `to`.  The caller has
+ * checked that every resulting path fits. */
+static void fmfs_rename_prefix(FMFS_Context *ctx, const char *from,
+                               const char *to)
+{
+    size_t from_len = strlen(from);
+    size_t to_len = strlen(to);
+    uint32_t i;
+
+    for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+    {
+        FMFS_Entry *e = &ctx->entries[i];
+
+        if (e->used &&
+            (strcmp(e->path, from) == 0 ||
+             (strncmp(e->path, from, from_len) == 0 &&
+              e->path[from_len] == '/')))
+        {
+            size_t tail = strlen(e->path + from_len);
+
+            if (to_len + tail < sizeof(e->path))
+            {
+                memmove(e->path + to_len, e->path + from_len, tail + 1u);
+                memcpy(e->path, to, to_len);
+            }
+        }
+    }
+}
+
 static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
                              const char *new_path)
 {
@@ -1229,12 +1258,15 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
     char old_clean[FM_PATH_MAX];
     char new_clean[FM_PATH_MAX];
     char parent[FM_PATH_MAX];
+    FMFS_Entry saved_dst;
     uint32_t i;
     size_t old_len;
+    size_t new_len;
     FM_Result r;
     int old_index;
     int new_index;
 
+    memset(&saved_dst, 0, sizeof(saved_dst));
     r = fmfs_normalize_rel(old_path, old_clean, sizeof(old_clean));
     if (r != FM_OK) return r;
     r = fmfs_normalize_rel(new_path, new_clean, sizeof(new_clean));
@@ -1254,7 +1286,13 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
     }
 
     /* Rename-over semantics (like POSIX rename): an existing destination
-     * is replaced, but only if it is a file or an empty directory. */
+     * is replaced, but only if it is a file or an empty directory.
+     *
+     * Everything that can refuse the rename is checked BEFORE the table
+     * is touched.  It used to be checked on the way: a path that became
+     * too long was noticed after the destination had been dropped and
+     * part of the tree renamed, and the function returned the error with
+     * the table left like that. */
     new_index = fmfs_find(ctx, new_clean);
     if (new_index >= 0)
     {
@@ -1276,8 +1314,6 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
                 return FM_ERR_NOT_DIRECTORY;
             }
         }
-        memset(&ctx->entries[new_index], 0, sizeof(ctx->entries[new_index]));
-        ctx->gen[new_index]++;
     }
 
     r = fmfs_parent_path(new_clean, parent, sizeof(parent));
@@ -1296,26 +1332,46 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
     }
 
     old_len = strlen(old_clean);
+    new_len = strlen(new_clean);
     for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
     {
         if (ctx->entries[i].used &&
             (strcmp(ctx->entries[i].path, old_clean) == 0 ||
              (strncmp(ctx->entries[i].path, old_clean, old_len) == 0 &&
-              ctx->entries[i].path[old_len] == '/')))
+              ctx->entries[i].path[old_len] == '/')) &&
+            new_len + strlen(ctx->entries[i].path + old_len) >= FM_PATH_MAX)
         {
-            char replacement[FM_PATH_MAX];
-            const char *suffix = ctx->entries[i].path + old_len;
-
-            if (strlen(new_clean) + strlen(suffix) >= sizeof(replacement))
-            {
-                return FM_ERR_TOO_LARGE;
-            }
-            (void)strcpy(replacement, new_clean);
-            (void)strcat(replacement, suffix);
-            (void)strcpy(ctx->entries[i].path, replacement);
+            return FM_ERR_TOO_LARGE;
         }
     }
-    return fmfs_save(ctx);
+
+    /* Now change the table... */
+    if (new_index >= 0)
+    {
+        saved_dst = ctx->entries[new_index];
+        memset(&ctx->entries[new_index], 0, sizeof(ctx->entries[new_index]));
+    }
+    fmfs_rename_prefix(ctx, old_clean, new_clean);
+
+    /* ...and put it back when it cannot be written: the caller is told
+     * the rename failed, so the old names (and the file that was to be
+     * replaced) must still be there.  They used to be gone from the
+     * mounted volume while the storage still held the old table. */
+    r = fmfs_save(ctx);
+    if (r != FM_OK)
+    {
+        fmfs_rename_prefix(ctx, new_clean, old_clean);
+        if (new_index >= 0)
+        {
+            ctx->entries[new_index] = saved_dst;
+        }
+        return r;
+    }
+    if (new_index >= 0)
+    {
+        ctx->gen[new_index]++;      /* handles of the replaced file */
+    }
+    return FM_OK;
 }
 
 static FM_Result fmfs_mkdir(FM_FS *fs, const char *path)

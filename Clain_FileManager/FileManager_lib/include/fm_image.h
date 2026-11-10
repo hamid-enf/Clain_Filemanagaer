@@ -97,7 +97,16 @@ FM_Result Image_GetInfo(const char *path, FM_ImageInfo *info);
 /* Optional SDRAM (or other) workspace for HW JPEG file slurp / YCbCr.
  * SimpleImage_Begin installs its .sdram_buffers file scratch here so
  * HAL_JPEG_Decode never mallocs the compressed JPEG on the tiny heap.
- * Pass NULL, 0 to clear. */
+ * Pass NULL, 0 to clear.
+ *
+ * A registered hardware "JPEG" codec takes the compressed picture as one
+ * memory block, so Image_Load has to hold the whole file for it:
+ *   - in this work buffer when the file fits;
+ *   - else in a block from FM_Alloc, unless FM_JPEG_HW_HEAP is 0;
+ *   - never when the file is larger than FM_JPEG_HW_FILE_MAX.
+ * Whenever the file is not handed to the hardware (too large, no memory,
+ * or the codec refuses it) the picture is decoded by the streaming
+ * software decoder instead, which needs no file-sized memory. */
 FM_Result Image_SetWorkBuffer(void *buf, size_t size);
 void     *Image_GetWorkBuffer(size_t *size);
 

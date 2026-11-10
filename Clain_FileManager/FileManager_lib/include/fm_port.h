@@ -31,6 +31,7 @@
  *   STM32F4          128-192K   -    ✓     ✓      ✓     فایل + صدا
  *   STM32F7          256-512K   ✓    ✓     ✓      ✓     + تصویر
  *   STM32H7          1M         ✓    ✓     ✓      ✓     همه چیز
+ *   STM32H5          32K-640K   -    ✓     ✓      ✓     فایل + صدا + تصویر
  *   STM32G0/G4       32-128K    -    ✓     -      ✓     فایل + EEPROM
  *   STM32L4          64-320K    -    ✓     -      ✓     کم‌مصرف
  *
@@ -50,12 +51,17 @@
 #define FM_PORT_STM32G0   6
 #define FM_PORT_STM32G4   7
 #define FM_PORT_STM32L4   8
+#define FM_PORT_STM32H5   9
 
 /* اگر کاربر چیزی نگفت، سعی کن خودت بفهمی. */
 #ifndef FM_PORT
 #if defined(STM32H7) || defined(STM32H743xx) || defined(STM32H750xx) || \
     defined(STM32H723xx) || defined(STM32H747xx)
 #define FM_PORT FM_PORT_STM32H7
+#elif defined(STM32H5) || defined(STM32H503xx) || defined(STM32H523xx) || \
+      defined(STM32H533xx) || defined(STM32H562xx) || defined(STM32H563xx) || \
+      defined(STM32H573xx)
+#define FM_PORT FM_PORT_STM32H5
 #elif defined(STM32F7) || defined(STM32F746xx) || defined(STM32F767xx)
 #define FM_PORT FM_PORT_STM32F7
 #elif defined(STM32F4) || defined(STM32F407xx) || defined(STM32F429xx)
@@ -82,94 +88,137 @@
  * fm_board_config.h قبل از include این فایل تعریفش کنید. */
 
 #if FM_PORT == FM_PORT_STM32H7
-  #define FM_PORT_NAME          "STM32H7"
-  #define FM_PORT_HAS_DCACHE    1
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     1
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   1
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          3      /* 3 = پرتوان */
+  #define FM_PORT_D_NAME        "STM32H7"
+  #define FM_PORT_D_HAS_DCACHE  1
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   1
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 1
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        3      /* 3 = پرتوان */
+
+#elif FM_PORT == FM_PORT_STM32H5
+  /* Cortex-M33: هستهٔ M33 کش دادهٔ SCB ندارد (ICACHE و DCACHE1 این سری
+   * پریفرال‌اند و نگهداری‌شان با HAL است، نه با SCB_*DCache)، پس مسیر
+   * DMA نیازی به invalidate/clean ندارد. JPEG سخت‌افزاری هم ندارد.
+   * FMC/SDRAM و OCTOSPI فقط روی H56x/H57x هست؛ روی H503 (۳۲ کیلوبایت
+   * RAM) اندازه‌ها را در fm_board_config.h کوچک کنید. */
+  #define FM_PORT_D_NAME        "STM32H5"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   1
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        2
 
 #elif FM_PORT == FM_PORT_STM32F7
-  #define FM_PORT_NAME          "STM32F7"
-  #define FM_PORT_HAS_DCACHE    1
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     1
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          2
+  #define FM_PORT_D_NAME        "STM32F7"
+  #define FM_PORT_D_HAS_DCACHE  1
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   1
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        2
 
 #elif FM_PORT == FM_PORT_STM32F4
-  #define FM_PORT_NAME          "STM32F4"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     1
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          2
+  #define FM_PORT_D_NAME        "STM32F4"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   1
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        2
 
 #elif FM_PORT == FM_PORT_STM32F1
-  #define FM_PORT_NAME          "STM32F1"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      0
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          1      /* 1 = کم‌توان */
+  #define FM_PORT_D_NAME        "STM32F1"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    0
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        1      /* 1 = کم‌توان */
 
 #elif FM_PORT == FM_PORT_STM32G0
-  #define FM_PORT_NAME          "STM32G0"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          1
+  #define FM_PORT_D_NAME        "STM32G0"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        1
 
 #elif FM_PORT == FM_PORT_STM32G4
-  #define FM_PORT_NAME          "STM32G4"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          1
+  #define FM_PORT_D_NAME        "STM32G4"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        1
 
 #elif FM_PORT == FM_PORT_STM32L4
-  #define FM_PORT_NAME          "STM32L4"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       1
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      1
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       1
-  #define FM_PORT_TIER          1
+  #define FM_PORT_D_NAME        "STM32L4"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     1
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    1
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     1
+  #define FM_PORT_D_TIER        1
 
 #elif FM_PORT == FM_PORT_HOST
-  #define FM_PORT_NAME          "host"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       0
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      0
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       0
-  #define FM_PORT_TIER          3
+  #define FM_PORT_D_NAME        "host"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     0
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    0
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     0
+  #define FM_PORT_D_TIER        3
 
 #else /* FM_PORT_GENERIC — هیچ فرضی نکن */
-  #define FM_PORT_NAME          "generic"
-  #define FM_PORT_HAS_DCACHE    0
-  #define FM_PORT_HAS_DMA       0
-  #define FM_PORT_HAS_SDRAM     0
-  #define FM_PORT_HAS_QSPI      0
-  #define FM_PORT_HAS_HW_JPEG   0
-  #define FM_PORT_HAS_I2S       0
-  #define FM_PORT_TIER          1
+  #define FM_PORT_D_NAME        "generic"
+  #define FM_PORT_D_HAS_DCACHE  0
+  #define FM_PORT_D_HAS_DMA     0
+  #define FM_PORT_D_HAS_SDRAM   0
+  #define FM_PORT_D_HAS_QSPI    0
+  #define FM_PORT_D_HAS_HW_JPEG 0
+  #define FM_PORT_D_HAS_I2S     0
+  #define FM_PORT_D_TIER        1
+#endif
+
+/* مقدار نهایی: آنچه خودتان پیش از این فایل تعریف کرده‌اید می‌ماند،
+ * وگرنه مقدار پورت.  (پیش‌تر این‌ها بدون #ifndef تعریف می‌شدند و
+ * override ِ وعده‌داده‌شده «redefined» می‌داد.) */
+#ifndef FM_PORT_NAME
+#define FM_PORT_NAME FM_PORT_D_NAME
+#endif
+#ifndef FM_PORT_HAS_DCACHE
+#define FM_PORT_HAS_DCACHE FM_PORT_D_HAS_DCACHE
+#endif
+#ifndef FM_PORT_HAS_DMA
+#define FM_PORT_HAS_DMA FM_PORT_D_HAS_DMA
+#endif
+#ifndef FM_PORT_HAS_SDRAM
+#define FM_PORT_HAS_SDRAM FM_PORT_D_HAS_SDRAM
+#endif
+#ifndef FM_PORT_HAS_QSPI
+#define FM_PORT_HAS_QSPI FM_PORT_D_HAS_QSPI
+#endif
+#ifndef FM_PORT_HAS_HW_JPEG
+#define FM_PORT_HAS_HW_JPEG FM_PORT_D_HAS_HW_JPEG
+#endif
+#ifndef FM_PORT_HAS_I2S
+#define FM_PORT_HAS_I2S FM_PORT_D_HAS_I2S
+#endif
+#ifndef FM_PORT_TIER
+#define FM_PORT_TIER FM_PORT_D_TIER
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -180,7 +229,7 @@
  * عوض کنید — آنجا اولویت دارد چون قبل از این فایل خوانده می‌شود.
  *
  * TIER 1 (F1/G0/L4): حافظه بسیار کم. فقط فایل.
- * TIER 2 (F4/F7):    حافظهٔ متوسط، معمولاً با SDRAM.
+ * TIER 2 (F4/F7/H5): حافظهٔ متوسط، معمولاً با SDRAM.
  * TIER 3 (H7/host):  همه چیز.
  */
 #if FM_PORT_TIER == 1

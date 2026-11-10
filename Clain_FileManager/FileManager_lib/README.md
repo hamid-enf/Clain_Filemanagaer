@@ -65,7 +65,7 @@ File_Move("/config/backup.txt", "/backup.txt", NULL, NULL);
 | MP3 playback (vendored minimp3, mono/stereo + downmix) | ✅ |
 | Extension-selected WAV/MP3 writer with compressed-encoder registry | ✅ |
 | FMRV raw video read/write and codec plugin hook | ✅ |
-| AVI (RIFF) and MP4 (ISO BMFF) container parsing | ✅ |
+| AVI, MP4 (ISO BMFF), Matroska/WebM and FLV container parsing | ✅ |
 | H.264 software decoding via vendored h264bsd (self-healing: keyframe replay after a broken reference chain) | ✅ |
 | MJPEG decoding via vendored picojpeg (USB/ESP32 cameras) | ✅ |
 | Audio-track demux from MP4 (AAC/ADTS) and AVI (PCM) | ✅ |
@@ -84,9 +84,9 @@ File/container formats and decoded raw-buffer layouts are separate concepts:
 |---|---|---|
 | Audio read | WAV/PCM and MP3 are detected from file bytes and decoded to PCM16 | AAC/ADTS decoder registry |
 | Audio write | `.wav` is encoded internally | `.mp3` is selected automatically but requires a registered software/hardware MP3 encoder; otherwise returns `FM_ERR_UNSUPPORTED` |
-| Image file read/write | BMP, JPEG, PNG (magic-byte detect; Save picks the encoder from the destination extension) | STM32 JPEG peripheral via `Image_RegisterCodec` |
+| Image file read/write | BMP, JPEG, PNG (magic-byte detect; Save picks the encoder from the destination extension). PNG read: every colour type and bit depth, Adam7 interlace, CRC and Adler-32 verified; output is RGB888 | STM32 JPEG peripheral via `Image_RegisterCodec` |
 | Image raw output | GRAY8, RGB565, BGR565, RGB888, BGR888, RGBA8888, BGRA8888 | — |
-| Video read | FMRV, AVI and MP4 container detection; RAW, bundled MJPEG and H.264 decode where supported | Hardware codec registry |
+| Video read | FMRV, AVI, MP4, Matroska/WebM and FLV container detection; RAW, bundled MJPEG and H.264 decode where supported | Hardware codec registry |
 | Video raw output | Same caller-selected pixel layouts as images | Conversion uses a caller-owned RGB888 work buffer |
 | Video write | FMRV raw RGB888 | AVI/MJPEG or MP4/H.264 require real encoder/container plugins and are not mislabeled |
 
@@ -233,8 +233,34 @@ target_link_libraries(app PRIVATE filemanager)
 
 # Optional switches:
 #   -DFM_USE_LITTLEFS=OFF -DFM_USE_MP3=OFF -DFM_USE_H264=OFF
+#   -DFM_USE_FLAC=OFF -DFM_USE_VORBIS=OFF -DFM_USE_OPUS=OFF
+#   -DFM_USE_OPUS_LIB=ON           (real Opus decode, vendored libopus)
 #   -DFM_USE_THREADS=ON -DFM_SYNC_IMPL=freertos|pthread|cmsis_rtos2
 ```
+
+Desktop build with the whole test-suite through CTest:
+
+```bash
+cmake -S . -B build -DFM_BUILD_TESTS=ON -DFM_USE_CACHE=ON
+cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+`FM_BUILD_TESTS=ON` implies `FM_HOST_BUILD=ON` (no HAL) and the POSIX
+adapter; with `-DFM_USE_THREADS=ON -DFM_SYNC_IMPL=freertos|cmsis_rtos2` the
+suite runs through the real port header on the stand-in kernels of
+`tools/rtosstub`.  `make cmake` (`tools/check_cmake.sh`) runs 13 such
+configurations and is part of `make check` when cmake is installed.
+
+On a small part (STM32F1/G0/G4/L4) switch the media options off explicitly
+(`-DFM_USE_IMAGE=OFF -DFM_USE_AUDIO=OFF -DFM_USE_VIDEO=OFF`): CMake passes
+every switch, so the "file-only" defaults `fm_config.h` picks for such a
+part by itself do not apply.
+
+Supported port profiles (`FM_PORT`, auto-detected from the CubeMX device
+macro): STM32F1, F4, F7, G0, G4, L4, **H5** (Cortex-M33: no core data cache,
+no hardware JPEG) and H7, plus `GENERIC` and `HOST`.  Each capability
+(`FM_PORT_HAS_*`, `FM_PORT_TIER`) can be overridden by defining it before
+`fm_port.h` is included, e.g. in `fm_board_config.h`.
 
 For ESP-IDF, put the folder under `components/` (or add it to
 `EXTRA_COMPONENT_DIRS`) — `idf_component_register` is detected
@@ -280,8 +306,9 @@ buffer) and ID3v2 tags are skipped automatically.
 
 ## Video: AVI / MP4 / H.264 / MJPEG / audio
 
-The video layer parses FMRV, AVI (RIFF) and MP4 (ISO BMFF) containers into a
-per-frame index and hands frame payloads to a pluggable codec:
+The video layer parses FMRV, AVI (RIFF), MP4 (ISO BMFF), Matroska/WebM and
+FLV containers into a per-frame index and hands frame payloads to a pluggable
+codec:
 
 * **H.264** — vendored [h264bsd](https://github.com/oneam/h264bsd)
   (Apache-2.0 + MIT) → RGB888.
@@ -323,8 +350,59 @@ Notes:
 * MP4/avc1 sample payloads are converted to Annex-B automatically; AVI H.264
   frames are auto-detected (start-code or length-prefixed).
 * picojpeg decodes baseline sequential JPEG only and is not thread-safe.
-* The container frame/sample index is static (sized by `FM_VIDEO_MAX_FRAMES`);
-  no heap is used by the parser itself.
+* The container frame/sample index is static (sized by `FM_VIDEO_MAX_FRAMES`
+  and `FM_VIDEO_MAX_AUDIO_FRAMES`).  A clip with more frames or audio packets
+  than that is **not cut short**: `frame_count` / `sample_count` report the
+  real totals, and what lies past the table is located while reading by
+  walking the container again (AVI `movi`, Matroska clusters, the MP4 sample
+  tables, FLV tags).  Sequential playback costs O(1) per frame; a seek far
+  past the table walks forward from the last indexed frame.
+* The parser allocates (`FM_Alloc`, released by `Video_Close`) in two cases
+  only: the Matroska lace table of a clip longer than the index, and audio
+  setup data (MKV CodecPrivate, MP4 `dfLa`) larger than
+  `FM_VIDEO_AUDIO_PRIVATE_MAX` — up to `FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX`
+  (64 KiB; 0 = never allocate, such a track is then not decodable).
+* **FLV**: H.264 (`AVCPacketType` sequence header parsed, frames returned as
+  Annex-B with the parameter sets in front of key frames), Enhanced-FLV
+  FourCC tags (`hvc1`, `avc1`, `av01`, `vp09`, `vp08`), AAC (rate/channels
+  from the AudioSpecificConfig, ADTS added), MP3, PCM and G.711.  Width,
+  height and frame rate come from `onMetaData`; without it the frame rate is
+  derived from the tag timestamps and the size is a 320x240 placeholder until
+  the decoder reports the real one.  A recording cut inside its last tag
+  plays up to that tag.  Not playable: Flash ADPCM, Nellymoser and Speex
+  audio (the clip opens without an audio track); VP6 / Sorenson frames are
+  only handed to a decoder you register.
+* **MP4**: 64-bit box sizes, `co64`, `stsc` runs; audio `mp4a` (AAC), `.mp3`,
+  `fLaC`, `Opus`, Vorbis, 16-bit little-endian PCM (`sowt`), `alaw`/`ulaw`.
+  Big-endian PCM (`twos`) and ALAC are not offered as an audio track.
+
+## Images: PNG and the hardware JPEG path
+
+**PNG read** accepts every legal PNG: greyscale 1/2/4/8/16 bit, palette
+1/2/4/8 bit, RGB and RGBA 8/16 bit, grey+alpha 8/16 bit, non-interlaced and
+Adam7.  The CRC of every `IDAT` chunk and the Adler-32 of the pixel data are
+checked — a damaged file gives `FM_ERR_CRC`, never a silently wrong picture.
+The result is always RGB888: alpha is dropped and 16-bit samples are rounded
+to 8.  Decoding is streamed row by row (32 KiB window); a row longer than
+`FM_PNG_MAX_STRIDE` bytes returns `FM_ERR_TOO_LARGE`.  `Image_Save` writes
+8-bit RGB PNG (stored blocks).
+
+**JPEG through a hardware codec.**  A codec registered with
+`Image_RegisterCodec("JPEG", ...)` receives the compressed picture as one
+memory block, so `Image_Load` must hold the whole file for it.  Where that
+memory comes from is bounded by configuration:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Image_SetWorkBuffer(buf, size)` | none | used first when the file fits (SDRAM/PSRAM) |
+| `FM_JPEG_HW_HEAP` | 1 | 0 = never take a file-sized block from `FM_Alloc` |
+| `FM_JPEG_HW_FILE_MAX` | 16 MiB | larger files never go to the hardware; 0 = files never do |
+
+Whenever the file is not handed to the hardware — too large, no memory, or
+the codec declines it — the picture is decoded by the bundled streaming
+software decoder, which needs no file-sized memory.  With
+`-DFM_JPEG_HW_HEAP=0` and a work buffer, the library therefore never
+allocates for a JPEG file.
 
 ## Rename-over and atomic replace
 
@@ -518,9 +596,13 @@ host run cannot show is real interrupt/priority behaviour on the target.
   handle, and overwriting bytes in place do not touch the table.
 - A handle whose file was deleted or replaced by a rename returns
   `FM_ERR_NOT_FOUND`; it can never reach the file that reuses the slot.
-- Compaction moves data in place and is **not power-fail safe**: a reset
-  in the middle of a compaction can leave files damaged.  Use LittleFS
-  where that matters.
+- A rename is all or nothing on the mounted volume: every reason to
+  refuse it is checked before the table changes, and when the table
+  cannot be written the old names — and a file that was to be replaced —
+  are put back.
+- Compaction moves data in place and the table is rewritten in place:
+  FMFS is **not power-fail safe**.  A reset in the middle of either can
+  leave files damaged.  Use LittleFS where that matters.
 
 ## Examples
 

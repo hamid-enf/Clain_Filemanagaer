@@ -70,6 +70,10 @@
 #elif defined(STM32H7) || defined(STM32H743xx) || defined(STM32H750xx) || \
       defined(STM32H723xx) || defined(STM32H747xx) || defined(STM32H745xx)
 #include "stm32h7xx_hal.h"
+#elif defined(STM32H5) || defined(STM32H503xx) || defined(STM32H523xx) || \
+      defined(STM32H533xx) || defined(STM32H562xx) || defined(STM32H563xx) || \
+      defined(STM32H573xx)
+#include "stm32h5xx_hal.h"
 #elif defined(STM32F7) || defined(STM32F746xx) || defined(STM32F767xx)
 #include "stm32f7xx_hal.h"
 #elif defined(STM32F4) || defined(STM32F407xx) || defined(STM32F429xx) || \

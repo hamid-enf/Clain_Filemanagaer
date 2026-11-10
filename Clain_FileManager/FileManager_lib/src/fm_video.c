@@ -1,13 +1,20 @@
 /*
- * FileManager - Video containers (FMRV, AVI, MP4)
+ * FileManager - Video containers (FMRV, AVI, MP4, Matroska/WebM, FLV)
  *
  * FMRV is the built-in raw container (fixed-size frames + small header).
- * AVI (RIFF) and MP4 (ISO BMFF) are parsed far enough to extract the video
- * stream: dimensions, frame rate, codec and a per-frame offset/size index.
- * Frame payloads are handed to a codec plugin (see fm_h264.h) for decode.
+ * AVI (RIFF), MP4 (ISO BMFF), Matroska/WebM and FLV are parsed far enough
+ * to extract the video stream (dimensions, frame rate, codec, a per-frame
+ * offset/size index) and one audio track.  Frame payloads are handed to a
+ * codec plugin (see fm_h264.h) for decode.
  *
- * The frame index lives in a static pool sized by FM_VIDEO_MAX_FRAMES; no
- * heap is used by the parser itself.
+ * The frame index lives in a static pool sized by FM_VIDEO_MAX_FRAMES.  A
+ * clip with more frames than that is still played to its end: the frames
+ * past the table are located by walking the container again while
+ * reading (VIDEO_TAIL_*), sequentially in O(1) per frame.
+ *
+ * Heap (FM_Alloc) is used for two things only, both freed by Video_Close:
+ * the Matroska lace table of a clip longer than the index, and audio
+ * setup data larger than FM_VIDEO_AUDIO_PRIVATE_MAX.
  */
 
 #define FM_DEBUG_TAG "video"
@@ -245,6 +252,8 @@ typedef struct
     uint16_t      audio_bits;        /* PCM only                      */
     uint32_t      audio_private_size;
     uint8_t       audio_private[FM_VIDEO_AUDIO_PRIVATE_MAX]; /* MKV CodecPrivate / MP4 dfLa */
+    uint8_t      *audio_private_big; /* ...when it does not fit there
+                                      * (FM_Alloc, freed on close)    */
     uint32_t      audio_count;
     /* PCM chunk larger than the caller's buffer: bytes of the chunk
      * at audio_frame_index-1 already handed out.  The next call
@@ -494,6 +503,11 @@ static void video_priv_free(FM_VideoPriv *p)
             FM_Free(p->mkv_blk);
         }
         p->mkv_blk = NULL;
+        if (p->audio_private_big != NULL)
+        {
+            FM_Free(p->audio_private_big);
+        }
+        p->audio_private_big = NULL;
         p->scratch = NULL;
         p->scratch_cap = 0u;
         p->rgb_scratch = NULL;
@@ -523,6 +537,60 @@ static uint8_t *video_scratch_get(uint8_t **buf, size_t *cap, size_t need)
         }
     }
     return *buf;
+}
+
+/* Codec setup data of the audio track (audio_private_size bytes). */
+static const uint8_t *video_audio_private(const FM_VideoPriv *priv)
+{
+    return (priv->audio_private_big != NULL) ? priv->audio_private_big
+                                             : priv->audio_private;
+}
+
+/* Read the setup data of the audio track (MKV CodecPrivate, MP4 dfLa,
+ * FLV AudioSpecificConfig) from the file.  What does not fit the inline
+ * buffer goes to the heap; it used to be dropped (MKV) or cut off
+ * (MP4), and the track then failed in the decoder. */
+static FM_Result video_audio_private_load(FM_Video *v, FM_VideoPriv *priv,
+                                          uint64_t off, uint64_t len)
+{
+    uint8_t *dst = priv->audio_private;
+
+    priv->audio_private_size = 0u;
+    if (priv->audio_private_big != NULL)
+    {
+        FM_Free(priv->audio_private_big);
+        priv->audio_private_big = NULL;
+    }
+    if (len == 0u)
+    {
+        return FM_OK;
+    }
+    if (len > sizeof(priv->audio_private))
+    {
+        if (len > (uint64_t)FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX)
+        {
+            return FM_ERR_TOO_LARGE;
+        }
+        dst = (uint8_t *)FM_Alloc((size_t)len);
+        if (dst == NULL)
+        {
+            return FM_ERR_NO_MEMORY;
+        }
+    }
+    if (video_read_at(&v->file, off, dst, (uint32_t)len) != FM_OK)
+    {
+        if (dst != priv->audio_private)
+        {
+            FM_Free(dst);
+        }
+        return FM_ERR_IO;
+    }
+    if (dst != priv->audio_private)
+    {
+        priv->audio_private_big = dst;
+    }
+    priv->audio_private_size = (uint32_t)len;
+    return FM_OK;
 }
 
 /* Add one entry to a fixed index table; once the table is full remember
@@ -1815,12 +1883,8 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                             {
                                 /* dfLa payload: 4-byte version/flags + STREAMINFO */
                                 uint64_t payload = db.data + 4u;
-                                uint64_t plen = (db.size > db.data - db.start) ? (db.start + db.size - payload) : 0u;
-                                if (plen > sizeof(priv->audio_private)) plen = sizeof(priv->audio_private);
-                                if (plen > 0u && video_read_at(&v->file, payload, priv->audio_private, (uint32_t)plen) == FM_OK)
-                                {
-                                    priv->audio_private_size = (uint32_t)plen;
-                                }
+                                uint64_t plen = (db.start + db.size > payload) ? (db.start + db.size - payload) : 0u;
+                                (void)video_audio_private_load(v, priv, payload, plen);
                                 break;
                             }
                             dpos = db.start + db.size;
@@ -2736,18 +2800,16 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
         /* Read CodecPrivate straight into its final place (no 512-byte
          * stack copy that silently dropped anything larger -- i.e. most
          * Vorbis setup headers). */
-        if (t->priv_size > sizeof(priv->audio_private))
+        FM_Result rp = video_audio_private_load(v, priv, t->priv_off,
+                                                t->priv_size);
+
+        if (rp != FM_OK)
         {
-            FM_ERR_LOG("mkv: audio CodecPrivate is %lu bytes, limit %u "
-                       "(raise FM_VIDEO_AUDIO_PRIVATE_MAX) -- the track "
-                       "will not decode",
-                       (unsigned long)t->priv_size,
-                       (unsigned)sizeof(priv->audio_private));
-        }
-        else if (video_read_at(&v->file, t->priv_off, priv->audio_private,
-                               (uint32_t)t->priv_size) == FM_OK)
-        {
-            priv->audio_private_size = (uint32_t)t->priv_size;
+            FM_ERR_LOG("mkv: audio CodecPrivate (%lu bytes) not kept: %s "
+                       "(FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX is %lu) -- the "
+                       "track will not decode",
+                       (unsigned long)t->priv_size, FM_ResultString(rp),
+                       (unsigned long)FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX);
         }
     }
 }
@@ -3641,11 +3703,9 @@ static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
                             t.off, t.size);
             break;
         case FLV_ACONF:
-            if (!have_aconf && t.size <= sizeof(priv->audio_private) &&
-                video_read_at(&v->file, t.off, priv->audio_private,
-                              t.size) == FM_OK)
+            if (!have_aconf &&
+                video_audio_private_load(v, priv, t.off, t.size) == FM_OK)
             {
-                priv->audio_private_size = t.size;
                 have_aconf = FM_TRUE;
             }
             break;
@@ -3739,7 +3799,7 @@ static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
                 static const uint32_t k_aac_rate[13] = {
                     96000u, 88200u, 64000u, 48000u, 44100u, 32000u, 24000u,
                     22050u, 16000u, 12000u, 11025u, 8000u, 7350u };
-                const uint8_t *c = priv->audio_private;
+                const uint8_t *c = video_audio_private(priv);
                 uint32_t fidx = (((uint32_t)c[0] & 0x07u) << 1) |
                                 ((uint32_t)c[1] >> 7);
                 uint32_t chan = ((uint32_t)c[1] >> 3) & 0x0Fu;
@@ -5030,8 +5090,9 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
     {
         /* MP4 dfLa / MKV CodecPrivate hold STREAMINFO; a FLAC decoder
          * needs "fLaC" + STREAMINFO in front of the frame. */
+        const uint8_t *setup = video_audio_private(priv);
         FM_Bool has_magic = (priv->audio_private_size >= 4u &&
-                             memcmp(priv->audio_private, "fLaC", 4) == 0)
+                             memcmp(setup, "fLaC", 4) == 0)
                                 ? FM_TRUE : FM_FALSE;
         size_t hdr_len = (size_t)priv->audio_private_size +
                          (has_magic ? 0u : 4u);
@@ -5043,12 +5104,12 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
         }
         if (has_magic)
         {
-            memcpy(tmp, priv->audio_private, priv->audio_private_size);
+            memcpy(tmp, setup, priv->audio_private_size);
         }
         else
         {
             memcpy(tmp, "fLaC", 4);
-            memcpy(tmp + 4, priv->audio_private, priv->audio_private_size);
+            memcpy(tmp + 4, setup, priv->audio_private_size);
         }
         r = video_read_at(&v->file, offset, tmp + hdr_len, fsize);
         if (r != FM_OK)
@@ -5079,7 +5140,7 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
         {
             uint32_t ogg_len = 0;
 
-            r = vorbis_build_ogg_from_mkv(priv->audio_private,
+            r = vorbis_build_ogg_from_mkv(video_audio_private(priv),
                                           priv->audio_private_size,
                                           tmp, fsize, &ogg, &ogg_len);
             if (r == FM_ERR_NO_MEMORY)

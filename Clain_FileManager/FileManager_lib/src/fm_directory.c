@@ -154,6 +154,28 @@ FM_Bool FM_Dir_AnyOpenOnMount(const FM_MountEntry *mount)
 /* ------------------------------------------------------------------ */
 /* Basic operations                                                    */
 /* ------------------------------------------------------------------ */
+/* mkdir said "exists".  That is success for Directory_Create only when the
+ * thing that exists is a directory: a FILE of that name used to be
+ * reported as FM_OK too, and the caller then went on to create files
+ * "inside" it.  Where the filesystem cannot tell, the old answer stays. */
+static FM_Result dir_create_exists(FM_MountEntry *mount, const char *rel)
+{
+    FM_FileInfo info;
+    FM_Result r;
+
+    if (mount->fs->ops.stat == NULL)
+    {
+        return FM_OK;
+    }
+    memset(&info, 0, sizeof(info));
+    FM_FS_CALL(mount, r, stat(mount->fs, rel, &info));
+    if (r == FM_OK && info.type != FM_ITEM_DIR)
+    {
+        return FM_ERR_NOT_DIRECTORY;
+    }
+    return FM_OK;
+}
+
 FM_Result Directory_Create(const char *path)
 {
     FM_MountEntry *mount = NULL;
@@ -176,9 +198,13 @@ FM_Result Directory_Create(const char *path)
     FM_FS_CALL(mount, r, mkdir(mount->fs, rel));
     if (r == FM_OK || r != FM_ERR_NOT_FOUND)
     {
+        if (r == FM_ERR_EXISTS)
+        {
+            r = dir_create_exists(mount, rel);
+        }
         FM_VFS_Unpin(mount);
-        FM_Core_SetLastError(r == FM_ERR_EXISTS ? FM_OK : r);
-        return (r == FM_ERR_EXISTS) ? FM_OK : r;
+        FM_Core_SetLastError(r);
+        return r;
     }
 
     /* Recursive: create each path component. */
@@ -205,7 +231,11 @@ FM_Result Directory_Create(const char *path)
                 prefix[k] = '\0';
 
                 FM_FS_CALL(mount, r, mkdir(mount->fs, prefix));
-                if (r != FM_OK && r != FM_ERR_EXISTS)
+                if (r == FM_ERR_EXISTS)
+                {
+                    r = dir_create_exists(mount, prefix);
+                }
+                if (r != FM_OK)
                 {
                     FM_VFS_Unpin(mount);
                     FM_Core_SetLastError(r);

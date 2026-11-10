@@ -112,6 +112,7 @@
  * مقادیر ممکن:
  *   FM_PORT_STM32H7   همه چیز (پیش‌فرض این پروژه)
  *   FM_PORT_STM32F7   کش + SDRAM، بدون JPEG سخت‌افزاری
+ *   FM_PORT_STM32H5   Cortex-M33: بدون کش داده، بدون JPEG سخت‌افزاری
  *   FM_PORT_STM32F4   SDRAM، بدون کش
  *   FM_PORT_STM32F1   فقط فایل — حافظه خیلی کم
  *   FM_PORT_STM32G0 / G4 / L4

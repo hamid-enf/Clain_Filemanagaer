@@ -10,7 +10,7 @@
 #   # ESP-IDF: place this directory under components/ (or add
 #   # set(EXTRA_COMPONENT_DIRS path/to/FileManager)) - nothing else needed.
 #
-# Feature switches (defaults mirror fm_config.h / the host Makefile):
+# Feature switches (defaults mirror fm_config.h for a mid/high-end part):
 #
 #   -DFM_USE_LITTLEFS=OFF    drop the vendored littlefs
 #   -DFM_USE_MP3=OFF         drop the vendored minimp3
@@ -20,7 +20,28 @@
 #   -DFM_USE_THREADS=ON -DFM_SYNC_IMPL=freertos|pthread|cmsis_rtos2
 #   -DFM_USE_USER_CONFIG=ON  use your fm_config_user.h instead
 #
+# NOTE for small parts (STM32F1/G0/G4/L4): fm_config.h switches image,
+# audio and video off by itself there, but only for switches nobody set.
+# CMake passes every switch below, so on such a part turn the media
+# options OFF explicitly (or use FM_USE_USER_CONFIG).
+#
+# Desktop build with the test-suite (this is what CI runs):
+#
+#   cmake -S . -B build -DFM_BUILD_TESTS=ON -DFM_USE_CACHE=ON
+#   cmake --build build && ctest --test-dir build --output-on-failure
+#   # thread-safe core through a real RTOS port on host stand-in kernels:
+#   cmake -S . -B build -DFM_BUILD_TESTS=ON -DFM_USE_THREADS=ON \
+#         -DFM_SYNC_IMPL=pthread|freertos|cmsis_rtos2
+#
 cmake_minimum_required(VERSION 3.13)
+
+# Configured on its own (cmake -S . -B build) the directory needs a
+# project().  Not when it is pulled in with add_subdirectory(), and never
+# as an ESP-IDF component (the IDF project owns project()).
+if(NOT COMMAND idf_component_register AND
+   CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(filemanager C)
+endif()
 
 option(FM_USE_TEXT        "Text file API (line based)"               ON)
 option(FM_USE_BINARY      "Typed binary read/write"                  ON)
@@ -48,11 +69,16 @@ option(FM_USE_CACHE       "Optional file-level read cache"           OFF)
 option(FM_USE_RAMDISK     "Pointer-backed memory storage adapter"    ON)
 option(FM_USE_FMFS        "Built-in mini flash filesystem"           ON)
 option(FM_USE_LITTLEFS    "LittleFS adapter (vendored littlefs)"     ON)
+option(FM_USE_FLAC        "FLAC decoding (vendored dr_flac)"         ON)
+option(FM_USE_VORBIS      "Ogg Vorbis decoding (vendored stb_vorbis)" ON)
+option(FM_USE_OPUS        "Opus container/track support"             ON)
 option(FM_USE_OPUS_LIB    "Real Opus decode (vendored libopus, decoder-only)" OFF)
 option(FM_USE_FATFS       "FatFS adapter (requires your ff.h)"       OFF)
 option(FM_USE_POSIX       "POSIX adapter (host builds only)"         OFF)
 option(FM_USE_THREADS     "Thread-safe core"                         OFF)
 option(FM_USE_USER_CONFIG "Use fm_config_user.h from the include path" OFF)
+option(FM_HOST_BUILD      "Desktop build: no HAL, no hardware"       OFF)
+option(FM_BUILD_TESTS     "Build the host test-suite (implies FM_HOST_BUILD, FM_USE_POSIX)" OFF)
 set(FM_SYNC_IMPL "freertos" CACHE STRING
     "Sync port when FM_USE_THREADS=ON: freertos | cmsis_rtos2 | pthread")
 
@@ -60,8 +86,20 @@ set(FM_SYNC_IMPL "freertos" CACHE STRING
 # codec sources that the public configuration will compile out.
 if(NOT FM_USE_AUDIO)
     set(FM_USE_MP3 OFF CACHE BOOL "MP3 decoding (vendored minimp3)" FORCE)
+    set(FM_USE_FLAC OFF CACHE BOOL "FLAC decoding (vendored dr_flac)" FORCE)
+    set(FM_USE_VORBIS OFF CACHE BOOL
+        "Ogg Vorbis decoding (vendored stb_vorbis)" FORCE)
+    set(FM_USE_OPUS OFF CACHE BOOL "Opus container/track support" FORCE)
+endif()
+if(NOT FM_USE_OPUS)
     set(FM_USE_OPUS_LIB OFF CACHE BOOL
         "Real Opus decode (vendored libopus, decoder-only)" FORCE)
+endif()
+if(FM_BUILD_TESTS)
+    # The suite runs on the desktop and keeps its fixtures on the host
+    # file system.
+    set(FM_HOST_BUILD ON CACHE BOOL "Desktop build: no HAL, no hardware" FORCE)
+    set(FM_USE_POSIX ON CACHE BOOL "POSIX adapter (host builds only)" FORCE)
 endif()
 if(NOT FM_USE_VIDEO)
     set(FM_USE_H264 OFF CACHE BOOL "H.264 decoding (vendored h264bsd)" FORCE)
@@ -135,6 +173,9 @@ set(FM_FEATURE_DEFINES
     FM_USE_RAMDISK=$<BOOL:${FM_USE_RAMDISK}>
     FM_USE_FMFS=$<BOOL:${FM_USE_FMFS}>
     FM_USE_LITTLEFS=$<BOOL:${FM_USE_LITTLEFS}>
+    FM_USE_FLAC=$<BOOL:${FM_USE_FLAC}>
+    FM_USE_VORBIS=$<BOOL:${FM_USE_VORBIS}>
+    FM_USE_OPUS=$<BOOL:${FM_USE_OPUS}>
     FM_USE_FATFS=$<BOOL:${FM_USE_FATFS}>
     FM_USE_POSIX=$<BOOL:${FM_USE_POSIX}>
     FM_USE_THREADS=$<BOOL:${FM_USE_THREADS}>
@@ -144,6 +185,18 @@ if(FM_USE_USER_CONFIG)
     list(APPEND FM_DEFINES FM_USE_USER_CONFIG)
 else()
     list(APPEND FM_DEFINES ${FM_FEATURE_DEFINES})
+endif()
+# Whether src/fm_opus.c calls into libopus must follow whether libopus is
+# part of THIS build.  fm_config.h defaults it to "yes" on every non-host
+# build (an IDE project compiles the whole vendored tree); left to that
+# default, the library built here referenced opus_decode() & co. without
+# containing them and the application failed to link.
+list(APPEND FM_DEFINES FM_OPUS_USE_LIBOPUS=$<BOOL:${FM_USE_OPUS_LIB}>)
+if(FM_HOST_BUILD)
+    list(APPEND FM_DEFINES FM_HOST_BUILD=1 _GNU_SOURCE)
+endif()
+if(FM_BUILD_TESTS)
+    list(APPEND FM_DEFINES FM_DEBUG=1)
 endif()
 
 if(FM_USE_LITTLEFS)
@@ -169,7 +222,7 @@ if(FM_USE_MJPEG OR FM_USE_JPEG)
 endif()
 # stb_vorbis backs src/fm_vorbis.c, which fm_config.h compiles out whenever
 # audio is off: do not build its implementation (and tables) in that case.
-if(FM_USE_AUDIO)
+if(FM_USE_AUDIO AND FM_USE_VORBIS)
     list(APPEND FM_SOURCES third_party/stb/stb_vorbis.c)
 endif()
 if(FM_USE_OPUS_LIB)
@@ -185,7 +238,22 @@ if(FM_USE_OPUS_LIB)
     list(APPEND FM_INCLUDE_DIRS
         third_party/opus/include third_party/opus/celt
         third_party/opus/silk third_party/opus/src)
-    list(APPEND FM_DEFINES FM_OPUS_USE_LIBOPUS=1)
+endif()
+
+# FreeRTOS / CMSIS-RTOS2 sync port on the desktop: the real port header,
+# with the few kernel calls it uses implemented on pthreads
+# (tools/rtosstub).  On a target the kernel headers come from your project.
+set(FM_RTOS_HOST_STUB OFF)
+if(FM_HOST_BUILD AND FM_USE_THREADS AND NOT FM_SYNC_IMPL STREQUAL "pthread")
+    if(NOT EXISTS
+       "${CMAKE_CURRENT_SOURCE_DIR}/tools/rtosstub/${FM_SYNC_IMPL}/rtos_host.c")
+        message(FATAL_ERROR
+            "FM_SYNC_IMPL=${FM_SYNC_IMPL}: no host stand-in kernel "
+            "(use pthread, freertos or cmsis_rtos2)")
+    endif()
+    set(FM_RTOS_HOST_STUB ON)
+    list(APPEND FM_SOURCES tools/rtosstub/${FM_SYNC_IMPL}/rtos_host.c)
+    list(APPEND FM_INCLUDE_DIRS tools/rtosstub/${FM_SYNC_IMPL})
 endif()
 
 # Vendored third-party code is upstream code.  Relax warnings for it, and
@@ -260,9 +328,19 @@ else()
         target_compile_definitions(filemanager PUBLIC FM_SYNC_CUSTOM)
         target_include_directories(filemanager PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/ports/${FM_SYNC_IMPL}")
-        if(FM_SYNC_IMPL STREQUAL "pthread")
+        if(FM_SYNC_IMPL STREQUAL "pthread" OR FM_RTOS_HOST_STUB)
             find_package(Threads REQUIRED)
             target_link_libraries(filemanager PUBLIC Threads::Threads)
         endif()
+    endif()
+
+    if(FM_BUILD_TESTS)
+        # The suite opens its vectors by relative path (test/vectors/...),
+        # so it runs from the source directory, like `make test`.
+        enable_testing()
+        add_executable(fm_test test/main.c)
+        target_link_libraries(fm_test PRIVATE filemanager m)
+        add_test(NAME fm_test COMMAND fm_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
 endif()

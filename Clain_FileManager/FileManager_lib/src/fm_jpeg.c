@@ -611,7 +611,7 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
          * (nested call) the hardware path is skipped and the software
          * decoder below reports FM_ERR_BUSY. */
         if (File_Size(f, &sz) == FM_OK && sz > 0u &&
-            sz <= (16u * 1024u * 1024u) &&
+            sz <= (uint64_t)FM_JPEG_HW_FILE_MAX &&
             (uint64_t)sz <= (uint64_t)FM_IMAGE_MAX_BYTES &&
             FM_CodecScratch_Enter() == FM_OK)
         {
@@ -625,8 +625,12 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
             }
             else
             {
+#if FM_JPEG_HW_HEAP
                 blob = (uint8_t *)FM_Alloc((size_t)sz);
                 owned = 1;
+#else
+                blob = NULL;    /* no work buffer: software decode below */
+#endif
             }
             if (blob != NULL)
             {

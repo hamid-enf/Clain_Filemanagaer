@@ -30,6 +30,9 @@ typedef struct
 /* Initialize a user-owned directory handle before Directory_OpenEx. */
 void Directory_Init(FM_Dir *d);
 
+/* Creates the directory and any missing parents.  A directory that is
+ * already there is success; a FILE of that name (at any level of the
+ * path) is FM_ERR_NOT_DIRECTORY. */
 FM_Result Directory_Create(const char *path);
 FM_Result Directory_Delete(const char *path);            /* empty only  */
 FM_Result Directory_DeleteRecursive(const char *path);

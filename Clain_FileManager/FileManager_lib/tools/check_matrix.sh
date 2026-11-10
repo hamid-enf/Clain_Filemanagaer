@@ -159,6 +159,11 @@ if [ "$MODE" != "quick" ]; then
     CFLAGS_EXTRA="-DFM_FILE_FORCE_BOUNCE" run_one "FM_FILE_FORCE_BOUNCE THREADS=1" FM_USE_THREADS=1
     # One shared File_GetLastError() slot instead of one per task.
     CFLAGS_EXTRA="-DFM_LAST_ERROR_THREADS=0" run_one "THREADS=1 FM_LAST_ERROR_THREADS=0" FM_USE_THREADS=1
+    # O-04: the hardware-JPEG file path with its two opt-outs.
+    CFLAGS_EXTRA="-DFM_JPEG_HW_HEAP=0" run_one "FM_JPEG_HW_HEAP=0 (no file-sized heap block)"
+    CFLAGS_EXTRA="-DFM_JPEG_HW_FILE_MAX=0u" run_one "FM_JPEG_HW_FILE_MAX=0 (files never go to the HW codec)"
+    # Audio setup data (MKV CodecPrivate) never taken from the heap.
+    CFLAGS_EXTRA="-DFM_VIDEO_AUDIO_PRIVATE_HEAP_MAX=0u" run_one "FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX=0"
     # A "mutex only" sync port (no thread identity): a busy scratch
     # resource is reported as FM_ERR_BUSY instead of being waited for, so
     # the multi-thread suites fail by design -- only the build is checked.

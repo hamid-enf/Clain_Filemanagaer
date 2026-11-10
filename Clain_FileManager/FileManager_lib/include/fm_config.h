@@ -180,6 +180,30 @@
 #ifndef FM_JPEG_PROBE_BUDGET
 #define FM_JPEG_PROBE_BUDGET 65536u
 #endif
+/* A registered hardware "JPEG" codec decodes from memory, so Image_Load
+ * has to hold the whole compressed file while it runs -- the only image
+ * path that does.  Two knobs bound that:
+ *
+ *   FM_JPEG_HW_FILE_MAX  largest file handed to the hardware codec
+ *                        (default 16 MiB).  0 = files never go to the
+ *                        hardware codec (Image_DecodeJPEG, which is
+ *                        given a memory block by the caller, still
+ *                        does).
+ *   FM_JPEG_HW_HEAP      1 (default): when the buffer installed with
+ *                        Image_SetWorkBuffer is missing or too small,
+ *                        take the block from the FileManager allocator.
+ *                        0: never -- only the installed work buffer is
+ *                        used, the library does not allocate a file-
+ *                        sized block by itself.
+ *
+ * A file that is not handed to the hardware is decoded by the bundled
+ * streaming software decoder (a few KB of state, no file-sized buffer). */
+#ifndef FM_JPEG_HW_FILE_MAX
+#define FM_JPEG_HW_FILE_MAX (16u * 1024u * 1024u)
+#endif
+#ifndef FM_JPEG_HW_HEAP
+#define FM_JPEG_HW_HEAP 1
+#endif
 #if FM_USE_VIDEO == 0
 /* The H.264 / MJPEG decoders are video codec plugins. */
 #undef FM_USE_H264
@@ -399,6 +423,13 @@
 /* Codec setup data kept per open video (MKV CodecPrivate, MP4 dfLa /
  * dOps).  Vorbis setup headers are routinely 3-4 KB. */
 #define FM_VIDEO_AUDIO_PRIVATE_MAX 4096
+#endif
+/* Setup data larger than FM_VIDEO_AUDIO_PRIVATE_MAX (a Vorbis track with
+ * big codebooks) is kept in a block from the FileManager allocator for
+ * as long as the video is open, up to this many bytes.  0 = never
+ * allocate: such a track is then reported as not decodable. */
+#ifndef FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX
+#define FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX 65536u
 #endif
 #ifndef FM_MAX_VIDEO
 #define FM_MAX_VIDEO 4                 /* simultaneously open videos      */

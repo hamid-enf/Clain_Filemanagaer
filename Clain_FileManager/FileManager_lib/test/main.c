@@ -11120,7 +11120,7 @@ static void eb_f32(Eb *e, uint32_t id, float f)
 static void eb_bin(Eb *e, uint32_t id, const void *p, size_t n)
 {
     eb_id(e, id);
-    eb_vint(e, n, 2u);
+    eb_vint(e, n, (n < 16383u) ? 2u : 4u);
     eb_raw(e, p, n);
 }
 
@@ -11136,6 +11136,8 @@ typedef struct
     int            long_void;       /* add a Void with a 5-byte size      */
     int            unknown_cluster; /* Cluster with the "unknown" size    */
     const char    *acodec;          /* NULL = "A_PCM/INT/LIT"             */
+    const uint8_t *apriv;           /* audio CodecPrivate                 */
+    size_t         apriv_len;
 } MkvOpt;
 
 /* EBML header, Segment, Tracks, and an open Cluster with its Timecode
@@ -11180,6 +11182,10 @@ static void mkv_head(Eb *e, const MkvOpt *o, size_t *seg_at, size_t *clu_at)
         eb_uint(e, 0x83u, 2u, 1u);
         eb_bin(e, 0x86u, o->acodec ? o->acodec : "A_PCM/INT/LIT",
                strlen(o->acodec ? o->acodec : "A_PCM/INT/LIT"));
+        if (o->apriv != NULL)
+        {
+            eb_bin(e, 0x63A2u, o->apriv, o->apriv_len);
+        }
         sub = eb_open(e, 0xE1u);
         if (o->rate_f32) eb_f32(e, 0xB5u, (float)o->rate);
         else             eb_f64(e, 0xB5u, o->rate);
@@ -13771,6 +13777,91 @@ static void test_video_report(void)
         }
         (void)Audio_UnregisterDecoder("FLAC");
         CHECK_RESULT(r, "persistent decoder");
+
+        TEST("mkv audio: setup data larger than the inline buffer is kept");
+        {
+            /* variant 0: 6000 bytes (> FM_VIDEO_AUDIO_PRIVATE_MAX) reach
+             * the decoder whole, behind "fLaC";
+             * variant 1: more than FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX is
+             * refused cleanly (the packets arrive without setup data). */
+            const size_t plen[2] = {
+                (size_t)FM_VIDEO_AUDIO_PRIVATE_MAX + 1904u,
+                (size_t)FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX + 1u };
+            int variant;
+
+            r = FM_OK;
+            for (variant = 0; variant < 2 && r == FM_OK; variant++)
+            {
+                size_t n = plen[variant];
+                size_t bcap = n + 4096u;
+                uint8_t *setup = (uint8_t *)malloc(n);
+                uint8_t *mb = (uint8_t *)malloc(bcap);
+                int16_t *pcm = (int16_t *)malloc((n + 64u) * sizeof(int16_t));
+                size_t got = 0;
+                size_t k;
+
+                if (setup == NULL || mb == NULL || pcm == NULL)
+                {
+                    r = FM_ERR_NO_MEMORY;
+                }
+                else
+                {
+                    for (k = 0; k < n; k++)
+                    {
+                        setup[k] = (uint8_t)(k * 7u + 3u);
+                    }
+                    memset(&e, 0, sizeof(e));
+                    memset(&o, 0, sizeof(o));
+                    memset(&vid, 0, sizeof(vid));
+                    e.b = mb; e.cap = bcap;
+                    o.rate = 48000.0;
+                    o.acodec = "A_FLAC";
+                    o.apriv = setup; o.apriv_len = n;
+                    mkv_head(&e, &o, &seg_at, &clu_at);
+                    mkv_block(&e, 0xA3u, 1u, 0u, &vf[0], &vs[0], 1u);
+                    mkv_block(&e, 0xA3u, 2u, 0u, &pf[0], &ps[0], 1u);
+                    mkv_tail(&e, &o, seg_at, clu_at);
+                    r = vr_write("/vr.mkv", &e);
+                }
+                if (r == FM_OK) r = Audio_RegisterDecoder("FLAC", &g_vr_ad_ops);
+                if (r == FM_OK) r = Video_Open("/vr.mkv", &vid);
+                if (r == FM_OK)
+                {
+                    r = Video_ReadAudioFrame(&vid, (uint8_t *)pcm,
+                                             (n + 64u) * sizeof(int16_t),
+                                             &got);
+                    if (r == FM_OK &&
+                        (n <= (size_t)FM_VIDEO_AUDIO_PRIVATE_MAX ||
+                         n <= (size_t)FM_VIDEO_AUDIO_PRIVATE_HEAP_MAX))
+                    {
+                        /* the fake decoder: one sample per input byte */
+                        if (got != (4u + n + 5u) * 2u || pcm[0] != 'f' ||
+                            pcm[3] != 'C' || pcm[4u + n] != 0x11)
+                        {
+                            printf("[%u bytes of PCM] ", (unsigned)got);
+                            r = FM_ERR_CRC;
+                        }
+                        for (k = 0; k < n && r == FM_OK; k++)
+                        {
+                            if (pcm[4u + k] != (int16_t)setup[k])
+                            {
+                                printf("[setup byte %u] ", (unsigned)k);
+                                r = FM_ERR_CRC;
+                            }
+                        }
+                    }
+                    else if (r == FM_OK && got != 10u)
+                    {
+                        printf("[oversize: %u bytes of PCM] ", (unsigned)got);
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    (void)Video_Close(&vid);
+                }
+                (void)Audio_UnregisterDecoder("FLAC");
+                free(setup); free(mb); free(pcm);
+            }
+        }
+        CHECK_RESULT(r, "mkv big setup data");
 #endif /* FM_USE_AUDIO */
 
         if (saved_flac != NULL) (void)Audio_RegisterDecoder("FLAC", saved_flac);
@@ -15799,6 +15890,146 @@ static void test_png_formats(void)
 }
 #endif /* FM_USE_PNG */
 
+#if FM_USE_JPEG
+/* ------------------------------------------------------------------ */
+/* O-04: what a registered hardware JPEG codec is given by Image_Load  */
+/* ------------------------------------------------------------------ */
+static int            g_jh_calls;
+static const uint8_t *g_jh_data;
+static size_t         g_jh_size;
+
+/* A "hardware" decoder: checks it was handed a whole JPEG file and
+ * paints the picture one colour. */
+static FM_Result jh_decode(const uint8_t *data, size_t size, FM_Image *img,
+                           void *pixel_buffer, size_t capacity)
+{
+    FM_ImageInfo inf;
+    size_t n;
+
+    g_jh_calls++;
+    g_jh_data = data;
+    g_jh_size = size;
+    if (size < 4u || data[0] != 0xFFu || data[1] != 0xD8u ||
+        Image_ProbeJPEG(data, size, &inf) != FM_OK)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    n = (size_t)inf.width * inf.height * 3u;
+    if (n > capacity)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    memset(pixel_buffer, 0x5C, n);
+    memset(img, 0, sizeof(*img));
+    img->width = inf.width;
+    img->height = inf.height;
+    img->format = FM_PIXEL_RGB888;
+    img->channels = 3;
+    img->bit_depth = 24;
+    img->data = (uint8_t *)pixel_buffer;
+    img->data_capacity = capacity;
+    img->data_size = n;
+    return FM_OK;
+}
+
+static const FM_ImageCodecOps g_jh_ops = { "JPEG", NULL, jh_decode };
+
+static void test_jpeg_hw_file(void)
+{
+    static uint8_t file[64u * 1024u];
+    static uint8_t work[64u * 1024u];
+    const char *path = "/test/vectors/mjpeg_frame.jpg";
+    const int heap_ok = FM_JPEG_HW_HEAP;
+    FM_ImageInfo inf;
+    FM_Image img;
+    uint8_t *px = NULL;
+    size_t fsz = 0;
+    size_t cap = 0;
+    FM_Result r;
+    int file_ok;
+    int k;
+
+    (void)FS_Unmount("/");
+    r = Storage_Mount("ram");
+    if (r == FM_OK) r = FS_Mount("/", &g_fs);
+    TEST("O-04 jpeg: hardware codec gets the file only within the "
+         "configured bounds");
+    if (r == FM_OK) r = File_ReadAll(path, file, sizeof(file), &fsz);
+    if (r == FM_OK) r = Image_GetInfo(path, &inf);
+    if (r == FM_OK)
+    {
+        cap = (size_t)inf.width * inf.height * 3u;
+        px = (uint8_t *)malloc(cap);
+        if (px == NULL) r = FM_ERR_NO_MEMORY;
+    }
+    file_ok = ((uint64_t)fsz <= (uint64_t)FM_JPEG_HW_FILE_MAX) ? 1 : 0;
+    if (r == FM_OK) r = Image_RegisterCodec("JPEG", &g_jh_ops);
+    /* k = 0: no work buffer; 1: one that fits; 2: one byte too small */
+    for (k = 0; k < 3 && r == FM_OK; k++)
+    {
+        int want_hw;
+
+        if (k == 0) r = Image_SetWorkBuffer(NULL, 0);
+        else if (k == 1) r = Image_SetWorkBuffer(work, fsz + 16u);
+        else r = Image_SetWorkBuffer(work, fsz - 1u);
+        if (r != FM_OK)
+        {
+            break;
+        }
+        want_hw = (file_ok && (k == 1 || heap_ok)) ? 1 : 0;
+        g_jh_calls = 0;
+        g_jh_data = NULL;
+        memset(&img, 0, sizeof(img));
+        memset(px, 0, cap);
+        memset(work, 0, sizeof(work));
+        r = Image_Load(path, &img, px, cap);
+        if (r == FM_OK && (img.width != inf.width || img.height != inf.height))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        if (r == FM_OK && g_jh_calls != want_hw)
+        {
+            printf("[case %d: %d hardware calls, want %d] ", k, g_jh_calls,
+                   want_hw);
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        if (r == FM_OK && want_hw)
+        {
+            /* the whole file, and in the work buffer when it fits */
+            if (g_jh_size != fsz || px[0] != 0x5Cu || px[cap - 1u] != 0x5Cu ||
+                (k == 1 && (g_jh_data != work ||
+                            memcmp(work, file, fsz) != 0)) ||
+                (k != 1 && g_jh_data == work))
+            {
+                printf("[case %d: wrong block] ", k);
+                r = FM_ERR_CRC;
+            }
+        }
+        if (r == FM_OK && !want_hw)
+        {
+            /* decoded by the streaming software decoder instead: a real
+             * picture, and the work buffer was not filled with the file */
+            size_t i;
+            int flat = 1;
+
+            for (i = 1; i < cap; i++)
+            {
+                if (px[i] != px[0]) { flat = 0; break; }
+            }
+            if (flat || memcmp(work, file, 64) == 0)
+            {
+                printf("[case %d: not the software decode] ", k);
+                r = FM_ERR_CRC;
+            }
+        }
+    }
+    (void)Image_UnregisterCodec("JPEG");
+    (void)Image_SetWorkBuffer(NULL, 0);
+    free(px);
+    CHECK_RESULT(r, "jpeg hw file");
+}
+#endif /* FM_USE_JPEG */
+
 #else /* !FM_USE_IMAGE */
 /* FM_USE_IMAGE=0 used to drop every Image_* symbol except the six JPEG /
  * PNG stubs: an application that keeps one call (behind a run-time
@@ -17429,6 +17660,253 @@ static void test_sync_report(void)
 }
 
 /* ================================================================ */
+#if FM_USE_FMFS
+/* FMFS rename: a rename that fails must leave the volume as it was. */
+static FM_Storage_WriteFn g_frn_real_write;
+static int                g_frn_fail;
+
+static FM_Result frn_write(FM_Storage *st, uint64_t offset, const void *buf,
+                           uint32_t len)
+{
+    if (g_frn_fail)
+    {
+        return FM_ERR_IO;
+    }
+    return g_frn_real_write(st, offset, buf, len);
+}
+
+static int frn_is(const char *path, const char *want)
+{
+    char buf[16];
+    size_t got = 0;
+
+    memset(buf, 0, sizeof(buf));
+    if (File_ReadAll(path, buf, sizeof(buf) - 1u, &got) != FM_OK)
+    {
+        return 0;
+    }
+    return (got == strlen(want) && memcmp(buf, want, got) == 0) ? 1 : 0;
+}
+
+static void test_fmfs_rename_failure(void)
+{
+    static uint8_t mem[96 * 1024];
+    static FM_Storage st;
+    static FM_FS fs;
+    char longname[128];
+    char newdir[128];
+    char p[FM_PATH_MAX];
+    FM_Bool ex = FM_FALSE;
+    FM_Result r;
+    FM_Result mr;
+    FM_Result rr;
+
+    restore_posix_root();
+    g_frn_fail = 0;
+    r = RamDisk_Init(&st, "frn", mem, sizeof(mem), 512);
+    if (r == FM_OK)
+    {
+        g_frn_real_write = st.write;
+        st.write = frn_write;
+        r = Storage_Register(&st);
+    }
+    if (r == FM_OK) r = FMFS_Init(&fs);
+    if (r == FM_OK) r = FS_Mount("/frn", &fs);
+    mr = r;
+
+    TEST("FMFS rename: a failed metadata write keeps both files");
+    if (r == FM_OK) r = File_WriteAll("/frn/src.txt", "NEW", 3);
+    if (r == FM_OK) r = File_WriteAll("/frn/dst.txt", "OLD", 3);
+    if (r == FM_OK)
+    {
+        g_frn_fail = 1;
+        rr = File_Rename("/frn/src.txt", "/frn/dst.txt");
+        g_frn_fail = 0;
+        if (rr == FM_OK || !frn_is("/frn/src.txt", "NEW") ||
+            !frn_is("/frn/dst.txt", "OLD"))
+        {
+            printf("[rename %d, src ok %d, dst ok %d] ", (int)rr,
+                   frn_is("/frn/src.txt", "NEW"),
+                   frn_is("/frn/dst.txt", "OLD"));
+            r = FM_ERR_CORRUPTED;
+        }
+    }
+    /* ...and the same rename works once the storage does */
+    if (r == FM_OK) r = File_Rename("/frn/src.txt", "/frn/dst.txt");
+    if (r == FM_OK && (!frn_is("/frn/dst.txt", "NEW") ||
+                       File_Exists("/frn/src.txt", &ex) != FM_OK ||
+                       ex != FM_FALSE))
+    {
+        r = FM_ERR_CORRUPTED;
+    }
+    CHECK_RESULT(r, "fmfs rename failed save");
+
+    TEST("FMFS rename: a failed directory rename keeps the whole tree");
+    r = mr;
+    if (r == FM_OK) r = Directory_Create("/frn/d");
+    if (r == FM_OK) r = File_WriteAll("/frn/d/a.txt", "AAA", 3);
+    if (r == FM_OK) r = Directory_Create("/frn/d/sub");
+    if (r == FM_OK) r = File_WriteAll("/frn/d/sub/b.txt", "BBB", 3);
+    if (r == FM_OK)
+    {
+        g_frn_fail = 1;
+        rr = Directory_Rename("/frn/d", "/frn/e");
+        g_frn_fail = 0;
+        ex = FM_TRUE;
+        if (rr == FM_OK || !frn_is("/frn/d/a.txt", "AAA") ||
+            !frn_is("/frn/d/sub/b.txt", "BBB") ||
+            Directory_Exists("/frn/e", &ex) != FM_OK || ex != FM_FALSE)
+        {
+            printf("[rename %d] ", (int)rr);
+            r = FM_ERR_CORRUPTED;
+        }
+    }
+    CHECK_RESULT(r, "fmfs dir rename failed save");
+
+    TEST("FMFS rename: a name too long for one child changes nothing");
+    r = mr;
+    memset(longname, 'L', 100);
+    longname[100] = '\0';
+    memset(newdir, 'N', 70);
+    newdir[70] = '\0';
+    (void)snprintf(p, sizeof(p), "/frn/t/%s", longname);
+    if (r == FM_OK) r = Directory_Create("/frn/t");
+    if (r == FM_OK) r = File_WriteAll("/frn/t/a.txt", "AAA", 3);
+    if (r == FM_OK) r = Directory_Create("/frn/t/sub");
+    if (r == FM_OK) r = File_WriteAll("/frn/t/sub/b.txt", "BBB", 3);
+    if (r == FM_OK) r = File_WriteAll(p, "LLL", 3);
+    if (r == FM_OK)
+    {
+        char np[FM_PATH_MAX];
+
+        (void)snprintf(np, sizeof(np), "/frn/%s", newdir);
+        rr = Directory_Rename("/frn/t", np);
+        ex = FM_TRUE;
+        if (rr == FM_OK || !frn_is("/frn/t/a.txt", "AAA") ||
+            !frn_is("/frn/t/sub/b.txt", "BBB") || !frn_is(p, "LLL") ||
+            Directory_Exists(np, &ex) != FM_OK || ex != FM_FALSE)
+        {
+            printf("[rename %d, a %d, b %d, long %d, new dir %d] ", (int)rr,
+                   frn_is("/frn/t/a.txt", "AAA"),
+                   frn_is("/frn/t/sub/b.txt", "BBB"), frn_is(p, "LLL"),
+                   (int)ex);
+            r = FM_ERR_CORRUPTED;
+        }
+    }
+    /* a rename that does fit still moves the whole tree */
+    if (r == FM_OK) r = Directory_Rename("/frn/t", "/frn/u");
+    (void)snprintf(p, sizeof(p), "/frn/u/%s", longname);
+    if (r == FM_OK && (!frn_is("/frn/u/a.txt", "AAA") ||
+                       !frn_is("/frn/u/sub/b.txt", "BBB") ||
+                       !frn_is(p, "LLL")))
+    {
+        r = FM_ERR_CORRUPTED;
+    }
+    CHECK_RESULT(r, "fmfs rename too long");
+
+    g_frn_fail = 0;
+    (void)FS_Unmount("/frn");
+    (void)Storage_Unregister("frn");
+}
+#endif /* FM_USE_FMFS */
+
+/* Directory_Create answered FM_OK when a FILE of that name existed. */
+static FM_Result dcf_one(const char *root)
+{
+    char f[64];
+    char sub[64];
+    char d[64];
+    char in[64];
+    FM_Bool is_dir = FM_TRUE;
+    FM_Result r;
+    FM_Result r1;
+    FM_Result r2;
+    FM_Result r3;
+
+    (void)snprintf(f, sizeof(f), "%s/dcf_file", root);
+    (void)snprintf(sub, sizeof(sub), "%s/dcf_file/sub", root);
+    (void)snprintf(d, sizeof(d), "%s/dcf_dir", root);
+    (void)snprintf(in, sizeof(in), "%s/dcf_dir/in.txt", root);
+    (void)File_Delete(in);
+    (void)Directory_Delete(d);
+    (void)File_Delete(f);
+
+    r = File_WriteAll(f, "x", 1);
+    r1 = Directory_Create(f);
+    r2 = Directory_Create(sub);
+    if (r == FM_OK) r = Directory_Exists(f, &is_dir);
+    if (r == FM_OK && (r1 != FM_ERR_NOT_DIRECTORY || r2 == FM_OK ||
+                       is_dir != FM_FALSE))
+    {
+        printf("[%s file: %d, below it: %d] ", root, (int)r1, (int)r2);
+        r = FM_ERR_INVALID_FORMAT;
+    }
+    /* ...while an existing directory is still success, at any depth */
+    if (r == FM_OK) r = Directory_Create(d);
+    r3 = Directory_Create(d);
+    if (r == FM_OK && r3 != FM_OK) r = r3;
+    if (r == FM_OK) r = File_WriteAll(in, "y", 1);
+    r3 = Directory_Create(in);
+    if (r == FM_OK && r3 != FM_ERR_NOT_DIRECTORY)
+    {
+        printf("[%s nested file: %d] ", root, (int)r3);
+        r = FM_ERR_INVALID_FORMAT;
+    }
+    (void)File_Delete(in);
+    (void)Directory_Delete(d);
+    (void)File_Delete(f);
+    return r;
+}
+
+static void test_dir_create_over_file(void)
+{
+    FM_Result r;
+
+    restore_posix_root();
+    TEST("Directory_Create: an existing file is not a directory");
+    r = dcf_one("");
+#if FM_USE_FMFS
+    if (r == FM_OK)
+    {
+        static uint8_t mem[64 * 1024];
+        static FM_Storage st;
+        static FM_FS fs;
+
+        r = RamDisk_Init(&st, "dcfm", mem, sizeof(mem), 512);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = FMFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/dcfm", &fs);
+        if (r == FM_OK)
+        {
+            r = dcf_one("/dcfm");
+            (void)FS_Unmount("/dcfm");
+        }
+        (void)Storage_Unregister("dcfm");
+    }
+#endif
+#if FM_USE_LITTLEFS
+    if (r == FM_OK)
+    {
+        static uint8_t mem[512 * 1024];
+        static FM_Storage st;
+        static FM_FS fs;
+
+        memset(mem, 0xFF, sizeof(mem));
+        r = RamDisk_Init(&st, "dcfl", mem, sizeof(mem), 4096);
+        if (r == FM_OK) r = Storage_Register(&st);
+        if (r == FM_OK) r = LittleFS_Init(&fs);
+        if (r == FM_OK) r = FS_Mount("/dcfl", &fs);
+        if (r == FM_OK)
+        {
+            r = dcf_one("/dcfl");
+            (void)FS_Unmount("/dcfl");
+        }
+        (void)Storage_Unregister("dcfl");
+    }
+#endif
+    CHECK_RESULT(r, "create over file");
+}
+
 /* The file-handle pool is a fixed FM_MAX_OPEN_FILES array: one handle
  * leaked by an error path is gone until reset, and the suites after it
  * start failing for unrelated-looking reasons (this is how the leak in
@@ -17523,6 +18001,13 @@ int main(void)
     RUN_SUITE(test_image_report);
 #if FM_USE_IMAGE && FM_USE_PNG
     RUN_SUITE(test_png_formats);
+#endif
+#if FM_USE_IMAGE && FM_USE_JPEG
+    RUN_SUITE(test_jpeg_hw_file);
+#endif
+    RUN_SUITE(test_dir_create_over_file);
+#if FM_USE_FMFS
+    RUN_SUITE(test_fmfs_rename_failure);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_hook);
