@@ -372,9 +372,18 @@ Notes:
   plays up to that tag.  Not playable: Flash ADPCM, Nellymoser and Speex
   audio (the clip opens without an audio track); VP6 / Sorenson frames are
   only handed to a decoder you register.
-* **MP4**: 64-bit box sizes, `co64`, `stsc` runs; audio `mp4a` (AAC), `.mp3`,
-  `fLaC`, `Opus`, Vorbis, 16-bit little-endian PCM (`sowt`), `alaw`/`ulaw`.
-  Big-endian PCM (`twos`) and ALAC are not offered as an audio track.
+* **MP4**: 64-bit box sizes, `co64`, `stsc` runs; audio `mp4a`, `.mp3`,
+  `fLaC`, `Opus`, Vorbis, 16-bit PCM little-endian (`sowt`) and big-endian
+  (`twos`, byte-swapped while reading), `alaw`/`ulaw`.  For `mp4a` the
+  `esds` box decides what the track is: AAC object type, sampling rate and
+  channels come from the AudioSpecificConfig (the sample entry cannot hold
+  96 kHz and says nothing about the type), and an MPEG-1/2 audio track
+  (MP3 in `mp4a`) is reported as MP3.  ALAC is not offered as an audio
+  track.
+* **AAC without a registered decoder** is passed through with an ADTS
+  header per packet.  The header carries the real object type (it used to
+  announce AAC Main for everything); HE-AAC is signalled as its AAC-LC
+  core, at the core sampling rate, which is how ADTS carries it.
 
 ## Images: PNG and the hardware JPEG path
 

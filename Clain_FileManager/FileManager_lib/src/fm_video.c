@@ -250,6 +250,9 @@ typedef struct
     uint32_t      audio_rate;
     uint16_t      audio_channels;
     uint16_t      audio_bits;        /* PCM only                      */
+    uint8_t       audio_aot;         /* AAC audio object type (0 = not
+                                      * known: treated as AAC-LC)     */
+    FM_Bool       audio_pcm_be;      /* 16-bit PCM stored big-endian  */
     uint32_t      audio_private_size;
     uint8_t       audio_private[FM_VIDEO_AUDIO_PRIVATE_MAX]; /* MKV CodecPrivate / MP4 dfLa */
     uint8_t      *audio_private_big; /* ...when it does not fit there
@@ -537,6 +540,94 @@ static uint8_t *video_scratch_get(uint8_t **buf, size_t *cap, size_t need)
         }
     }
     return *buf;
+}
+
+/* MPEG-4 AudioSpecificConfig: object type, sampling rate and channel
+ * configuration of an AAC track.  For HE-AAC (object types 5 / 29) the
+ * values are those of the AAC-LC core, which is what an ADTS header has to
+ * carry.  *rate / *chan are left alone when the config does not say
+ * (escape values), so the container's figures stay. */
+static FM_Bool video_asc_parse(const uint8_t *c, uint32_t n, uint32_t *aot,
+                               uint32_t *rate, uint32_t *chan)
+{
+    static const uint32_t k_rate[13] = {
+        96000u, 88200u, 64000u, 48000u, 44100u, 32000u, 24000u,
+        22050u, 16000u, 12000u, 11025u, 8000u, 7350u };
+    uint32_t bit = 0u;
+    uint32_t total = n * 8u;
+    uint32_t val[4];
+    uint32_t width[4];
+    uint32_t k;
+    uint32_t nf = 3u;
+
+    /* fields: object type (5, +6 when 31), frequency index (4, +24 when
+     * 15), channel configuration (4) */
+    width[0] = 5u; width[1] = 4u; width[2] = 4u; width[3] = 0u;
+    for (k = 0u; k < nf; k++)
+    {
+        uint32_t x = 0u;
+        uint32_t i;
+
+        if (bit + width[k] > total)
+        {
+            return FM_FALSE;
+        }
+        for (i = 0u; i < width[k]; i++, bit++)
+        {
+            x = (x << 1) | (((uint32_t)c[bit >> 3] >> (7u - (bit & 7u))) & 1u);
+        }
+        val[k] = x;
+        if (k == 0u && x == 31u)
+        {
+            /* escaped object type: 32 + the next 6 bits */
+            uint32_t e = 0u;
+
+            if (bit + 6u > total)
+            {
+                return FM_FALSE;
+            }
+            for (i = 0u; i < 6u; i++, bit++)
+            {
+                e = (e << 1) |
+                    (((uint32_t)c[bit >> 3] >> (7u - (bit & 7u))) & 1u);
+            }
+            val[0] = 32u + e;
+        }
+        if (k == 1u && x == 15u)
+        {
+            /* explicit 24-bit sampling rate */
+            uint32_t e = 0u;
+
+            if (bit + 24u > total)
+            {
+                return FM_FALSE;
+            }
+            for (i = 0u; i < 24u; i++, bit++)
+            {
+                e = (e << 1) |
+                    (((uint32_t)c[bit >> 3] >> (7u - (bit & 7u))) & 1u);
+            }
+            val[3] = e;
+        }
+    }
+    if (val[0] == 0u)
+    {
+        return FM_FALSE;
+    }
+    *aot = val[0];
+    if (val[1] < 13u)
+    {
+        *rate = k_rate[val[1]];
+    }
+    else if (val[1] == 15u && val[3] != 0u)
+    {
+        *rate = val[3];
+    }
+    if (val[2] >= 1u && val[2] <= 7u)
+    {
+        *chan = (val[2] == 7u) ? 8u : val[2];
+    }
+    return FM_TRUE;
 }
 
 /* Codec setup data of the audio track (audio_private_size bytes). */
@@ -1555,6 +1646,137 @@ static uint32_t mp4_table_count(const Mp4Box *box, uint64_t table_off,
     return (count > room) ? (uint32_t)room : count;
 }
 
+/* The "esds" box of an mp4a sample entry: what the track really is.
+ *
+ *   ES_Descriptor (3) > DecoderConfigDescriptor (4): objectTypeIndication
+ *                     > DecoderSpecificInfo (5): the AudioSpecificConfig
+ *
+ * The sample entry itself only has a 16-bit rate field (96 kHz does not
+ * fit, HE-AAC files put the output rate there) and says nothing about
+ * the object type; and "mp4a" is also what MP3-in-MP4 uses.
+ * Returns the objectTypeIndication (0 = no esds found). */
+static uint32_t mp4_parse_esds(FM_Video *v, FM_VideoPriv *priv,
+                               const Mp4Box *entry, uint32_t qt_version,
+                               uint32_t *rate, uint32_t *channels)
+{
+    uint64_t pos = entry->data + 28u;
+    uint64_t end = entry->start + entry->size;
+    uint32_t depth;
+    uint8_t d[160];
+    uint32_t n = 0u;
+    uint32_t i = 4u;            /* version + flags */
+    uint32_t oti = 0u;
+    FM_Bool found = FM_FALSE;
+
+    /* QuickTime sound description versions 1 / 2 are longer */
+    if (qt_version == 1u) pos += 16u;
+    else if (qt_version == 2u) pos += 36u;
+
+    for (depth = 0u; depth < 2u && !found; depth++)
+    {
+        FM_Bool down = FM_FALSE;
+
+        while (pos + 8u <= end)
+        {
+            Mp4Box b;
+
+            if (mp4_box_at(v, pos, end, &b) != FM_OK)
+            {
+                break;
+            }
+            if (memcmp(b.type, "esds", 4) == 0)
+            {
+                uint64_t len = b.start + b.size - b.data;
+
+                n = (len > sizeof(d)) ? (uint32_t)sizeof(d) : (uint32_t)len;
+                if (video_read_at(&v->file, b.data, d, n) == FM_OK)
+                {
+                    found = FM_TRUE;
+                }
+                break;
+            }
+            if (memcmp(b.type, "wave", 4) == 0)
+            {
+                /* QuickTime keeps the esds one level down */
+                pos = b.data;
+                end = b.start + b.size;
+                down = FM_TRUE;
+                break;
+            }
+            pos = b.start + b.size;
+        }
+        if (!down)
+        {
+            break;
+        }
+    }
+    if (!found)
+    {
+        return 0u;
+    }
+    while (i + 2u <= n)
+    {
+        uint32_t tag = d[i++];
+        uint32_t len = 0u;
+        uint32_t k;
+
+        for (k = 0u; k < 4u && i < n; k++)
+        {
+            uint32_t c = d[i++];
+
+            len = (len << 7) | (c & 0x7Fu);
+            if ((c & 0x80u) == 0u)
+            {
+                break;
+            }
+        }
+        if (tag == 0x03u)
+        {
+            /* ES_ID, flags, then the optional fields the flags name */
+            uint32_t flags;
+
+            if (i + 3u > n) break;
+            flags = d[i + 2u];
+            i += 3u;
+            if (flags & 0x80u) i += 2u;
+            if (flags & 0x40u)
+            {
+                if (i >= n) break;
+                i += 1u + d[i];
+            }
+            if (flags & 0x20u) i += 2u;
+        }
+        else if (tag == 0x04u)
+        {
+            if (i + 13u > n) break;
+            oti = d[i];
+            i += 13u;
+        }
+        else if (tag == 0x05u)
+        {
+            uint32_t aot = 0u;
+
+            if (len > n - i) len = n - i;
+            if ((oti == 0x40u || oti == 0u || (oti >= 0x66u && oti <= 0x68u)) &&
+                video_asc_parse(d + i, len, &aot, rate, channels))
+            {
+                priv->audio_aot = (uint8_t)((aot > 255u) ? 0u : aot);
+            }
+            break;
+        }
+        else
+        {
+            i += len;
+        }
+    }
+    if (oti >= 0x66u && oti <= 0x68u && priv->audio_aot == 0u)
+    {
+        /* MPEG-2 AAC Main / LC / SSR */
+        priv->audio_aot = (uint8_t)(oti - 0x65u);
+    }
+    return oti;
+}
+
 /* Find the chunk-offset box of an stbl: 32-bit "stco" or 64-bit "co64". */
 static FM_Result mp4_find_chunk_offsets(FM_Video *v, const Mp4Box *stbl,
                                         uint64_t *off, uint32_t *count,
@@ -1840,9 +2062,25 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                 if (memcmp(entry.type, "mp4a", 4) == 0 ||
                     memcmp(entry.type, "enca", 4) == 0)
                 {
+                    uint32_t ch32;
+                    uint32_t oti;
+
                     channels = video_be16(a + 16);
                     rate = video_be32(a + 24) >> 16;
+                    ch32 = channels;
                     priv->audio_codec = FM_VIDEO_AUDIO_AAC;
+                    priv->audio_aot = 0u;
+                    oti = mp4_parse_esds(v, priv, &entry, video_be16(a + 8),
+                                         &rate, &ch32);
+                    channels = (uint16_t)ch32;
+                    if (oti == 0x69u || oti == 0x6Bu)
+                    {
+                        /* MPEG-2 / MPEG-1 audio: MP3 in an "mp4a" entry.
+                         * It used to be announced as AAC and its frames
+                         * wrapped in ADTS headers. */
+                        priv->audio_codec = FM_VIDEO_AUDIO_MP3;
+                        if (rate == 0u) { rate = 44100u; }
+                    }
                     have_mp4a = FM_TRUE;
                 }
                 else if (memcmp(entry.type, ".mp3", 4) == 0 ||
@@ -1910,9 +2148,14 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                                             : FM_VIDEO_AUDIO_ALAW;
                     have_mp4a = FM_TRUE;
                 }
-                else if (memcmp(entry.type, "sowt", 4) == 0 &&
+                else if ((memcmp(entry.type, "sowt", 4) == 0 ||
+                          memcmp(entry.type, "twos", 4) == 0) &&
                          video_be16(a + 18) == 16u)
                 {
+                    /* "twos" is the same thing stored big-endian: the
+                     * bytes of every sample are swapped while reading. */
+                    priv->audio_pcm_be = (entry.type[0] == 't') ? FM_TRUE
+                                                                 : FM_FALSE;
                     /* QuickTime little-endian 16-bit PCM: what the PCM
                      * path hands out as it is.  ("alac" used to be
                      * mapped here: Apple Lossless is a compressed
@@ -2803,6 +3046,22 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
         FM_Result rp = video_audio_private_load(v, priv, t->priv_off,
                                                 t->priv_size);
 
+        if (rp == FM_OK && codec == FM_VIDEO_AUDIO_AAC)
+        {
+            /* A_AAC: CodecPrivate is the AudioSpecificConfig */
+            uint32_t aot = 0u;
+            uint32_t arate = priv->audio_rate;
+            uint32_t chan = priv->audio_channels;
+
+            if (video_asc_parse(video_audio_private(priv),
+                                priv->audio_private_size, &aot, &arate,
+                                &chan))
+            {
+                priv->audio_aot = (uint8_t)((aot > 255u) ? 0u : aot);
+                priv->audio_rate = arate;
+                priv->audio_channels = (uint16_t)chan;
+            }
+        }
         if (rp != FM_OK)
         {
             FM_ERR_LOG("mkv: audio CodecPrivate (%lu bytes) not kept: %s "
@@ -3796,21 +4055,17 @@ static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
              * truth is in the AudioSpecificConfig */
             if (have_aconf && priv->audio_private_size >= 2u)
             {
-                static const uint32_t k_aac_rate[13] = {
-                    96000u, 88200u, 64000u, 48000u, 44100u, 32000u, 24000u,
-                    22050u, 16000u, 12000u, 11025u, 8000u, 7350u };
-                const uint8_t *c = video_audio_private(priv);
-                uint32_t fidx = (((uint32_t)c[0] & 0x07u) << 1) |
-                                ((uint32_t)c[1] >> 7);
-                uint32_t chan = ((uint32_t)c[1] >> 3) & 0x0Fu;
+                uint32_t aot = 0u;
+                uint32_t arate = priv->audio_rate;
+                uint32_t chan = priv->audio_channels;
 
-                if (fidx < 13u)
+                if (video_asc_parse(video_audio_private(priv),
+                                    priv->audio_private_size, &aot, &arate,
+                                    &chan))
                 {
-                    priv->audio_rate = k_aac_rate[fidx];
-                }
-                if (chan >= 1u && chan <= 7u)
-                {
-                    priv->audio_channels = (chan == 7u) ? 8u : (uint16_t)chan;
+                    priv->audio_aot = (uint8_t)((aot > 255u) ? 0u : aot);
+                    priv->audio_rate = arate;
+                    priv->audio_channels = (uint16_t)chan;
                 }
             }
         }
@@ -4888,6 +5143,26 @@ FM_Result Video_Seek(FM_Video *v, uint32_t frame_index)
 /* ------------------------------------------------------------------ */
 /* Embedded audio track (demux)                                        */
 /* ------------------------------------------------------------------ */
+/* 16-bit PCM that the container stores big-endian (MP4 "twos") is handed
+ * out little-endian like every other PCM track. */
+static void video_pcm_native(const FM_VideoPriv *priv, uint8_t *buf,
+                             uint32_t n)
+{
+    uint32_t i;
+
+    if (!priv->audio_pcm_be || priv->audio_codec != FM_VIDEO_AUDIO_PCM)
+    {
+        return;
+    }
+    for (i = 0u; i + 1u < n; i += 2u)
+    {
+        uint8_t t = buf[i];
+
+        buf[i] = buf[i + 1u];
+        buf[i + 1u] = t;
+    }
+}
+
 static uint8_t adts_freq_index(uint32_t rate)
 {
     switch (rate)
@@ -4909,19 +5184,26 @@ static uint8_t adts_freq_index(uint32_t rate)
     }
 }
 
-static FM_Result adts_build(uint8_t *h, uint32_t rate, uint16_t ch,
-                            uint32_t frame_len)
+static FM_Result adts_build(uint8_t *h, uint32_t aot, uint32_t rate,
+                            uint16_t ch, uint32_t frame_len)
 {
     uint8_t fi = adts_freq_index(rate);
     uint32_t total = frame_len + 7u;
+    /* ADTS "profile" is the object type minus one and has room for types
+     * 1..4 only.  HE-AAC (5, 29) is signalled as its AAC-LC core; an
+     * unknown type is taken as AAC-LC.  (The field used to be left 0,
+     * which announces AAC Main for every stream.) */
+    uint32_t profile = (aot >= 1u && aot <= 4u) ? (aot - 1u) : 1u;
+    uint32_t chcfg = (ch == 8u) ? 7u : (uint32_t)ch;
 
-    if (fi == 0xFF || ch == 0 || ch > 7 || total > 0x1FFFu)
+    if (fi == 0xFF || chcfg == 0u || chcfg > 7u || total > 0x1FFFu)
     {
         return FM_ERR_UNSUPPORTED;
     }
     h[0] = 0xFF;
-    h[1] = 0xF1; /* MPEG-4, AAC-LC, no CRC */
-    h[2] = (uint8_t)(((uint32_t)fi << 2) | ((uint32_t)ch >> 2));
+    h[1] = 0xF1; /* MPEG-4, no CRC */
+    h[2] = (uint8_t)((profile << 6) | ((uint32_t)fi << 2) | (chcfg >> 2));
+    ch = (uint16_t)chcfg;
     h[3] = (uint8_t)((((uint32_t)ch & 3u) << 6) | ((total >> 11) & 3u));
     h[4] = (uint8_t)((total >> 3) & 0xFFu);
     h[5] = (uint8_t)(((total & 7u) << 5) | 0x1Fu);
@@ -5294,6 +5576,7 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
             {
                 return r;
             }
+            video_pcm_native(priv, buf, take);
             priv->audio_part_off += take;
             priv->audio_part_left -= take;
             if (priv->audio_part_left < align)
@@ -5357,7 +5640,8 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
             {
                 return FM_ERR_TOO_LARGE;
             }
-            r = adts_build(adts, priv->audio_rate, priv->audio_channels, fsize);
+            r = adts_build(adts, priv->audio_aot, priv->audio_rate,
+                           priv->audio_channels, fsize);
             if (r != FM_OK)
             {
                 return r;
@@ -5523,6 +5807,7 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
         {
             return r;
         }
+        video_pcm_native(priv, buf, take);
         *size = take;
         if (take < fsize && (fsize - take) >=
             ((uint32_t)priv->audio_channels *

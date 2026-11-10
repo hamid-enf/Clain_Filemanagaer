@@ -11523,6 +11523,8 @@ typedef struct
     int      large_mdat;    /* mdat with the 64-bit size form           */
     int      a_uniform;     /* audio stsz: uniform size, no table       */
     const char *a_fourcc;   /* audio sample entry (NULL = "sowt")       */
+    const uint8_t *a_child; /* boxes inside the audio sample entry      */
+    size_t   a_child_len;
 } Mp4Opt;
 
 static void eb_be32(Eb *e, uint32_t v)
@@ -11744,6 +11746,10 @@ static int vr_mp4(Eb *e, const Mp4Opt *o)
             eb_be16(e, 16);             /* sample size */
             eb_be32(e, 0);
             eb_be32(e, 8000u << 16);    /* rate 16.16  */
+            if (o->a_child != NULL)
+            {
+                eb_raw(e, o->a_child, o->a_child_len);
+            }
             vr_box_end(e, en);
         }
         vr_box_end(e, b);
@@ -13090,6 +13096,216 @@ static void test_video_report(void)
         }
         CHECK_RESULT(r, "mp4 alac");
         (void)File_Delete("/vr_alac.mp4");
+
+        TEST("mp4 audio: esds decides (AAC type/rate, HE-AAC core, MP3)");
+        {
+            /* esds: ES_Descriptor > DecoderConfigDescriptor (object type
+             * indication at [OTI]) > DecoderSpecificInfo (3 config bytes
+             * at [ASC]) */
+            enum { OTI = 19, ASC = 34 };
+            static const uint8_t esds_t[] = {
+                0, 0, 0, 40, 'e', 's', 'd', 's', 0, 0, 0, 0,
+                0x03, 25, 0, 1, 0,
+                0x04, 17, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0x05, 3, 0, 0, 0,
+                0x06, 1, 2 };
+            /* case: OTI, config bytes, want codec / rate / channels and
+             * the third ADTS byte (profile, rate index, channel msb) */
+            static const struct
+            {
+                int      esds;
+                uint8_t  oti;
+                uint8_t  asc[3];
+                int      codec;
+                uint32_t rate;
+                uint16_t ch;
+                uint8_t  adts2;
+            } cs[] = {
+                /* AAC-LC 96 kHz stereo: does not fit the 16-bit rate field */
+                { 1, 0x40, { 0x10, 0x10, 0x00 }, FM_VIDEO_AUDIO_AAC, 96000u, 2,
+                  0x40 },
+                /* HE-AAC: SBR over a 22.05 kHz LC core, stereo */
+                { 1, 0x40, { 0x2B, 0x92, 0x08 }, FM_VIDEO_AUDIO_AAC, 22050u, 2,
+                  0x5C },
+                /* AAC Main 48 kHz mono */
+                { 1, 0x40, { 0x09, 0x88, 0x00 }, FM_VIDEO_AUDIO_AAC, 48000u, 1,
+                  0x0C },
+                /* MPEG-1 audio (MP3) in an "mp4a" entry */
+                { 1, 0x6B, { 0x00, 0x00, 0x00 }, FM_VIDEO_AUDIO_MP3, 8000u, 2,
+                  0x00 },
+                /* no esds at all: the entry's figures, announced as LC */
+                { 0, 0x00, { 0x00, 0x00, 0x00 }, FM_VIDEO_AUDIO_AAC, 8000u, 2,
+                  0x6C }
+            };
+            static uint8_t mb[4096];
+            uint8_t esds[sizeof(esds_t)];
+            size_t ci;
+
+            /* the box header says 40 bytes: keep the table honest */
+            r = (sizeof(esds_t) == 40u) ? FM_OK : FM_ERR_INTERNAL;
+
+            for (ci = 0; ci < sizeof(cs) / sizeof(cs[0]) && r == FM_OK; ci++)
+            {
+                Mp4Opt mo;
+                FM_AudioTrackInfo ai;
+                uint8_t ab[32];
+                size_t ag = 0;
+
+                memcpy(esds, esds_t, sizeof(esds));
+                esds[OTI] = cs[ci].oti;
+                memcpy(esds + ASC, cs[ci].asc, 3);
+                memset(&e, 0, sizeof(e));
+                memset(&vid, 0, sizeof(vid));
+                memset(&mo, 0, sizeof(mo));
+                memset(&ai, 0, sizeof(ai));
+                e.b = mb; e.cap = sizeof(mb);
+                mo.nvideo = 4u;
+                mo.naudio = 4u;
+                mo.a_fourcc = "mp4a";
+                if (cs[ci].esds)
+                {
+                    mo.a_child = esds; mo.a_child_len = sizeof(esds);
+                }
+                r = (vr_mp4(&e, &mo) == 0) ? FM_OK : FM_ERR_NO_MEMORY;
+                if (r == FM_OK) r = vr_write("/vr_esds.mp4", &e);
+                if (r == FM_OK) r = Video_Open("/vr_esds.mp4", &vid);
+                if (r == FM_OK)
+                {
+                    r = Video_GetAudioInfo(&vid, &ai);
+                    if (r == FM_OK && ((int)ai.codec != cs[ci].codec ||
+                                       ai.sample_rate != cs[ci].rate ||
+                                       ai.channels != cs[ci].ch))
+                    {
+                        printf("[case %u: codec %d, %u Hz, %u ch] ",
+                               (unsigned)ci, (int)ai.codec,
+                               (unsigned)ai.sample_rate,
+                               (unsigned)ai.channels);
+                        r = FM_ERR_INVALID_FORMAT;
+                    }
+                    if (r == FM_OK && cs[ci].codec == FM_VIDEO_AUDIO_AAC)
+                    {
+                        /* no AAC decoder: ADTS pass-through */
+                        r = Video_ReadAudioFrame(&vid, ab, sizeof(ab), &ag);
+                        if (r == FM_OK &&
+                            (ag != 11u || ab[0] != 0xFFu || ab[1] != 0xF1u ||
+                             ab[2] != cs[ci].adts2 ||
+                             (ab[3] >> 6) != (cs[ci].ch & 3u) ||
+                             vr_expect_idx(ab + 7, ag - 7u, 0u) != FM_OK))
+                        {
+                            printf("[case %u: adts %02X %02X] ", (unsigned)ci,
+                                   ab[2], ab[3]);
+                            r = FM_ERR_CRC;
+                        }
+                    }
+                    (void)Video_Close(&vid);
+                }
+            }
+        }
+        if (r == FM_OK)
+        {
+            /* damaged descriptors: whatever they say, opening the clip
+             * and reading its audio must stay inside the buffers (this is
+             * what the sanitizer builds check) and must not fail the
+             * picture */
+            static const uint8_t esds_f[] = {
+                0, 0, 0, 40, 'e', 's', 'd', 's', 0, 0, 0, 0,
+                0x03, 25, 0, 1, 0,
+                0x04, 17, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0x05, 3, 0x10, 0x10, 0,
+                0x06, 1, 2 };
+            static uint8_t mb[4096];
+            uint8_t esds[sizeof(esds_f)];
+            uint32_t seed = 12345u;
+            int it;
+
+            for (it = 0; it < 400 && r == FM_OK; it++)
+            {
+                Mp4Opt mo;
+                uint8_t ab[64];
+                size_t ag = 0;
+                int m;
+
+                memcpy(esds, esds_f, sizeof(esds));
+                for (m = 0; m < 1 + (it % 4); m++)
+                {
+                    seed = seed * 1103515245u + 12345u;
+                    /* never the box header: the box must stay parsable */
+                    esds[8u + ((seed >> 16) % (sizeof(esds) - 8u))] =
+                        (uint8_t)(seed >> 8);
+                }
+                memset(&e, 0, sizeof(e));
+                memset(&vid, 0, sizeof(vid));
+                memset(&mo, 0, sizeof(mo));
+                e.b = mb; e.cap = sizeof(mb);
+                mo.nvideo = 2u;
+                mo.naudio = 2u;
+                mo.a_fourcc = "mp4a";
+                mo.a_child = esds; mo.a_child_len = sizeof(esds);
+                r = (vr_mp4(&e, &mo) == 0) ? FM_OK : FM_ERR_NO_MEMORY;
+                if (r == FM_OK) r = vr_write("/vr_esds.mp4", &e);
+                if (r == FM_OK) r = Video_Open("/vr_esds.mp4", &vid);
+                if (r == FM_OK)
+                {
+                    (void)Video_ReadAudioFrame(&vid, ab, sizeof(ab), &ag);
+                    if (vid.info.frame_count != 2u)
+                    {
+                        printf("[mutation %d] ", it);
+                        r = FM_ERR_CORRUPTED;
+                    }
+                    (void)Video_Close(&vid);
+                }
+            }
+        }
+        CHECK_RESULT(r, "mp4 esds");
+        (void)File_Delete("/vr_esds.mp4");
+
+        TEST("mp4 audio: big-endian PCM (twos) is handed out little-endian");
+        {
+            static uint8_t mb[4096];
+            Mp4Opt mo;
+            FM_AudioTrackInfo ai;
+            uint8_t ab[16];
+            uint8_t want[4];
+            size_t ag = 0;
+            uint32_t k;
+
+            memset(&e, 0, sizeof(e));
+            memset(&vid, 0, sizeof(vid));
+            memset(&mo, 0, sizeof(mo));
+            memset(&ai, 0, sizeof(ai));
+            e.b = mb; e.cap = sizeof(mb);
+            mo.nvideo = 4u;
+            mo.naudio = 6u;
+            mo.a_fourcc = "twos";
+            r = (vr_mp4(&e, &mo) == 0) ? FM_OK : FM_ERR_NO_MEMORY;
+            if (r == FM_OK) r = vr_write("/vr_twos.mp4", &e);
+            if (r == FM_OK) r = Video_Open("/vr_twos.mp4", &vid);
+            if (r == FM_OK)
+            {
+                r = Video_GetAudioInfo(&vid, &ai);
+                if (r == FM_OK && (ai.codec != FM_VIDEO_AUDIO_PCM ||
+                                   ai.bits_per_sample != 16u ||
+                                   ai.channels != 2u))
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                for (k = 0; k < 6u && r == FM_OK; k++)
+                {
+                    r = Video_ReadAudioFrame(&vid, ab, sizeof(ab), &ag);
+                    vr_idx_bytes(want, k);
+                    if (r == FM_OK &&
+                        (ag != 4u || ab[0] != want[1] || ab[1] != want[0] ||
+                         ab[2] != want[3] || ab[3] != want[2]))
+                    {
+                        printf("[packet %u] ", (unsigned)k);
+                        r = FM_ERR_CRC;
+                    }
+                }
+                (void)Video_Close(&vid);
+            }
+        }
+        CHECK_RESULT(r, "mp4 twos");
+        (void)File_Delete("/vr_twos.mp4");
 
         /* ---------------- FLV ---------------- */
         TEST("flv: H.264 + AAC: avcC prefix, Annex-B, metadata, ASC");
