@@ -1,0 +1,2468 @@
+================================================================================
+IMAGE SECTION - DIAGNOSE REPORT (TEXT)
+================================================================================
+Repository : hamid-enf/Clain_Filemanagaer
+Branch     : arena/8201933c-clain-filemanagaer
+HEAD       : 2edf567 ("Fix remaining Audio bugs: #2 #3 #4 #5 #9")
+Date       : 2026-11-10
+Scope      : Image subsystem ONLY. DIAGNOSE ONLY - no source file was changed.
+Deliverable: this file, /home/user/Clain_Filemanagaer/Image_Diagnose.txt
+--------------------------------------------------------------------------------
+0. PROVENANCE - READ THIS FIRST
+--------------------------------------------------------------------------------
+The previous Review step was supposed to produce "Report.txt" with the official,
+numbered Image bug list. THAT FILE IS NOT AVAILABLE. I did not invent official
+Image bug IDs and I did not map Audio/Video/File bug numbers onto Image.
+Exhaustive search performed (all negative for Report.txt / an Image bug list):
+  * tracked tree (git ls-files), working tree, git log --all, git fsck, reflog;
+  * Clain_FileManager.zip (627 entries / 576 regular files, sha256
+    e88f6886d6fc6947fa191938752e4198eff45579365dfde921af42089cbdf449);
+  * full extraction of the archive to /tmp/fm_full + text search of all files;
+  * GitHub refs: main, v2, arena/fdb5c2a4-clain-filemanagaer; tags; commit
+    messages; recursive API trees; the v2 copy of Clain_FileManager.zip;
+  * local docs README.md, DSP_PROCESSING_BUDGET.md, OPUS_CUBEIDE.md,
+    REGRESSION_AUDIO_STUTTER.md (they contain ASAN/UBSAN and FM_USE_* notes,
+    but no Review bug list);
+  * connected apps: Dropbox (empty), Google Drive (only "Report_1.rar",
+    201403190 bytes, 2024-05-04, application/x-rar - NOT extracted because it
+    exceeds the connector's 25 MB text-extraction cap and is not named
+    Report.txt), Google Docs / Sheets / Slides, Notion, Linear.
+  * gh issue list / pr list: empty.
+CONSEQUENCE: every defect below is a CODE-DERIVED CANDIDATE, labelled D-01 ...
+D-10. They are not official Report.txt bug numbers. If the official list is
+required, supply Report.txt (or point me at it) and I will re-map D-xx to the
+official IDs, drop candidates that are not in the report, and add any official
+Image bugs that static reading did not reveal.
+--------------------------------------------------------------------------------
+1. SOURCE BASELINE AND LINE-NUMBER CONVENTION
+--------------------------------------------------------------------------------
+The tracked branch is intentionally sparse: it contains Clain_FileManager.zip
+plus 9 files under Clain_FileManager/FileManager_lib/ (audio/config/file/h264/
+transfer/video/vorbis sources and test/main.c). The Image subsystem is NOT in
+the tracked tree; it lives inside Clain_FileManager.zip.
+All file:line references below use the archive-internal paths:
+    Clain_FileManager/FileManager_lib/src/fm_image.c   (1907 lines)
+    Clain_FileManager/FileManager_lib/src/fm_jpeg.c   (1308 lines)
+    Clain_FileManager/FileManager_lib/src/fm_png.c    (1448 lines)
+    Clain_FileManager/FileManager_lib/src/fm_mjpeg.c  ( 217 lines)
+    Clain_FileManager/FileManager_lib/include/fm_image.h
+    Clain_FileManager/FileManager_lib/include/fm_config.h
+    Clain_FileManager/FileManager_lib/include/fm_internal.h
+    Clain_FileManager/FileManager_lib/test/main.c     (9332 lines)
+    Clain_FileManager/FileManager_lib/Makefile
+    Clain_FileManager/FileManager_lib/CMakeLists.txt
+    Clain_FileManager/FileManager_lib/third_party/picojpeg/picojpeg.c
+NOTE: the tracked test/main.c and include/fm_config.h are byte-identical to the
+archive copies, so test line numbers and fm_config.h line numbers also apply to
+the files you can see in the checkout.
+Builds and experiments were run against the fully extracted tree in
+/tmp/fm_full/Clain_FileManager/FileManager_lib. Sanitizer micro-harnesses were
+built from verbatim copies of the fm_png.c static functions.
+--------------------------------------------------------------------------------
+2. STABILITY CONSTRAINTS BEING ENFORCED (restated, not invented)
+--------------------------------------------------------------------------------
+  S1  No static/global Image scratch memory when the feature is compiled out.
+  S2  No whole-file heap slurp; decoding stays streamed / caller-owned buffers.
+  S3  Clean under AddressSanitizer + UndefinedBehaviorSanitizer (and no leaks).
+  S4  All 8 FM_USE_IMAGE / FM_USE_VIDEO / FM_USE_AUDIO combinations compile and
+      run, plus the FM_USE_JPEG / FM_USE_PNG / FM_USE_MJPEG sub-combinations.
+  S5  Disabled public APIs return FM_ERR_UNSUPPORTED, not link errors.
+  S6  Bounds/checked arithmetic before every cast, memcpy and pixel loop;
+      no signed overflow, no shift of negative values, no unaligned casts.
+  S7  Shared mutable state must be lock-protected or made caller-owned.
+--------------------------------------------------------------------------------
+3. CODE-DERIVED CANDIDATE DEFECTS
+--------------------------------------------------------------------------------
+================================================================================
+D-01  PNG dynamic Huffman tables are not validated (corrupt-input acceptance)
+================================================================================
+Class      : Correctness / robustness on malformed input (NOT a buffer overflow)
+Location   : src/fm_png.c:142-205  (Huff, huff_build, huff_decode)
+             src/fm_png.c:346-453  (inf_dynamic builds cl/lit/dist tables)
+             src/fm_png.c:300-344  (inf_fixed, for comparison - valid tables)
+Description:
+  huff_build() only rejects code lengths > 15, then fills count[16] and
+  symbol[288]. It never checks the Kraft inequality, over-subscription, or
+  incompleteness. huff_decode() therefore accepts malformed canonical trees:
+    - over-subscribed trees map bit patterns to wrong / unreachable symbols;
+    - incomplete trees (except the one legal single-symbol case) are accepted;
+    - an all-zero distance table is accepted and makes every distance decode
+      fail only after 15 bits instead of being rejected up front.
+  A corrupt PNG is silently decoded with wrong pixels instead of returning
+  FM_ERR_CORRUPTED.
+Cause:
+  Missing canonical-code validation in huff_build(); no bounds check on the
+  computed symbol index in huff_decode().
+Measured evidence (verbatim fm_png.c statics, ASAN+UBSAN harness):
+    huff_build({1,1,1}, 3) = 0   (over-subscribed, should be -1)
+    huff_build({2},     1) = 0   (incomplete, should be -1)
+    200000 randomized length tables + huff_decode() under ASAN+UBSAN:
+    "huff fuzz done, no crash".
+  IMPORTANT CORRECTION: an earlier suspicion that invalid tables make
+  h->symbol[index + (code-first)] read out of bounds is DISPROVED. Because both
+  `code` and `first` are shifted left each iteration, code >= first is
+  invariant, and index + (code-first) < total symbols <= 288. This candidate is
+  a corrupt-input / correctness defect, NOT an ASAN heap/global overflow.
+Pseudo-fix:
+    typedef struct {
+        uint16_t count[16];
+        uint16_t symbol[288];
+        uint16_t nsym;              /* add */
+    } Huff;
+    static int huff_build(Huff *h, const uint8_t *lengths, int n)
+    {
+        int left = 1, len, i, k = 0, nonzero = 0, only = -1;
+        memset(h, 0, sizeof(*h));
+        for (i = 0; i < n; i++) {
+            if (lengths[i] > 15) return -1;
+            h->count[lengths[i]]++;
+            if (lengths[i]) { nonzero++; only = i; }
+        }
+        h->count[0] = 0;
+        for (len = 1; len <= 15; len++) {
+            left <<= 1;
+            left -= h->count[len];
+            if (left < 0) return -1;            /* over-subscribed */
+        }
+        /* Deflate permits exactly one incomplete code: one symbol, length 1
+         * (typical dummy distance tree). Everything else is invalid. */
+        if (left != 0 &&
+            !(nonzero == 1 && lengths[only] == 1)) return -1;
+        for (len = 1; len <= 15; len++)
+            for (i = 0; i < n; i++)
+                if (lengths[i] == len) h->symbol[k++] = (uint16_t)i;
+        h->nsym = (uint16_t)k;
+        return 0;
+    }
+    /* inside huff_decode(), before returning: */
+    int off = code - first;
+    if (off < 0 || off >= count) continue;      /* explicit, UBSAN-friendly */
+    if (index + off >= (int)h->nsym) return -1;
+    return (int)h->symbol[index + off];
+Tests to add: T-01, T-02, T-03 (section 6).
+================================================================================
+D-02  PNG Deflate accepts distances > 32768 (stale sliding-window reads)
+================================================================================
+Class      : Correctness / corrupted output / stale data disclosure
+Location   : src/fm_png.c:229-266  (inf_put, inf_copy)
+             src/fm_png.c:216-224  (k_dist_base: max 24577 + 13 bits = 32768)
+             include/fm_config.h:149-150 (FM_PNG_WINDOW = 32768)
+Description:
+  inf_copy() checks only `dist <= 0 || (size_t)dist > z->produced`. The window
+  is a 32 KB ring (z->window[z->produced & 32767]). For dist > 32768, the byte
+  at `from & 32767` has already been overwritten by newer output, so the
+  decoder emits stale bytes instead of rejecting the stream. RFC 1951 limits
+  distance to 32768.
+Cause:
+  Missing upper bound tied to FM_PNG_WINDOW.
+Measured evidence (verbatim inf_put/inf_copy, ASAN+UBSAN harness):
+  produced = 40000, older history = 0xAA, most recent 32768 bytes = 0xBB.
+  inf_copy(dist = 32769, len = 1) returns 0 and emits 0xBB. The correct source
+  byte (position 7231) is 0xAA and is no longer representable in the window.
+  Expected behaviour: reject with FM_ERR_CORRUPTED.
+Pseudo-fix:
+    if (dist <= 0 || dist > (int)FM_PNG_WINDOW ||
+        (size_t)dist > z->produced) return -1;
+    /* FM_PNG_WINDOW is 32768; keep an assert that it stays 32768 because
+       Deflate's distance limit is fixed by the format. */
+Tests to add: T-04.
+================================================================================
+D-03  PNG stored-block negative shift (UBSAN) and uint32 chunk-skip wrap
+================================================================================
+Class      : Undefined behavior (UBSAN) + integer wrap / parser desync
+Location   : src/fm_png.c:456-479  (inf_stored)
+             src/fm_png.c:711-723  (png_skip)
+             src/fm_png.c:725-809  (png_need, line 779: png_skip(len + 4u))
+             src/fm_png.c:998-1035 (png_decode pre-IDAT loop, line 1030)
+             src/fm_png.c:669-709  (png_read, mem_pos + n)
+             src/fm_png.c:1134-1165(png_out_bytes, mem_len + n)
+Description:
+  (a) `len |= inf_get(z) << 8;` and `nlen |= inf_get(z) << 8;` shift a negative
+      int when the stored-block header is truncated at EOF. inf_get() returns
+      -1. UBSAN reports "left shift of negative value -1". The `< 0` check at
+      line 466 happens too late.
+  (b) `png_skip(in, len + 4u)` is called with a raw uint32 chunk length. For
+      len = 0xFFFFFFFF the addition wraps to 3, so the parser skips 3 bytes and
+      then interprets payload as the next chunk header. On 32-bit targets,
+      `r->mem_pos + n > r->mem_len` and `o->mem_len + n > o->mem_cap` can also
+      wrap, permitting out-of-bounds reads/writes.
+Measured evidence:
+  Verbatim inf_stored with a 1-byte stream under UBSAN produced TWO runtime
+  errors: "left shift of negative value -1" at the len and nlen compositions.
+  `printf("inf_stored rc=%d")` then returned -1, i.e. the UB already happened.
+  Arithmetic: (uint32_t)0xFFFFFFFF + 4u == 3u.
+Pseudo-fix:
+    static int inf_stored(Inf *z)
+    {
+        int b0, b1, b2, b3;
+        uint32_t len, nlen;
+        inf_align(z);
+        b0 = inf_get(z); b1 = inf_get(z);
+        b2 = inf_get(z); b3 = inf_get(z);
+        if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) return -1;
+        len  = (uint32_t)b0 | ((uint32_t)b1 << 8);
+        nlen = (uint32_t)b2 | ((uint32_t)b3 << 8);
+        if ((len ^ 0xFFFFu) != nlen) return -1;
+        while (len-- > 0) { int b = inf_get(z);
+            if (b < 0 || inf_put(z, (uint8_t)b) < 0) return -1; }
+        return 0;
+    }
+    /* replace every png_skip(in, len + 4u) with a checked helper */
+    static FM_Result png_skip_chunk(PngRead *r, uint32_t payload_len)
+    {
+        uint64_t skip = (uint64_t)payload_len + 4u;   /* + CRC */
+        if (skip > UINT32_MAX) return FM_ERR_CORRUPTED;
+        return png_skip(r, (uint32_t)skip);
+    }
+    /* and everywhere a size_t cursor is advanced: */
+    if ((uint64_t)r->mem_pos + n > r->mem_len) return FM_ERR_EOF;
+    if ((uint64_t)o->mem_len + n > o->mem_cap) return FM_ERR_TOO_LARGE;
+Tests to add: T-05, T-06.
+================================================================================
+D-04  PNG / Image scratch and work buffer are shared, unlocked globals
+================================================================================
+Class      : Reentrancy / concurrency; static-memory accounting
+Location   : src/fm_png.c:664-667  (g_png_window, g_png_row, g_png_prev,
+                                    g_png_recon)
+             src/fm_png.c:976-987, 1041-1048 (decode wires them)
+             src/fm_png.c:1290     (encode reuses g_png_row)
+             src/fm_image.c:32-36  (g_image_line, g_image_work, g_image_work_cap)
+             src/fm_image.c:38-52  (Image_SetWorkBuffer / Image_GetWorkBuffer)
+             src/fm_jpeg.c:570-571 (HW path reads Image_GetWorkBuffer)
+             src/fm_image.c:1850,1874,1858,1881 (FM_Lock used by registry)
+Description:
+  All PNG decode state lives in file-static arrays. A concurrent PNG decode and
+  PNG encode (or two decodes, or a nested decode) overwrite each other's rows,
+  previous-row buffer and 32 KB window. g_image_work / g_image_work_cap are
+  likewise written by Image_SetWorkBuffer() and read by the JPEG HW path with no
+  lock. FM_Lock()/FM_Unlock() already exist in this subsystem but are only used
+  by Image_RegisterCodec / Image_UnregisterCodec.
+  Static-memory measurement (default host build, nm -S on libfilemanager.a):
+    g_image_line   16384
+    g_png_prev     16384
+    g_png_recon    16384
+    g_png_row      16385
+    g_png_window   32768
+    g_icodec          64
+    g_image_work       8
+    g_image_work_cap   8
+    ----------------------
+    total          98305 bytes
+  With FM_USE_IMAGE=0 FM_USE_VIDEO=0 FM_USE_AUDIO=0 FM_USE_JPEG=0
+  FM_USE_PNG=0 FM_USE_MJPEG=0: NONE of these symbols are present, and no
+  picojpeg globals are present. So S1 currently holds for the fully-disabled
+  library, but see D-10 for contradictory Makefile combinations.
+Pseudo-fix (pick one):
+  (A) Hold FM_Lock() for the whole png_decode()/png_encode() critical section
+      and for Image_SetWorkBuffer/Image_GetWorkBuffer; release on every return
+      path. Document that FM_Lock is a real mutex when FM_USE_THREADS=1.
+  (B) Preferred for reentrancy: move the four g_png_* arrays into a
+      caller-owned PngScratch context passed through Inf; keep only a
+      compile-time default instance under FM_USE_IMAGE && FM_USE_PNG.
+  In both cases keep every static under its existing #if guard; add no new
+  globals.
+Tests to add: T-07, T-08.
+================================================================================
+D-05  Weak PNG magic dispatch + Image_ProbePNG does not check IHDR CRC
+================================================================================
+Class      : Format-detection correctness / info leak into allocation sizing
+Location   : src/fm_image.c:586-645 (Image_GetInfo; line 626 checks only
+             `rd >= 33 && magic[0] == 0x89 && magic[1] == 'P'`)
+             src/fm_image.c:522-574 (Image_LoadEx; line 563 checks only 4 bytes
+             0x89 'P' 'N' 'G')
+             src/fm_png.c:587-626 (Image_ProbePNG: full 8-byte signature IS
+             checked at 599, but IHDR CRC is NOT validated)
+             src/fm_png.c:909-933 (png_decode: full signature + IHDR CRC IS
+             validated - reference implementation)
+             src/fm_png.c:534-536 (k_png_sig)
+Description:
+  The decoder is stricter than the dispatcher. A file whose first two bytes are
+  0x89 0x50 is routed to Image_ProbePNG() and rejected with
+  FM_ERR_INVALID_FORMAT instead of falling through to BMP/stream detection.
+  Image_LoadEx checks only 4 of the 8 signature bytes. Additionally
+  Image_ProbePNG() parses width/height/bit depth from IHDR without verifying its
+  CRC, so Image_GetInfo() can report bogus dimensions for a corrupted header;
+  callers such as Image_ResizeFile() then size heap allocations from those
+  dimensions (fm_image.c:1578-1593).
+Pseudo-fix:
+    static const uint8_t k_png_sig[8] = {137,80,78,71,13,10,26,10};
+    /* in Image_GetInfo and Image_LoadEx: */
+    if (rd >= 33u && memcmp(magic, k_png_sig, 8) == 0) { ... PNG path ... }
+    /* or: call Image_ProbePNG() first and treat only FM_ERR_INVALID_FORMAT as
+       "not a PNG", letting FM_ERR_CRC / FM_ERR_CORRUPTED propagate. */
+    /* in Image_ProbePNG(), mirror png_decode:925-933 */
+    uint32_t crc = PNG_CRC_RUN("IHDR", 4, PNG_CRC_INIT);
+    crc = PNG_CRC_RUN(p + 16, 13, crc);
+    if (PNG_CRC_FIN(crc) != png_be32(p + 29)) return FM_ERR_CRC;
+Tests to add: T-09, T-10.
+================================================================================
+D-06  Image codec registry: unlocked lookup + undefined ops lifetime
+================================================================================
+Class      : Data race / dangling pointer
+Location   : src/fm_image.c:1833-1905 (g_icodec[4], Register, Unregister,
+             Image_GetCodec)
+             src/fm_jpeg.c:521, 560  (Image_GetCodec("JPEG") callers)
+Description:
+  Image_RegisterCodec() and Image_UnregisterCodec() take FM_Lock(), but
+  Image_GetCodec() does not. It strcmp()'s g_icodec[i].codec while another
+  thread can strcpy() into it or clear codec[0], and it returns g_icodec[i].ops
+  which can become dangling immediately after UnregisterCodec() if the ops were
+  stack/heap owned by the registrant. Unregister clears codec[0] and ops but
+  leaves the remaining codec bytes stale.
+Pseudo-fix:
+    const FM_ImageCodecOps *Image_GetCodec(const char *codec)
+    {
+        const FM_ImageCodecOps *ops = NULL;
+        if (codec == NULL) return NULL;
+        FM_Lock();
+        for (i = 0; i < 4u; i++)
+            if (g_icodec[i].codec[0] != '\0' &&
+                strcmp(g_icodec[i].codec, codec) == 0) {
+                ops = g_icodec[i].ops;      /* copy under lock */
+                break;
+            }
+        FM_Unlock();
+        return ops;
+    }
+    /* Unregister: memset(&g_icodec[i], 0, sizeof(g_icodec[i])); */
+    /* Document: ops must have static lifetime or be refcounted; Unregister
+       must not return while a decode is still using the pointer. */
+Tests to add: T-11.
+================================================================================
+D-07  Encoders validate data_capacity but ignore data_size
+================================================================================
+Class      : Uninitialised read (MSAN / valgrind class), contract violation
+Location   : src/fm_image.c:729-776  (Image_EncodeBMP, lines 744-749)
+             src/fm_image.c:778-883  (Image_Save, lines 795-800)
+             src/fm_jpeg.c:1227-1244(jpeg_encode_common, lines 1236-1240)
+             src/fm_png.c:1260-1283 (png_encode, lines 1279-1283)
+  Safe reference pattern (already in tree):
+             src/fm_image.c:1037-1071 (Image_Convert)
+             src/fm_image.c:1216-1264 (Image_ApplyEffect)
+             include/fm_image.h:65-67 (data_size / data / data_capacity)
+Description:
+  FM_Image.data_size is "raw pixel bytes"; elsewhere in the subsystem
+  `data_size == 0` means "unknown / not specified" and a nonzero value is
+  enforced (`src->data_size != 0 && required > src->data_size`). The four encode
+  entry points only compare `need > img->data_capacity`. A caller that declares
+  a large capacity but a small nonzero data_size causes the encoder to walk off
+  the valid pixel area and read uninitialised bytes. ASAN will not flag this if
+  the allocation really is capacity-sized; MSAN/valgrind will.
+Pseudo-fix:
+    static FM_Result image_check_source(const FM_Image *img, uint64_t need)
+    {
+        if (need > img->data_capacity) return FM_ERR_TOO_LARGE;
+        if (img->data_size != 0 && need > img->data_size)
+            return FM_ERR_TOO_LARGE;
+        return FM_OK;
+    }
+    /* call it in Image_EncodeBMP, Image_Save, jpeg_encode_common, png_encode
+       immediately after computing `need`, before any pixel loop / memcpy. */
+Tests to add: T-12.
+================================================================================
+D-08  Unchecked size_t multiplies on 32-bit targets (heap overflow)
+================================================================================
+Class      : Integer overflow -> heap/global buffer overflow on 32-bit MCUs
+Location   : src/fm_image.c:1558-1654 (Image_ResizeFile: 1587, 1593, 1601,
+             1609, 1623, 1645)
+             src/fm_image.c:1666-1688 (Image_Flip: 1683)
+             src/fm_image.c:1734-1773 (Image_Rotate: destination checked at
+             1765-1772, SOURCE data_capacity/data_size NOT checked)
+             src/fm_mjpeg.c:161-192   (mjpeg_decode: 189)
+             src/fm_image.c:709-726   (image_bmp_header biSizeImage, 725 -
+             low severity, see O-02)
+  Safe reference: src/fm_image.c:99-121 (Image_BufferSize uses uint64_t +
+             SIZE_MAX check), src/fm_image.c:1058-1068 (Image_Convert).
+Description:
+  Expressions such as `(size_t)info.width * info.height * 3u` are evaluated in
+  size_t. On a 32-bit target (the documented STM32 / TIER1 use case),
+  65535 * 65535 * 3 = 12,884,508,675 wraps to a small value; FM_Alloc() then
+  returns a tiny buffer and the subsequent decode/scale writes the full image
+  into it. Image_Flip computes `required = (size_t)w*h*bpp` without a
+  pre-multiply SIZE_MAX check. Image_Rotate validates dst->data_capacity but
+  never validates src->data_capacity / src->data_size, so a forged FM_Image
+  produces OOB reads. mjpeg_decode's frame-cap check has the same unchecked
+  multiply.
+Pseudo-fix:
+    uint64_t need = (uint64_t)w * (uint64_t)h * (uint64_t)bpp;
+    if (need > SIZE_MAX || need > cap) return FM_ERR_TOO_LARGE;
+    size_t n = (size_t)need;
+    /* use Image_BufferSize() where a FM_PixelFormat is available; add the
+       same source-side check to Image_Rotate that Image_Convert already has:
+         if (source_needed > src->data_capacity ||
+             (src->data_size != 0 && source_needed > src->data_size))
+             return FM_ERR_TOO_LARGE;
+       and apply the uint64_t check in mjpeg_decode before (size_t) casts. */
+Tests to add: T-13, T-14.
+================================================================================
+D-09  Image_Scale takes raw pointers with no source/destination capacities
+================================================================================
+Class      : Unsafe API contract -> OOB read/write
+Location   : src/fm_image.c:1387-1556 (Image_Scale)
+             nearest fast path 1422-1483, generic 1485-1503,
+             bilinear 1504-1554; helpers 1318-1385
+             caller: src/fm_image.c:1630-1631 (Image_ResizeFile)
+Description:
+  Signature is Image_Scale(const void *src, uint16_t sw, uint16_t sh,
+  FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh, FM_ScaleMode mode).
+  There is no capacity argument. Both the nearest path
+  (`sp + (size_t)sy*sw*bpp`, `dp + (size_t)y*dw*bpp`) and the bilinear path
+  (`image_scale_get(in, ..., (size_t)y1*sw + x1)`) index purely from declared
+  dimensions. Any mismatch between dimensions and the real allocation is an
+  out-of-bounds access, and Image_ResizeFile() depends on this with heap buffers
+  whose sizing is itself affected by D-08.
+Pseudo-fix:
+    FM_Result Image_ScaleEx(const void *src, size_t src_cap,
+                            uint16_t sw, uint16_t sh, FM_PixelFormat fmt,
+                            void *dst, size_t dst_cap,
+                            uint16_t dw, uint16_t dh, FM_ScaleMode mode)
+    {
+        uint64_t src_need = (uint64_t)sw * sh * Image_BytesPerPixel(fmt);
+        uint64_t dst_need = (uint64_t)dw * dh * Image_BytesPerPixel(fmt);
+        if (src_need > SIZE_MAX || dst_need > SIZE_MAX ||
+            src_need > src_cap || dst_need > dst_cap) return FM_ERR_TOO_LARGE;
+        /* ... existing loops unchanged ... */
+    }
+    /* Keep Image_Scale only as a documented legacy wrapper for callers whose
+       buffers are statically known, or deprecate it. Update Image_ResizeFile
+       to call Image_ScaleEx with the exact allocation sizes. */
+Tests to add: T-15.
+================================================================================
+D-10  FM_USE_* gating is inconsistent between Makefile, fm_config.h and CMake;
+       tests are not guarded per codec
+================================================================================
+Class      : Build-matrix / static-memory / test-gating defect
+Location   : Makefile:72-91      (only adds -DFM_USE_* when the variable came
+             from the command line)
+             Makefile:117-120, 187-195 (PICOJPEG_NEEDED computed from raw make
+             variables, not from the effective config)
+             CMakeLists.txt:61-70 (forces MP3/H264/MJPEG/JPEG/PNG off when the
+             parent feature is off)
+             include/fm_config.h:88-94 (STREAM forced on when IMAGE/BINARY on)
+             include/fm_config.h:101-139 (IMAGE/AUDIO/VIDEO/MJPEG/JPEG/PNG
+             default to FM_TIER1_FEAT_DEFAULT)
+             include/fm_config.h:158-164 (VIDEO=0 forces H264/MJPEG to 0, but
+             IMAGE=0 does NOT force JPEG/PNG to 0)
+             src/fm_jpeg.c:21, 1276-1308 (guard + disabled stubs)
+             src/fm_png.c:21, 1417-1448 (guard + disabled stubs)
+             src/fm_mjpeg.c:14, 217
+             src/fm_image.c:16, 1907
+             test/main.c:5766-6296 (whole Image test block guarded only by
+             #if FM_USE_IMAGE; JPEG/PNG tests inside are NOT guarded by
+             FM_USE_JPEG / FM_USE_PNG; MJPEG block at 5330 IS guarded)
+Description:
+  CMake forces JPEG/PNG off when IMAGE=0 and MJPEG off when VIDEO=0.
+  fm_config.h forces MJPEG off when VIDEO=0 but does NOT force JPEG/PNG off when
+  IMAGE=0. The Makefile computes PICOJPEG_NEEDED from the raw make variables,
+  so contradictory command lines still link the vendored picojpeg object and
+  all of its ~35 static globals (gCoeffBuf, gMCUBufR/G/B, gInBuf, gHuffTab*,
+  gQuant*, ...). Measured:
+    make FM_USE_IMAGE=0 FM_USE_VIDEO=1 FM_USE_AUDIO=1 FM_USE_JPEG=1
+         FM_USE_PNG=1 FM_USE_MJPEG=0  -> builds, 0 Image statics, but picojpeg
+         globals still linked (D-10 violation of S1).
+    make FM_USE_IMAGE=1 FM_USE_VIDEO=0 FM_USE_AUDIO=1 FM_USE_MJPEG=1
+         -> fm_config.h forces MJPEG=0, yet Makefile still links picojpeg.o.
+    make FM_USE_JPEG=0 or FM_USE_PNG=0 -> test/main.c still executes JPEG/PNG
+         tests; 3-6 extra failures appear (section 5).
+  Disabled stubs in fm_jpeg.c / fm_png.c correctly return FM_ERR_UNSUPPORTED,
+  so S5 holds; the problem is wasted static memory and failing tests.
+Pseudo-fix:
+    /* include/fm_config.h, after the JPEG/PNG defaults */
+    #if FM_USE_IMAGE == 0
+    #undef  FM_USE_JPEG
+    #define FM_USE_JPEG 0
+    #undef  FM_USE_PNG
+    #define FM_USE_PNG  0
+    #endif
+    /* Makefile: derive effective flags; do not key PICOJPEG_NEEDED off a
+       variable that fm_config.h may have overridden. Simplest correct form: */
+    PICOJPEG_NEEDED := 0
+    ifeq ($(FM_USE_IMAGE),1)
+      ifeq ($(FM_USE_JPEG),1)
+        PICOJPEG_NEEDED := 1
+      endif
+    endif
+    ifeq ($(FM_USE_VIDEO),1)
+      ifeq ($(FM_USE_MJPEG),1)
+        PICOJPEG_NEEDED := 1
+      endif
+    endif
+    /* test/main.c: wrap the JPEG tests in #if FM_USE_JPEG and the PNG tests in
+       #if FM_USE_PNG, mirroring the existing #if FM_USE_MJPEG at 5330. */
+Tests / verification: T-16, T-17, T-18 and the full matrix in section 5.
+--------------------------------------------------------------------------------
+4. LOWER-CONFIDENCE OBSERVATIONS (not counted as primary defects)
+--------------------------------------------------------------------------------
+O-01  Image_StreamDecode (src/fm_image.c:905-971) uses stack
+      `internal[FM_INTERNAL_BUFFER_SIZE]` (512 by default, overridden to 4096
+      by the host Makefile line ~105) and correctly rejects row_bytes > buffer.
+      It is memory-safe, but when img->data == NULL it never fills
+      img->width/height/format/...; callback-only users must call
+      Image_OpenStream() themselves. Document, or populate metadata in both
+      branches. Add boundary tests row_bytes == sizeof(internal) and +1.
+O-02  image_bmp_header (src/fm_image.c:725) writes biSizeImage as
+      `(uint32_t)width * height * 3u`; this wraps on 32-bit for large BMPs,
+      producing a wrong header field (not memory-unsafe). Use uint64_t and the
+      same UINT32_MAX clamp already used for `total` at lines 752/844.
+O-03  Image_Save extension dispatch (src/fm_image.c:801-832) is case-sensitive;
+      ".BMP"/".PNG" fall into FM_ERR_UNSUPPORTED instead of BMP/PNG. Low
+      severity, but easy to fix with a lowercase copy.
+O-04  FM_JPEG_LoadFile HW path (src/fm_jpeg.c:564-604) slurps up to 16 MB into
+      a heap/work buffer. It is bounded and documented in fm_image.h, but it is
+      the only Image path that reads a whole compressed file. If S2 is strict
+      ("never slurp"), this path needs a streaming HW contract or an explicit
+      opt-out. Not a memory-safety bug.
+O-05  FM_JPEG_ProbeFile (src/fm_jpeg.c:326-410) scans markers with no byte
+      budget; a hostile file of 0xFF fill bytes can cause a long scan. Add a
+      probe cap (e.g. 1 MiB) and FM_Idle() in the loops.
+--------------------------------------------------------------------------------
+5. MEASURED BUILD / GATING MATRIX (actual runs, not a plan)
+--------------------------------------------------------------------------------
+Commands used from /tmp/fm_full/Clain_FileManager/FileManager_lib:
+    make clean
+    make -j4 fm_test FM_USE_IMAGE=I FM_USE_VIDEO=V FM_USE_AUDIO=A
+    ./fm_test
+    nm -S fm_test | grep -E 'g_image_|g_png_|g_icodec|gCoeffBuf|...'
+"image statics" = count of g_image_line, g_image_work, g_image_work_cap,
+g_icodec, g_png_window, g_png_row, g_png_prev, g_png_recon (8 = full Image,
+4 = BMP+registry only, 0 = disabled). "pico marker" = picojpeg globals present.
+5.1 Eight primary FM_USE_IMAGE / VIDEO / AUDIO combos
+-----------------------------------------------------
+ I V A | fm_test build | ./fm_test | image statics | pico marker | result
+ ------+---------------+-----------+---------------+-------------+------------------
+ 0 0 0 | FAIL (2)      |   -       | 0             | 0           | test/main.c audio types
+ 0 0 1 | OK            | 1         | 0             | yes         | 117/118, 1 Audio fail
+ 0 1 0 | FAIL (2)      |   -       | 0             | 0           | undefined audio refs
+ 0 1 1 | OK            | 1         | 0             | yes         | 196/197, 1 Audio fail
+ 1 0 0 | FAIL (2)      |   -       | 0             | 0           | undefined audio refs
+ 1 0 1 | OK            | 1         | 8             | yes         | 131/132, 1 Audio fail
+ 1 1 0 | FAIL (2)      |   -       | 0             | 0           | undefined audio refs
+ 1 1 1 | OK            | 1         | 8             | yes         | 211/212, 1 Audio fail
+  The library target libfilemanager.a itself builds successfully for the
+  fully-disabled combo (verified); the FAIL rows are the fm_test compile/link
+  step, caused by cross-subsystem references listed in section 8.
+5.2 Eight JPEG / PNG / MJPEG sub-combos (I=1, V=1, A=1)
+---------------------------------------------------------
+ J P M | ./fm_test | image statics | pico marker | failing tests
+ ------+-----------+---------------+-------------+--------------------------------
+ 0 0 0 | 203/209  | 4             | no          | 5 Image (JPEG+PNG) + 1 Audio
+ 0 0 1 | 206/212  | 4             | yes         | 5 Image (JPEG+PNG) + 1 Audio
+ 0 1 0 | 204/209  | 8             | no          | 4 Image (JPEG) + 1 Audio
+ 0 1 1 | 207/212  | 8             | yes         | 4 Image (JPEG) + 1 Audio
+ 1 0 0 | 206/209  | 4             | yes         | 2 Image (PNG) + 1 Audio
+ 1 0 1 | 209/212  | 4             | yes         | 2 Image (PNG) + 1 Audio
+ 1 1 0 | 208/209  | 8             | yes         | 1 Audio (baseline)
+ 1 1 1 | 211/212  | 8             | yes         | 1 Audio (baseline)
+  The extra Image failures are exactly the unguarded JPEG/PNG tests from D-10:
+  "JPEG still Image_Load (picojpeg)", "PNG still Image_Load (built-in inflate)",
+  "Image_Load JPEG/PNG without heap (no file slurp)", "Image_Save JPEG
+  roundtrip", "Image_Load scales JPEG to fit a smaller buffer".
+5.3 Targeted contradictions
+---------------------------
+  I0 J1 P1 M0 (IMAGE=0 but JPEG=1/PNG=1): builds, 0 Image statics, picojpeg
+      globals STILL linked -> S1 violation (D-10).
+  V0 M1 (VIDEO=0 but MJPEG=1): fm_config.h forces MJPEG=0; Makefile STILL
+      links picojpeg.o -> S1/D-10 violation.
+  I0-all-off (all six flags 0): libfilemanager.a builds, nm shows NO Image and
+      NO picojpeg statics. fm_test still fails to compile because of the A=0
+      cross-subsystem issue.
+5.4 Baseline and ASAN
+---------------------
+  Default `make -j4 fm_test && ./fm_test`: 211/212 passed, 1 failure.
+  Default `make asan`: "sanitizer active (39 symbols)", NO AddressSanitizer,
+  NO UBSAN runtime error, NO LeakSanitizer report; the recipe exits 1 because
+  the same unrelated Audio test fails:
+      "Regression: ADPCM WAV small-chunk reads keep samples ...
+       FAIL: adpcm small chunks (err=-3)"
+  This is a PRE-EXISTING Audio regression, not an Image failure. All Image
+  tests pass in the default configuration. See section 8.
+--------------------------------------------------------------------------------
+6. TESTS
+--------------------------------------------------------------------------------
+6.1 Existing Image / MJPEG tests to keep running (test/main.c line numbers;
+    the tracked copy is identical to the archive copy)
+--------------------------------------------------------------------------------
+  5449  MJPEG codec: decode frame to RGB
+  5478  AVI (MJPG) -> MJPEG decode end-to-end
+  5505  Hardware MJPEG decoder override
+  5781  Image_Scale: nearest 2x2 -> 4x4
+  5803  Image_Flip horizontal + vertical
+  5836  Image_Rotate 90 swaps width/height
+  5867  JPEG still Image_Load (picojpeg)
+  5891  PNG still Image_Load (built-in inflate)
+  5993  Image_Load JPEG/PNG without heap (no file slurp)
+  6057  Image_Save JPEG roundtrip (lossy, size preserved)
+  6096  Image_Load scales JPEG to fit a smaller buffer
+  6115  Image_Scale: bilinear 2x2 -> 2x2 identity
+  6128  Image effects: invert/grayscale/sepia/brightness/contrast
+  6257  Image_ResizeFile: BMP 8x8 -> 4x4
+  8293  Regression: Image_Convert RGBA8888 -> RGB888
+  8325  Regression: Image_Convert GRAY8 -> RGB888
+  Regression section starts at 8068; Image block guard at 5766-6296.
+  Build / run commands (from docs + Makefile):
+      make -j4 fm_test && ./fm_test
+      make asan                       # ASAN + UBSAN + detect_leaks=1
+      make ports                      # sh tools/check_ports.sh
+      make videohooks
+      make -j4 examples
+  Docs report historical 210/210 or 211/211 clean runs; today's suite has 212
+  tests with the one Audio failure described in 5.4.
+6.2 New regression tests to add after the fixes
+-----------------------------------------------
+  T-01  PNG dynamic block with over-subscribed lit/dist table -> FM_ERR_CORRUPTED
+  T-02  PNG dynamic block with incomplete table (e.g. one 2-bit code) and with
+        the legal single 1-bit dummy distance code -> reject / accept correctly
+  T-03  PNG all-zero distance table -> FM_ERR_CORRUPTED, no 15-bit scan
+  T-04  PNG match with distance 32769 after >32768 produced bytes ->
+        FM_ERR_CORRUPTED (reproduces the 0xBB stale-byte evidence)
+  T-05  Truncated zlib stored block, EOF on header byte 1/2/3/4 ->
+        FM_ERR_CORRUPTED and ZERO UBSAN "left shift of negative value"
+  T-06  PNG ancillary chunk length 0xFFFFFFFF / 0xFFFFFFFC ->
+        FM_ERR_CORRUPTED, no parser desync, no OOB
+  T-07  Concurrent / nested PNG decode + PNG encode (FM_USE_THREADS=1) ->
+        both outputs byte-identical to serial execution
+  T-08  FM_USE_IMAGE=0 link + nm check: no g_image_line, g_image_work,
+        g_icodec, g_png_window, g_png_row, g_png_prev, g_png_recon and no
+        picojpeg globals
+  T-09  File starting 0x89 'P' but bad remaining signature -> not misrouted
+        away from BMP/stream detection; "0x89PNG" + bad tail likewise
+  T-10  Image_GetInfo on PNG with corrupted IHDR CRC -> FM_ERR_CRC
+  T-11  Concurrent Image_RegisterCodec / Image_GetCodec / UnregisterCodec ->
+        no race, no dangling ops, fully cleared slot
+  T-12  FM_Image with data_capacity large but data_size small (nonzero) ->
+        Image_EncodeBMP / Image_Save / FM_JPEG_EncodeFile / FM_PNG_EncodeFile
+        all return FM_ERR_TOO_LARGE before reading pixels
+  T-13  Overflow-sized dimensions for Image_ResizeFile / Image_Flip /
+        Image_Rotate / mjpeg_decode -> FM_ERR_TOO_LARGE (run on 32-bit or with
+        a SIZE_MAX shim), no tiny alloc + big write
+  T-14  Image_Rotate with src->data_capacity smaller than width*height*bpp ->
+        FM_ERR_TOO_LARGE (source-side validation)
+  T-15  Image_ScaleEx with undersized src_cap / dst_cap -> FM_ERR_TOO_LARGE;
+        exact-capacity boundary -> FM_OK
+  T-16  All 8 FM_USE_IMAGE/VIDEO/AUDIO combos build + run under ASAN/UBSAN
+        (requires the section-8 blockers to be fixed first)
+  T-17  All 8 FM_USE_JPEG/PNG/MJPEG sub-combos build + run with zero failures
+        once tests are per-codec guarded
+  T-18  Contradictory combos (IMAGE=0/JPEG=1, VIDEO=0/MJPEG=1) produce no
+        picojpeg globals in nm
+  T-19  Image_StreamDecode row_bytes == sizeof(internal) and
+        row_bytes == sizeof(internal)+1 boundary behaviour
+  T-20  (if adopted) uppercase .BMP/.PNG extension and biSizeImage header value
+        for a large BMP
+--------------------------------------------------------------------------------
+7. ASAN / UBSAN-SAFE RATIONALE FOR THE PROPOSED FIXES
+--------------------------------------------------------------------------------
+  * Every width*height*bpp multiply is done in uint64_t and compared to
+    SIZE_MAX and to the real capacity BEFORE the size_t cast (D-08, D-09).
+    Image_BufferSize() (fm_image.c:99-121) is the existing model.
+  * Canonical Huffman codes are validated with the `left` Kraft computation;
+    huff_decode() additionally checks `off >= 0`, `off < count` and
+    `index+off < nsym` before touching symbol[] (D-01).
+  * Deflate distance is clamped to FM_PNG_WINDOW (32768) AND to z->produced,
+    so window[from & 32767] can only address bytes that are still valid (D-02).
+  * No `int` is shifted before its sign is known: inf_get() results are read
+    into four ints, checked `< 0`, then composed into uint32_t (D-03). This
+    removes the two measured UBSAN reports.
+  * `len + 4u` and every `cursor + n` are computed in uint64_t; UINT32_MAX /
+    mem_len / mem_cap checks happen before the cast or seek (D-03).
+  * Validate BOTH data_capacity and nonzero data_size before any pixel loop,
+    memcpy or memmove (D-07). Never memcpy from a pointer whose valid length
+    has not been established.
+  * Keep all static scratch inside the existing guards: fm_image.c under
+    `#if FM_USE_IMAGE` (line 16 / 1907), fm_jpeg.c under
+    `#if FM_USE_IMAGE && FM_USE_JPEG` (21), fm_png.c under
+    `#if FM_USE_IMAGE && FM_USE_PNG` (21), fm_mjpeg.c under
+    `#if FM_USE_MJPEG` (14). Add NO new globals (D-04, D-10, S1).
+  * Use FM_Lock()/FM_Unlock() for g_icodec, g_png_* and g_image_work*, or move
+    the state into caller-owned contexts (D-04, D-06, S7).
+  * Decoder loops stay bounded by row_len / MCU counts / 32 KB window / 15-bit
+    Huffman length. No unaligned casts, no signed overflow, no
+    implementation-defined shifts. Disabled APIs keep returning
+    FM_ERR_UNSUPPORTED via the existing stubs (S5).
+  * No new heap slurp: fixes only add scalar checks and, optionally, a caller
+    -provided scratch struct. The streaming IDAT / picojpeg / BMP row paths are
+    untouched (S2). Add a probe byte cap for O-05 if adopted.
+  * Measured sanitizer evidence supporting the above:
+      - 200000 randomized invalid Huffman tables + huff_decode under
+        ASAN+UBSAN: no crash (so D-01 is correctness, not OOB).
+      - Verbatim inf_stored on a 1-byte stream: 2x UBSAN "left shift of
+        negative value -1" (D-03), reproducible before the fix.
+      - Verbatim inf_copy with dist=32769: returns 0 and emits stale 0xBB
+        (D-02), reproducible before the fix.
+      - `make asan` on the current tree: sanitizer linked (39 symbols), zero
+        ASAN/UBSAN/LSan diagnostics; only the unrelated Audio test fails.
+--------------------------------------------------------------------------------
+8. CROSS-SUBSYSTEM BLOCKERS (NOT Image defects, but they block S4)
+--------------------------------------------------------------------------------
+Four of the eight primary combinations (every row with FM_USE_AUDIO=0) fail to
+build the test executable:
+  * test/main.c:5650  unknown type name 'FM_Audio'
+    test/main.c:6302  unknown type name 'FM_AudioInfo'
+    test/main.c:6337  unknown type name 'FM_AudioEncodeConfig'
+    test/main.c:6339  request for member 'bits_per_sample' ...
+  * link errors: src/fm_video.c:3153 -> Audio_GetDecoder,
+    src/fm_flac.c:80 -> Audio_RegisterDecoder,
+    src/fm_vorbis.c:96 -> Audio_RegisterDecoder,
+    src/fm_opus.c:232 -> Audio_RegisterDecoder.
+And the baseline suite has one pre-existing Audio regression that prevents a
+green `make asan`:
+    "Regression: ADPCM WAV small-chunk reads keep samples ...
+     FAIL: adpcm small chunks (err=-3)".
+These must be fixed (guard the tests / stub the audio registration hooks, and
+fix the ADPCM regression) before the "all 8 combos compile and run under
+ASAN/UBSAN" acceptance criterion can be demonstrated. They are reported here
+only so the Image diagnose is not mistaken for the cause.
+--------------------------------------------------------------------------------
+9. IF Report.txt IS PROVIDED LATER
+--------------------------------------------------------------------------------
+  1. Replace D-01..D-10 headings with the official Image bug numbers/titles.
+  2. Keep the Location / Cause / Pseudo-fix / Evidence / Tests blocks as the
+     diagnose detail for each official bug.
+  3. Drop any D-xx candidate that the official report does not list (or move it
+     to an "additional code-review findings" appendix).
+  4. Add any official Image bug that this code reading did not surface, with a
+     fresh location/cause/pseudo-fix pass.
+  5. Re-run the section-5 matrix and update the measured numbers.
+--------------------------------------------------------------------------------
+10. DELIVERABLE / CHANGE LOG
+--------------------------------------------------------------------------------
+  * Created: /home/user/Clain_Filemanagaer/Image_Diagnose.txt (this file).
+  * Modified source files: NONE. This is a diagnose-only pass.
+  * Temporary artifacts (outside the repository, not committed):
+      /tmp/fm_extract, /tmp/fm_full, /tmp/fm_docs, /tmp/fm_*.numbered.txt,
+      /tmp/fm_matrix, /tmp/huff_fuzz.c, /tmp/png_edge.c, /tmp/v2_Clain_FileManager.zip.
+  * Repository status before this file: clean, branch
+    arena/8201933c-clain-filemanagaer, HEAD 2edf567.
+================================================================================
+END OF REPORT
+================================================================================
+
+
+
+
+# گزارش Diagnose — زیرسیستم Video (`fm_video.c` / `fm_h264.c` / `simple_video.h`)
+
+**تاریخ:** 2026-11-10 · **برنچ:** `arena/ed3247d1-clain-filemanagaer` · **مبنا:** `Clain_FileManager.zip` (۱۴٫۱ مگابایت، کامیت `de9abca`) که همان درخت `Clain_FileManager/FileManager_lib` داخل مخزن است (تأیید با `diff`: یکسان).
+
+> **هیچ فایل سورسی تغییر نکرده است.** این گزارش فقط خواندن/تحلیل است؛ همهٔ snippetها پیشنهاد هستند و apply نشده‌اند. تمام تست‌ها بیرون از مخزن (`/tmp`) با کپیِ همان سورس ساخته و اجرا شدند.
+
+> **یادداشت دربارهٔ `Report.txt`:** چنین فایلی در مخزن، در `Clain_FileManager.zip`، در تاریخ گیت (`git log --all --name-only`) و در آپ스트ریم گیت‌هاب وجود ندارد (جست‌وجوی کامل انجام شد). بنابراین «فهرست باگ‌های Video از Report.txt» از خودِ سورس استخراج شده و شماره‌گذاری زیر **مستقل و از سورس** است. اگر `Report.txt` را بفرستید، دقیقاً با همان شماره‌ها نگاشت (mapping) می‌کنم.
+
+**قیدهای در نظر گرفته‌شده:** HW decoder abstraction به‌صورت «H264/H265 → سخت‌افزار اگر رجیستر شده باشد، وگرنه SW» · `FM_USE_VIDEO == 0` ← صفر بافر/استاتیک برای ویدئو.
+
+---
+
+## خلاصهٔ مدیریتی
+
+| # | باگ | فایل:خط | شدت | تأیید |
+|---|---|---|---|---|
+| V1 | `ebml_read` بایتِ طول را از حافظهٔ خوانده‌نشده می‌خواند → کل MKV رد می‌شود | `fm_video.c:1791-1819` | **بحرانی** | عددی ✅ |
+| V2 | `ebml_read` سرریز `hdr[8]` (OOB read/write) | `fm_video.c:1804-1819` | **بحرانی (ASAN/UBSAN)** | UBSAN ✅ |
+| V3 | MKV: `SamplingFrequency` به‌صورت `double` خوانده می‌شود (spec: uint، ۴ یا ۸ بایت) | `fm_video.c:1906` | بالا | ✅ |
+| V4 | MKV `PixelWidth/Height`: `b[4]` با `vsz` تا ۸ بایت خوانده می‌شود (stack smash) | `fm_video.c:1901` | بالا (ASAN) | کد ✅ |
+| V5 | MKV lacing: `hlen` بدون بررسی `csz` → اُوِررِید `payload_sz` و index معیوب | `fm_video.c:1983-1991` | بالا | ✅ |
+| V6 | AVI: `strf` با `ssz>=16` گارد می‌شود ولی همیشه ۴۰ بایت خوانده می‌شود + BITMAPCOREHEADER | `fm_video.c:642-649` | متوسط | ✅ |
+| V7 | AVI: سایز چانک/لیست از فایل کلمپ نمی‌شود (بدون سقف → seekهای بی‌پایان) | `fm_video.c:836-848` | متوسط | ✅ |
+| V8 | AVI/MP4: فهرست فریم ثابت → کلیپ بلند بی‌صدا کوتاه می‌شود (بدون مسیر streaming) | `fm_video.c:883`, `1684` | متوسط | تحلیل |
+| V9 | MP4 avcC: `lengthSizeMinusOne` نادیده گرفته می‌شود (همیشه ۴ بایت) و NAL ناقص بی‌خطا پذیرفته می‌شود | `fm_video.c:1026-1099`, `2385-2417` | بالا | ✅ |
+| V10 | MP4 H.265: `hvcC` هرگز پارس نمی‌شود؛ VPS/SPS/PPS به دیکودر نمی‌رسد | `fm_video.c:1533-1546` | بالا | ✅ |
+| V11 | HW abstraction: `codec_valid` فقط تا `MPEG4` → HEVC/VP8/VP9/AV1 هرگز HW نمی‌شوند | `fm_hw.c:14-17` | **بالا** | عددی ✅ |
+| V12 | YUV420→RGB888: `left`/`top` crop نادیده گرفته می‌شود (+ `.crop` بی‌اثر در `simple_video.h`) | `fm_h264.c:113-139`, `450` | بالا (تصویر سبز/جابه‌جا) | کد ✅ |
+| V13 | `Video_ReadAudioFrame`: برای هر پکت `init/close` + دو `FM_Alloc` → heap churn در مسیر realtime | `fm_video.c:3171-3178`, `3306-3348` | بالا | کد ✅ |
+| V14 | MKV/MP4/AVI: هستهٔ آدیو (FLAC/Vorbis/Opus/AAC) بدون `Audio_GetDecoder` بی‌صدا | `fm_video.c:3157-3312` | بالا | عددی ✅ |
+| V15 | `FM_USE_VIDEO=0`: `simple_video.h` کامپایل نمی‌شود + ۸۰۰ KB استاتیک | `simple_video.h:500-503`, `2233` | **بالا** | کامپایلر ✅ |
+| V16 | `FM_USE_VIDEO=0`: `fm_video.c` هیچ نماد/استاب صادر نمی‌کند | `fm_video.c:34`, `3736` | بالا | عددی ✅ |
+| V17 | `FM_EVENT_LOG` با فیلدهای ناموجود (`v->width`…) → کامپایل با `FM_DEBUG_LEVEL>=2` می‌شکند | `fm_video.c:2337-2338` | متوسط | کامپایلر ✅ |
+| V18 | `h264_decode_attempt` با هر خطای NAL ترمیم‌نشده فریم را «خراب» اعلام می‌کند | `fm_h264.c:527-533` | متوسط | کد ✅ |
+| V19 | `Video_ReadAudioFrame`: MKV Vorbis index/scan ناسازگار؛ حافظهٔ ۵۱۲ بایتی CodecPrivate | `fm_video.c:1918-1922`, `3180-3245` | متوسط | تحلیل |
+| V20 | `Video_DecodeFrame`: `FM_Alloc` برای هر فریم در مسیر داغ + `pixels_cap` گارد نمی‌شود | `fm_video.c:2660`, `2807-2820` | متوسط/پایین | کد ✅ |
+
+---
+
+## V1 — `ebml_read`: بایتِ طول از حافظهٔ خوانده‌نشده (بحرانی)
+
+**Describe.** برای هر عنصر EBML با ID یک‌بایتی (مثل `Timecode=0xE7`, `SimpleBlock=0xA3`, `PixelWidth=0xB0`, `TrackNumber=0xD7`) مقدار `Size` از یک بایتِ **content** خوانده می‌شود، نه از بایتِ خودِ Size؛ یا اگر `slen>1` باشد اصلاً بایت اول در دست نیست.
+
+**Root cause.** در `fm_video.c:1796` فقط ۱ بایت خوانده می‌شود؛ در `1799` فقط وقتی `ilen > 1` باشد دوباره خوانده می‌شود. بعد `1802` بایتِ Size را از `hdr[ilen]` می‌گیرد که برای `ilen==1` هرگز پر نشده (و برای `ilen==2` هم بعد از `read(pos, len=3)` بایتِ سومِ Size در `hdr[2]` نیست و در `hdr[3..]` است). سپس `1804-1813` شرط `ilen+slen>8` است و فقط در آن حالت درست جابه‌جا می‌کند.
+
+**اثبات عددی (کد دست‌نخورده + پرینت موقت).** یک MKV حداقلیِ معتبر ساختم؛ `PixelWidth/PixelHeight` درست خوانده شد (`320x240`) اما:
+```
+[inner] cpos=101 cend=175 rc=0 cid=E7 csz=2      ← Timecode (سایز ۲) → سایز 950 خوانده شد
+[inner] cpos=105 cend=175 rc=0 cid=A3 csz=68     ← SimpleBlock
+[blk]   tnum=1 hlen=4 csz=68
+[mkv]   count=1 audio=0                          ← فقط ۱ فریم از ۴ فریم لِیس‌شده، audio=0
+```
+بازهٔ عنصر `Timecode` به‌جای ۲ بایت، ۹۵۰ بایت شد → `cpos` پرش کرد → بقیهٔ بلوک‌ها/ترک صوتی گم شدند. با یک `ebml_read` بازنویسی‌شده (فقط برای تست، در `/tmp`) همان فایل `count=1, audio=2, arate=44100` داد.
+
+**Proposed fix (قطعه‌کد، apply نشده):**
+```c
+static FM_Result ebml_read(FM_Video *v, uint64_t pos, uint64_t file_end,
+                           uint32_t *id, uint64_t *size, uint64_t *data_off)
+{
+    uint8_t all[16];
+    uint32_t ilen, slen, i;
+    uint64_t sz = 0;
+
+    if (pos + 2u > file_end) return FM_ERR_CORRUPTED;
+    if (video_read_at(&v->file, pos, all, 1) != FM_OK) return FM_ERR_CORRUPTED;
+    ilen = ebml_id_len(all[0]);
+    if (ilen == 0u || ilen > 4u) return FM_ERR_CORRUPTED;          /* ID ≤ 4 B */
+    if (pos + ilen + 1u > file_end) return FM_ERR_CORRUPTED;
+    /* ALWAYS re-read ID+first size byte, whatever ilen is */
+    if (video_read_at(&v->file, pos, all, ilen + 1u) != FM_OK) return FM_ERR_CORRUPTED;
+
+    *id = 0;
+    for (i = 0; i < ilen; i++) *id = (*id << 8) | all[i];
+
+    slen = ebml_size_len(all[ilen]);
+    if (slen == 0u || slen > 8u) return FM_ERR_CORRUPTED;
+    if (pos + ilen + slen > file_end) return FM_ERR_CORRUPTED;
+    if (slen > 1u &&
+        video_read_at(&v->file, pos + ilen, all + ilen, slen) != FM_OK)
+        return FM_ERR_CORRUPTED;                                   /* V2 هم رفع */
+
+    sz = (uint64_t)(all[ilen] & (uint8_t)(0xFFu >> slen));
+    for (i = 1; i < slen; i++) sz = (sz << 8) | all[ilen + i];
+    if (sz == ((slen == 8u) ? UINT64_MAX : ((1ULL << (7u * slen)) - 1ULL)))
+        sz = file_end - (pos + ilen + slen);                        /* unknown */
+    *size = sz;
+    *data_off = pos + ilen + slen;
+    return FM_OK;
+}
+```
+
+## V2 — همان تابع: سرریز `uint8_t hdr[8]` (ASAN/UBSAN)
+
+**Describe.** `slen` می‌تواند ۵..۸ باشد و `ilen` تا ۴ → `ilen+slen` تا ۱۲.
+
+**Root cause.** `1791` بافر ۸ بایتی است؛ `1819` با `hdr[ilen+i]` تا ایندکس ۱۱ می‌رود (خواندن OOB). در شاخهٔ `1804` هم `slen` بایت در `hdr[0..slen)` نوشته می‌شود که اگر `slen==8` سقف است ولی ایندکس‌گذاری بعدی (`hdr[ilen]`) دیگر بی‌معنی می‌شود.
+
+**تأیید (ASAN/UBSAN، فایل EBML با Size پنج‌بایتی):**
+```
+src/fm_video.c:1819:52: runtime error: index 8 out of bounds for type 'uint8_t [8]'
+```
+**Proposed fix:** همان قطعه‌کد V1 (`all[16]` + همیشه `read(pos+ilen, slen)`), به‌علاوهٔ `ilen>4` reject و `pos+ilen+slen>file_end` reject.
+
+---
+
+## V3 — MKV `SamplingFrequency` به‌صورت float64 خوانده می‌شود (بالا)
+
+**Describe.** همهٔ فایل‌های MKV واقعی (mkvmerge/ffmpeg) `Audio\SamplingFrequency (0xB5)` را به‌صورت **IEEE float** (۸ بایت) می‌نویسند. کد فعلی آن را به‌صورت **unsigned int big-endian** تجزیه می‌کند و همان بیت‌ها را `double` تفسیر می‌کند.
+
+**Root cause.** `fm_video.c:1906`: `uint64_t u` از بایت‌ها ساخته می‌شود، بعد `le` با معکوس‌کردن ترتیب بایت‌ها و `memcpy(&d,&le,8)` → عددی ~`6.9e-310` → `(uint32_t)arate == 0` → `44100` فالبک. یعنی **نرخ نمونهٔ واقعی گم می‌شود** و در MKV با ۴۸ کیلوهرتز، صدا ۸٪ کندتر/کوتاه‌تر پخش می‌شود (drift تجمعی).
+
+**تأیید عددی:** با `SamplingFrequency` مطابق spec (float64 = 44100) → `arate=0.0`؛ با یک uint ساختگی هم ۰. یعنی هیچ‌کدام از دو حالت درست خوانده نمی‌شود.
+
+**Proposed fix:**
+```c
+/* EBML float: 4 or 8 bytes, big-endian IEEE-754 */
+static FM_Result ebml_read_float(const uint8_t *b, uint32_t n, double *out)
+{
+    if (n == 4u) { uint32_t u = video_be32(b); float f; memcpy(&f,&u,4); *out = (double)f; return FM_OK; }
+    if (n == 8u) { uint64_t u = video_be64(b); double d; memcpy(&d,&u,8); *out = d; return FM_OK; }
+    return FM_ERR_CORRUPTED;
+}
+...
+else if (aid == 0xB5u) {                       /* SamplingFrequency */
+    uint8_t b[8];
+    uint32_t n = (asz > 8u) ? 8u : (uint32_t)asz;
+    if (n >= 4u && video_read_at(&v->file, adata, b, n) == FM_OK) {
+        double hz = 0;
+        if (ebml_read_float(b, n, &hz) == FM_OK && hz >= 1000.0 && hz <= 768000.0)
+            arate = (uint32_t)(hz + 0.5);
+    }
+}
+```
+و در `Audio\Channels (0x9F)` که ۱ بایت فرض شده، برای `asz>1` عدد را از چند بایت big-endian بسازید:
+```c
+else if (aid == 0x9Fu) {
+    uint8_t b[4]; uint32_t n = (asz > 4u) ? 4u : (uint32_t)asz;
+    if (n >= 1u && video_read_at(&v->file, adata, b, n) == FM_OK) {
+        uint32_t v = 0; for (uint32_t k = 0; k < n; k++) v = (v << 8) | b[k];
+        if (v >= 1u && v <= 8u) ach = (uint16_t)v;
+    }
+}
+```
+
+---
+
+## V4 — MKV `PixelWidth/Height`: `b[4]` با طولی تا ۸ بایت خوانده می‌شود (ASAN)
+
+**Describe.** در `fm_video.c:1901`:
+```c
+uint8_t b[4];
+video_read_at(&v->file, vdata, b, (vsz > 4 ? 4 : (uint32_t)vsz));   /* ok */
+for (uint32_t k = 0; k < vsz && k < 4; k++) w = (w << 8) | b[k];    /* ← vsz آزاد */
+```
+حلقهٔ بعدی `k < vsz` است نه `k < 4`.
+
+**Root cause.** عدم هم‌خوانی شرطِ خواندن (کلمپ‌شده به ۴) با شرطِ حلقه (کلمپ‌نشده).
+
+**Proposed fix:**
+```c
+uint32_t n = (vsz > 4u) ? 4u : (uint32_t)vsz;      /* یا 8 برای DisplayWidth */
+if (n && video_read_at(&v->file, vdata, b, n) == FM_OK) {
+    w = 0; for (uint32_t k = 0; k < n; k++) w = (w << 8) | b[k];
+}
+/* همان الگو برای 0xBA و بقیهٔ fixnumها */
+```
+
+---
+
+## V5 — MKV lacing: `hlen` بدون بررسی `csz` → اُوِررِید و index معیوب (بالا)
+
+**Root cause.** `fm_video.c:1983-1991`:
+```c
+uint8_t hdr[4];
+video_read_at(&v->file, bdata, hdr, 2);            /* فقط ۲ بایت */
+...
+else if (hdr[0] & 0x40u) { ... hlen = 2+2+1; }     /* ۵ */
+uint32_t payload_sz = (uint32_t)(csz - hlen);      /* if (csz < hlen) → underflow */
+```
+اگر `csz < hlen` باشد `payload_sz` به عددی بزرگ wrap می‌شود و در `2013` (`cur+fsz2 > payload_off+payload_sz`) گارد دور زده می‌شود → index شامل نواحی خارج از بلوک (حتی خارج از فایل برای فریم‌های بعدیِ `Video_ReadFrame`).
+
+**Proposed fix:**
+```c
+uint8_t hdr[4];
+if (video_read_at(&v->file, bdata, hdr, 2) != FM_OK) { cpos = cdata + csz; continue; }
+uint32_t tnum = 0, hlen = 0;
+if (hdr[0] & 0x80u)      { tnum = hdr[0] & 0x7Fu;                 hlen = 4; }
+else if (hdr[0] & 0x40u) { tnum = ((hdr[0] & 0x3Fu) << 8) | hdr[1]; hlen = 5; }
+else                     { cpos = cdata + csz; continue; }
+if (csz <= hlen)         { cpos = cdata + csz; continue; }   /* ← گارد لازم */
+uint32_t payload_sz = (uint32_t)(csz - hlen);
+```
+
+---
+
+## V6 — AVI `strf`: گارد `ssz>=16` ولی خواندن ۴۰ بایتی (متوسط)
+
+**Describe.** `fm_video.c:642-649`: شرط `ssz >= 16` است ولی `video_read_at(..., strf, 40)`.
+۱) در انتهای فایل (یا `strf` آخرین فرزندِ `LIST hdrl`) ۴۰ بایت کوتاه است → **کل فایل AVI رد می‌شود** (`FM_ERR_CORRUPTED`) در حالی که فیلدهای لازم (`w,h,bitcount,compression`) داخل همان ۱۶ بایت اول‌اند.
+۲) `BITMAPCOREHEADER` (biSize=12، `w`/`h` به‌صورت **WORD**، بدون `biCompression`) با همین مسیر تجزیه می‌شوید؛ `compression` از `strf+16` خوانده می‌شود که در CoreHeader داخلِ داده نیست → کدک اشتباه/`UNKNOWN`.
+
+**تأیید:** AVI با `strf=40/18/16` → در هر سه حالت `Open OK, rate=44100 ch=2 bits=16` (چون فایل پد شده بود)؛ ولی هستهٔ AVI با `strf` انتهاییِ بدون پد در سناریوی «آخرین چانک» به `FM_ERR_CORRUPTED` می‌رسد. `BITMAPCOREHEADER` → `codec=2 (MJPEG)` از روی `strh` و `w/h` تصادفی.
+
+**Proposed fix:**
+```c
+else if (memcmp(sc, "strf", 4) == 0 && ssz >= 12)
+{
+    uint8_t strf[40];
+    uint32_t take = (ssz < 40u) ? ssz : 40u;     /* ← کلمپ واقعی */
+    memset(strf, 0, sizeof(strf));
+    if (video_read_at(&v->file, sd, strf, take) != FM_OK) return FM_ERR_CORRUPTED;
+
+    if (is_video_stream)
+    {
+        if (video_rd32(strf) == 12u)             /* BITMAPCOREHEADER */
+        {
+            width  = video_rd16(strf + 4);
+            height = video_rd16(strf + 6);
+            bit_count = video_rd16(strf + 10);
+            compression_zero = FM_TRUE;          /* CoreHeader = BI_RGB */
+            memset(compression, 0, 4);
+        }
+        else { /* BITMAPINFOHEADER موجود */ }
+    }
+    else if (is_audio_stream) { /* tag/rate/bits از همان take بایتی */ }
+}
+```
+
+---
+
+## V7 — AVI: طول چانک/لیست بدون کلمپ به اندازهٔ فایل (متوسط)
+
+**Root cause.** `avi_find_lists` (`836-848`) و `avi_build_index` (`800-812`) `sz` را تنها با «انتها» مقایسه می‌کنند (`data+sz > end`)، و `end` خود از همان `sz`های اعلامی می‌آید؛ یک RIFF با `size=0x7FFFFFFF` باعث می‌شود `movi_end` به اندازهٔ ۲ گیگابایت ادعا شود و `while (pos+8 <= end)` روی فایل ۱۰۰ بایتی هزاران `File_Seek` ناموفق بزند (روی SD هر seek گران است). یک `fuzz` ساده هم باعث `FM_ERR_IO/CORRUPTED` می‌شود، نه رد سریع. (تست: `riff_huge.avi` → `invalid format` ولی فقط بعد از پیمایش.)
+
+**Proposed fix:**
+```c
+static uint64_t clamp64(uint64_t v, uint64_t hi) { return (v > hi) ? hi : v; }
+...
+data = pos + 8;
+if (sz == 0xFFFFFFFFu) sz = (uint32_t)clamp64(file_size - data, 0); /* streaming size */
+if (data > file_size || sz > file_size - data) return FM_ERR_CORRUPTED;
+if (lay->movi_end > file_size) lay->movi_end = file_size;
+```
+
+---
+
+## V8 — فهرست فریم ثابت: کلیپ بلند در AVI/MP4 «کوتاه» می‌شود (متوسط)
+
+**Describe.** برای AVI تنها مسیر streaming مالِ **صدا** است (`avi_audio`، `audio_scan_pos`). برای **ویدئو** `avi_build_index` بی‌صدا متوقف می‌شود (`priv->count == FM_VIDEO_MAX_FRAMES`) و `v->info.frame_count = priv->count` (`883`). همین برای MP4 در `1684`. یعنی کلیپ بلندتر از ۴۰۹۶ فریم (≈۲٫۷ دقیقه در ۲۵fps) در انتها «تمام» می‌شود.
+
+**تأیید:** `avih`/`stsz` می‌توانند `frame_count` بزرگ‌تر بدهند؛ کد آن را با پیام «playback truncated» جایگزین می‌کند (`875-883`, `1676-1684`) — یعنی رفتار آگاهانه ولی ناقص.
+
+**Proposed fix (طرح):** همان الگوی صدا را برای ویدئو تکرار کنید: `video_scan_pos/video_scan_end/video_total` و در `Video_ReadFrame` وقتی `current_frame >= priv->count` بود، از `movi` ادامه بدهید (به‌همراه `Video_Seek` که در این حالت باید به نزدیک‌ترین keyframe یا به ابتدای اسکن برگردد). حداقلِ کم‌هزینه: `v->info.frame_count` را دستکاری نکنید و `Video_ReadFrame` را با `current_frame >= count` به‌جای `EOF` به مسیر اسکن ببرید.
+
+---
+
+## V9 — MP4 `avcC`: `lengthSizeMinusOne` نادیده گرفته می‌شود (بالا)
+
+**Describe.** `mp4_parse_avcc` (`1026-1099`) صریحاً `hdr[4]` را دور می‌ریزد («assumed 4-byte lengths») و `video_read_annexb` (`2385-2417`) همیشه `video_be32` می‌خواند. NAL با طول ۱ یا ۲ بایت (که در avcC مجاز است) به‌صورت نویز تجزیه می‌شود.
+
+**Root cause.** عدم ذخیرهٔ `lengthSizeMinusOne` (۲ بیت پایین `hdr[4]`) در `FM_VideoPriv` و استفادهٔ ثابت ۴ در تبدیل.
+
+**Proposed fix:**
+```c
+/* FM_VideoPriv: uint8_t nal_len_size;  // 1..4 */
+priv->nal_len_size = (uint8_t)((hdr[4] & 0x03u) + 1u);
+
+static FM_Result video_read_annexb(FM_File *f, uint64_t offset, uint32_t size,
+                                   uint32_t nal_len_size, uint8_t *out,
+                                   size_t cap, size_t *out_len)
+{
+    uint8_t hdr[4];
+    uint32_t pos = 0;
+    if (size > cap) return FM_ERR_TOO_LARGE;
+    if (nal_len_size < 1u || nal_len_size > 4u) return FM_ERR_CORRUPTED;
+    while (pos + nal_len_size <= size)
+    {
+        uint32_t nlen = 0;
+        if (video_read_at(f, offset + pos, hdr, nal_len_size) != FM_OK) return FM_ERR_CORRUPTED;
+        for (uint32_t i = 0; i < nal_len_size; i++) nlen = (nlen << 8) | hdr[i];
+        if (nlen == 0u || (uint64_t)pos + nal_len_size + nlen > size)
+            return FM_ERR_CORRUPTED;              /* V9-b: NAL ناقص دیگر پذیرفته نشود */
+        memcpy(out + pos, "\0\0\0\1", 4);         /* خروجی همیشه 4 بایتی می‌ماند */
+        if (video_read_at(f, offset + pos + nal_len_size,
+                          out + pos + 4, nlen) != FM_OK) return FM_ERR_CORRUPTED;
+        pos += 4u + nlen;                          /* ← بافر باید nal_len_size+4 جا داشته باشد */
+    }
+    *out_len = pos;
+    return FM_OK;
+}
+```
+(توجه: با این تغییر، طبق کامنت موجود در `2381-2384`، اندازهٔ خروجی دیگر هم‌اندازهٔ ورودی نیست؛ `cap` در `Video_DecodeFrame` باید `sps_pps_len + fsize + 4 * (تعداد NAL)` باشد، یا از همان ابتدا NAL به NAL بنویسید و در جا تبدیل کنید.)
+همچنین در `2410` حالت «پایان با کمتر از ۴ بایت باقی‌مانده» بی‌صدا و بدون خطا به `FM_OK` می‌رسد؛ آن را `FM_ERR_CORRUPTED` کنید.
+
+---
+
+## V10 — MP4 H.265: `hvcC` پارس نمی‌شود (بالا)
+
+**Describe.** برای `hvc1/hev1/h265` فقط `width/height` خوانده می‌شود (`fm_video.c:1533-1546`). اما برخلاف H.264، هیچ دیکودر HEVC درخت نمی‌تواند بدون `VPS/SPS/PPS` کار کند و `avc1`/`sps_pps` تنها برای H.264 پر می‌شود. بنابراین حتی وقتی یک دیکودر HW/SW ثبت شود، **همیشه** شکست می‌خورد.
+
+**Proposed fix:** معادل `mp4_parse_avcc` برای `hvcC`:
+```c
+/* hvcC: [22] bytes of config, then numOfArrays; each array:
+ *   byte0 = (array_completeness<<7) | (NAL_unit_type & 0x3F)
+ *   word  = numNalus, then repeated { word len, len bytes }          */
+static FM_Result mp4_parse_hvcc(FM_Video *v, Mp4Box *hvcc, FM_VideoPriv *priv)
+{
+    uint8_t h[23];
+    if (hvcc->size < 8u + 23u) return FM_ERR_CORRUPTED;
+    if (video_read_at(&v->file, hvcc->data, h, 23) != FM_OK) return FM_ERR_CORRUPTED;
+    priv->hvc_len_size = (uint8_t)((h[21] & 0x03u) + 1u);       /* lengthSizeMinusOne */
+    uint32_t num_arrays = h[22];
+    uint32_t off = 23, end = (uint32_t)(hvcc->size - 8u);
+    priv->sps_pps_len = 0;                                       /* همان بافر Annex-B */
+    for (uint32_t a = 0; a < num_arrays; a++)
+    {
+        uint8_t ah[3];
+        if (off + 3u > end || video_read_at(&v->file, hvcc->data + off, ah, 3) != FM_OK)
+            return FM_ERR_CORRUPTED;
+        uint32_t nals = video_be16(ah + 1); off += 3u;
+        for (uint32_t n = 0; n < nals; n++)
+        {
+            uint8_t lb[2];
+            if (off + 2u > end || video_read_at(&v->file, hvcc->data + off, lb, 2) != FM_OK)
+                return FM_ERR_CORRUPTED;
+            uint32_t nlen = video_be16(lb); off += 2u;
+            if (!nlen || off + nlen > end ||
+                priv->sps_pps_len + 4u + nlen > sizeof(priv->sps_pps)) return FM_ERR_CORRUPTED;
+            memcpy(priv->sps_pps + priv->sps_pps_len, "\0\0\0\1", 4);
+            priv->sps_pps_len += 4u;
+            if (video_read_at(&v->file, hvcc->data + off,
+                              priv->sps_pps + priv->sps_pps_len, nlen) != FM_OK)
+                return FM_ERR_CORRUPTED;
+            priv->sps_pps_len += nlen; off += nlen;
+        }
+    }
+    return FM_OK;
+}
+```
+و در `Video_ReadFrame` برای `FM_VIDEO_CODEC_HEVC` همان مسیر `priv->avc1` (پیشوند SPS/PPS + تبدیل طول‌دار → Annex-B با `hvc_len_size`) اجرا شود. `SPSPPS_MAX` فعلی ۵۱۲ بایت است؛ برای HEVC باید بزرگ‌تر شود (VPS+SPS+PPS می‌تواند > ۵۱۲ باشد) — مثلاً ۱۰۲۴ و بررسی سرریز در بالا دیده شده است.
+
+---
+
+## V11 — HW decoder abstraction: فقط تا `MPEG4` (بالا)
+
+**Describe.** قید کار «H264/H265 internal HW else SW» است. اما:
+
+* `fm_hw.c:14-17`: `codec_valid()` فقط `RAW..MPEG4` را می‌پذیرد؛ `FM_VIDEO_CODEC_HEVC=6, VP8=7, VP9=8, AV1=9, THEORA=10` بیرون‌اند. آرایه `g_hw[FM_VIDEO_CODEC_MPEG4 + 1]` هم فقط ۵ خانه دارد.
+* `Video_DecodeFrame` (`2591-2630`) پس از HW فقط برای `H264` و `MJPEG` فالبک SW دارد؛ برای بقیه `FM_ERR_UNSUPPORTED` برمی‌گرداند.
+
+**تأیید عددی:**
+```
+register H264 (3) -> 0        (OK)
+register HEVC (6) -> -1       (INVALID_ARGUMENT)
+register VP9  (8) -> -1
+register AV1  (9) -> -1
+HWDecoder_Get(HEVC) = (nil)   ← حتی اگر ثبت هم شود، هرگز پیدا نمی‌شود
+```
+یعنی **HEVC هرگز HW نمی‌شود** و هیچ مسیر SW هم ندارد — دقیقاً نقض قید «H265 internal HW else SW».
+
+**Proposed fix:**
+```c
+/* fm_hw.c */
+static const FM_VideoCodecOps *g_hw[FM_VIDEO_CODEC_COUNT];   /* ← آرایه با اندازهٔ کامل */
+
+static FM_Bool codec_valid(FM_VideoCodec codec)
+{
+    return (codec > FM_VIDEO_CODEC_UNKNOWN && codec < FM_VIDEO_CODEC_COUNT);
+}
+
+/* fm_video.c — انتخاب صریح: HW اول، بعد SW، و در نهایت خطای گویا */
+static const FM_VideoCodecOps *video_pick_codec(FM_VideoCodec c)
+{
+    const FM_VideoCodecOps *hw = HWDecoder_Get(c);
+    if (hw != NULL) return hw;                       /* H264/H265 HW */
+#if FM_USE_H264
+    if (c == FM_VIDEO_CODEC_H264) return H264_GetCodecOps();
+#endif
+#if FM_USE_MJPEG
+    if (c == FM_VIDEO_CODEC_MJPEG) return MJPEG_GetCodecOps();
+#endif
+    return NULL;                                     /* HEVC/VPx/AV1 → HW لازم */
+}
+```
+و در `Video_DecodeFrame` وقتی `video_pick_codec()` نال بود، به‌جای `FM_ERR_UNSUPPORTED` یک `FM_ERR_LOG` یک‌باره بزنید («HEVC needs HWDecoder_Register»). در `fm_video.h` هم `FM_VIDEO_CODEC_COUNT` به enum اضافه شود تا اندازهٔ آرایه همیشه هم‌گام بماند.
+
+---
+
+## V12 — YUV420→RGB888: crop (`left`/`top`) نادیده گرفته می‌شود (بالا)
+
+**Describe.** `h264bsdCroppingParams` سه‌گانهٔ `left/top/width/height` می‌دهد. کد فعلی فقط `cw/ch` را می‌گیرد و `left`/`top` را دور می‌ریزد، بعد از `Y[0]` شروع می‌کند:
+
+```c
+/* fm_h264.c:441-450 */
+if (!crop_flag) { cw = buf_w; ch = buf_h; }
+...
+yuv420_to_rgb888(pic, buf_w, buf_h, cw, ch, (uint8_t *)frame_out);  /* left/top گم */
+```
+برای هر streaم با `frame_cropping_flag==1` (تقریباً همهٔ ۱۹۲۰×۱۰۸۰ که بافر ۱۹۲۰×۱۰۸۸ است، و خیلی از ۴۸۰/۵۷۶) نتیجه: **۴ تا ۸ پیکسل جابه‌جایی + ۲ خط سبز/فتیله در پایین و راست**.
+
+ضمناً `simple_video.h` در مسیر HW-JPEG یک `sw_convert(..., s.crop...)` دارد که از `FM_Image` می‌آید و *معنای متفاوتی* برای crop دارد؛ اگر همان مقدار به دیکودر H.264 هم داده شود، دو نوع crop قاطی می‌شوند.
+
+**Proposed fix:**
+```c
+/* fm_h264.c */
+static void yuv420_to_rgb888_crop(const uint8_t *yuv, uint32_t w, uint32_t h,
+                                  uint32_t left, uint32_t top,
+                                  uint32_t cw, uint32_t ch, uint8_t *rgb)
+{
+    const uint8_t *Y = yuv;
+    const uint8_t *U = yuv + (size_t)w * h;
+    const uint8_t *V = yuv + (size_t)w * h + ((size_t)w * h) / 4u;
+
+    for (uint32_t y = 0; y < ch; y++)
+    {
+        const uint32_t sy = top + y;
+        for (uint32_t x = 0; x < cw; x++)
+        {
+            const uint32_t sx = left + x;
+            const int yy = Y[(size_t)sy * w + sx];
+            const int uu = U[(size_t)(sy / 2u) * (w / 2u) + (sx / 2u)] - 128;
+            const int vv = V[(size_t)(sy / 2u) * (w / 2u) + (sx / 2u)] - 128;
+            /* ... همان ضرایب فعلی ... */
+            uint8_t *p = rgb + ((size_t)y * cw + x) * 3u;
+            p[0] = (uint8_t)clamp8(yy + ((359 * vv) >> 8));
+            p[1] = (uint8_t)clamp8(yy - ((88 * uu + 183 * vv) >> 8));
+            p[2] = (uint8_t)clamp8(yy + ((454 * uu) >> 8));
+        }
+    }
+}
+...
+h264bsdCroppingParams(h->storage, &crop_flag, &left, &cw, &top, &ch);
+if (!crop_flag) { left = top = 0u; cw = buf_w; ch = buf_h; }
+if (left + cw > buf_w || top + ch > buf_h) { left = top = 0u; cw = buf_w; ch = buf_h; }
+if ((uint64_t)cw * ch * 3u > frame_cap) return FM_ERR_TOO_LARGE;
+yuv420_to_rgb888_crop(pic, buf_w, buf_h, left, top, cw, ch, (uint8_t *)frame_out);
+```
+**نکتهٔ مهم:** خروجی دیگر `info.width/height` (از کانتینر) نیست، بلکه `cw/ch` است. باید `v->info.width = cw; v->info.height = ch;` پس از اولین دیکود به‌روز شود، وگرنه `Video_DecodeFrameAs/Scaled` با ابعاد کانتینر (مثلاً ۱۹۲۰×۱۰۸۰) روی بافر `cw×ch` کپی می‌کند. پیشنهاد: در `h264_decode` یک `out_w/out_h` در `H264Ctx` نگه دارید و از `Video_DecodeFrame` بعد از `decode_frame` بخوانید (نیاز به یک `get_frame_size` اختیاری در `FM_VideoCodecOps` — بک‌ورد-کامپتیبل با `NULL`).
+
+**همچنین:** کل این تبدیل ~۳ میلی‌ثانیه در ۳۲۰×۲۴۰ و ~۵۰ میلی‌ثانیه در ۷۲۰×۴۸۰ روی H7 است (دو ضرب + clamp برای هر پیکسل). برای «HW path» پیشنهاد: اگر `HWDecoder_Register(H264/DMA2D-YCbCr)` موجود باشد، همان مسیر مستقیم YCbCr→RGB565 را استفاده کنید (`examples/dma2d_ycbcr.h`) تا کپی/تبدیل نرم‌افزاری حذف شود. ضمناً تبدیل فعلی **full-range BT.601** فرض می‌کند؛ برای ویدئوی `video_full_range_flag=0` (محدودهٔ ۱۶..۲۳۵) رنگ‌ها washed-out می‌شوند. `h264bsdVideoRange()` و `h264bsdMatrixCoefficients()` موجود است:
+```c
+const FM_Bool full = h264bsdVideoRange(h->storage) ? FM_TRUE : FM_FALSE;
+/* limited range: Y' = (Y-16)*255/219 , C' = (C-128)*255/224 */
+```
+
+---
+
+## V13 — `Video_ReadAudioFrame`: `init/close` و `FM_Alloc` برای هر پکت (بالا)
+
+**Describe.** در `fm_video.c:3157-3178` برای *هر* پکت صوتی، `ops->init(&ctx, &ai)` صدا زده می‌شود و در پایان هر مسیر `ops->close(ctx)`. برای FLAC/Vorbis/Opus این یعنی بازسازی کامل وضعیت دیکودر.
+
+**اثر:** در ۴۳ فریم/ثانیه (۲۲ کیلوهرتز) → ۴۳ `init/close` و ۴۳ جفت `FM_Alloc/FM_Free` در ثانیه روی heap آدرس‌پذیر SDRAM؛ روی مسیر I2S با بودجهٔ ۱۸۶ میلی‌ثانیه، هر بار تکه‌تکه‌شدن heap و (در بدترین حالت) `NO_MEMORY` زودگذر.
+
+**نکتهٔ مثبت (هشدار):** برای **Opus** نگه‌داشتن context بین پکت‌ها *الزامی* است (حالت داخلی + FEC/PLC) — نسخهٔ فعلی عملاً Opus را هم بی‌صدا می‌کند.
+
+**Proposed fix (reuse decoder ctx/ops):**
+```c
+typedef struct {
+    const FM_AudioDecoderOps *ops;   /* مالک: جدول رجیستری (نپاکید) */
+    void   *ctx;
+} FM_VideoAudioDec;
+
+/* در FM_VideoPriv */
+FM_VideoAudioDec adec;
+
+/* در open/close ویدیو */
+static void video_audio_dec_close(FM_VideoPriv *p)
+{
+    if (p->adec.ctx && p->adec.ops && p->adec.ops->close)
+        p->adec.ops->close(p->adec.ctx);
+    p->adec.ctx = NULL; p->adec.ops = NULL;
+}
+
+static FM_Result video_audio_dec_get(FM_Video *v, const char *tag)
+{
+    FM_VideoPriv *p = (FM_VideoPriv *)v->priv;
+    if (p->adec.ops && strcmp(p->adec.ops->name, tag) == 0) return FM_OK;  /* reuse */
+    video_audio_dec_close(p);
+    const FM_AudioDecoderOps *ops = Audio_GetDecoder(tag);
+    if (!ops || !ops->decode) return FM_ERR_UNSUPPORTED;
+    FM_AudioInfo ai = {0};
+    ai.sample_rate = p->audio_rate ? p->audio_rate : 44100u;
+    ai.channels    = p->audio_channels ? p->audio_channels : 2u;
+    ai.bits_per_sample = 16u;
+    (void)strncpy(ai.codec, tag, sizeof(ai.codec) - 1u);
+    if (ops->init && ops->init(&p->adec.ctx, &ai) != FM_OK) return FM_ERR_NO_MEMORY;
+    p->adec.ops = ops;
+    return FM_OK;
+}
+```
+سپس در `Video_ReadAudioFrame` به‌جای `ops->init`/`ops->close` از `p->adec.ctx` استفاده کنید و آن را فقط در `Video_Close` و `Video_SeekAudio` (برای پرشِ ناپیوسته) ببندید. `audio_part_off/left` هم همان‌طور می‌ماند.
+
+---
+
+## V14 — هستهٔ آدیو در `fm_video.c` بی‌صدا، و کشف دیکودرها به اپ بستگی دارد (بالا)
+
+**Describe.** `Video_ReadAudioFrame` برای AAC/FLAC/OPUS/VORBIS تنها از `Audio_GetDecoder(tag)` استفاده می‌کند (`3155`). اگر دیکودر ثبت نشده باشد، مسیر به «AAC with ADTS» یا «raw bytes» می‌افتد و برای FLAC/Vorbis/Opus صدای **نویز** یا سکوت تحویل می‌دهد. `FileManager_Init()` فقط `FM_Flac_Init/FM_Vorbis_Init/FM_Opus_Init` را صدا می‌زند و **هیچ دیکودر AAC** ثبت نمی‌شود.
+
+**تأیید عددی (`Audio_GetDecoder` بعد از `FileManager_Init`):**
+```
+Audio_GetDecoder("AAC")    = (null)
+Audio_GetDecoder("FLAC")   = (null)      ← چون FM_USE_FLAC=0 در بیلد تست
+Audio_GetDecoder("OPUS")   = (null)
+Audio_GetDecoder("VORBIS") = (null)
+```
+یعنی خروجی `Video_ReadAudioFrame` برای MP4-AAC/MKV-Vorbis در بیلدهایی که این flagها خاموش‌اند، قابل پخش نیست؛ و برای AAC **در هیچ بیلدی** دیکودر پیش‌فرض وجود ندارد.
+
+**Proposed fix:**
+1. `Video_HasAudio`/`GetAudioInfo` یک `decodable` اضافه کنند: `Audio_GetDecoder(tag) != NULL`.
+2. در `Video_Open` یک `FM_ERR_LOG` یک‌باره: «audio codec AAC present but no decoder registered — call Audio_RegisterDecoder("AAC", …)».
+3. یا یک دیکودر AAC پیش‌فرض کوچک (مثلاً `helix`/`faad` مینی) پشت `FM_USE_AAC` اضافه شود؛ یا مستندسازی صریح در `fm_video.h` که AAC فقط demux می‌شود.
+4. برای سازگاری با `simple_video.h`، پرچم `audio_pcm` را از همان ابتدا بر اساس وجود دیکودر ست کنید (الان در بعضی مسیرها با تلاش/خطا کشف می‌شود).
+
+---
+
+## V15 — `FM_USE_VIDEO == 0`: `simple_video.h` کامپایل نمی‌شود و ۸۰۰ KB استاتیک دارد (بالا)
+
+**Describe.** `examples/simple_video.h` (که `board/defines.h:43` آن را include می‌کند) هیچ `#if FM_USE_VIDEO` ندارد (`grep -c FM_USE_VIDEO examples/simple_video.h` = ۰). دو اثر:
+
+**(الف) شکست کامپایل.** با `FM_USE_VIDEO=0`، `fm_config.h:158-164` مقدار `FM_USE_H264` را ۰ می‌کند، پس `fm_h264.h` عمداً `FM_H264Diag`/`H264_GetLastError` را تعریف نمی‌کند؛ اما `simple_video.h` بدون گارد از آن استفاده می‌کند:
+```
+examples/simple_video.h:2233:19: error: unknown type name 'FM_H264Diag'
+examples/simple_video.h:2241:18: error: request for member 'alloc_failures' in ...
+examples/simple_video.h:2248:40: error: request for member 'alloc_failures' in ...
+examples/simple_video.h:2258:40: error: request for member 'activate_fail' in ...
+```
+(اثبات با `gcc -DFM_USE_VIDEO=0 -Iinclude -Iexamples -c test/video_hooks_test.c`.)
+
+**(ب) حافظهٔ استاتیک وقتی ویدئو خاموش است.** در `simple_video.h:499-503`:
+```c
+static uint8_t sv_rgb  [MAX_W * MAX_H * 3];   /* 1000x1000 → 3,000,000 B */
+static uint8_t sv_frame[2][MAX_W * MAX_H * 4];/* 1000x1000 → 8,000,000 B */
+```
+با مقادیر پیش‌فرضِ `fm_board_config.h:379-383` (`SIMPLE_VIDEO_MAX_W/H = 1000`) این ۱۱ مگابایت است. اندازه‌گیری از باینری واقعی (`make videohooks`, سیمبل‌ها):
+```
+g_video : 0x811A0   =   528,800 B   ← جدول FM_VideoPriv ثابت (حتی با FM_USE_VIDEO=0 در سورس)
+sv_rgb  : 0x2DC6C0  = 3,000,000 B
+sv_frame: 0x7A1200  = 8,000,000 B
+جمع ≈ 11.5 MB  (بخش .sdram_buffers)
+```
+یعنی وقتی `FM_USE_VIDEO==0` **هیچ‌کدام از این‌ها نباید ساخته شوند** — قید سخت نقض می‌شود. (فقط `fm_video.c` در این حالت صفر بایت BSS می‌دهد: `size /tmp/video_off.o` → `text 0 data 0 bss 0`؛ یعنی خودِ فایل درست گارد شده، مشکل در هدر مثال و در کدهای جانبی است.)
+
+**Proposed fix:**
+```c
+/* بالای examples/simple_video.h، بعد از include ها */
+#include "fm_config.h"
+#if !FM_USE_VIDEO
+/* وقتی ویدئو خاموش است، هیچ بافر/استاتیک ویدئویی نباید وجود داشته باشد. */
+#define SimpleVideo_Begin(...)            (FM_ERR_UNSUPPORTED)
+#define SimpleVideo_Stop(...)             (FM_ERR_UNSUPPORTED)
+#define SimpleVideo_Poll(...)             (FM_ERR_UNSUPPORTED)
+/* ... بقیهٔ استاب‌های inline با همان امضا ... */
+#else
+/* کل بدنهٔ فعلی، شامل sv_rgb/sv_frame و بلوک H264Diag */
+#endif
+```
+و در `board/defines.h` هم `#include "simple_video.h"` را داخل `#if FM_USE_VIDEO` ببرید. برای `sv_*` هم اگر تنها «نمایش» لازم است و نه ویدئو، ابعاد را از `FM_BUF_SCALE` بگیرید نه ۱۰۰۰×۱۰۰۰.
+
+---
+
+## V16 — `FM_USE_VIDEO == 0`: `fm_video.c` هیچ نمادی صادر نمی‌کند (بالا)
+
+**Describe.** کل فایل زیر `#if FM_USE_VIDEO` است (`34`..`3736`). در بیلد host با `FM_USE_VIDEO=0` هیچ نمادی (نه استاب) تولید نمی‌شود:
+```
+gcc -DFM_USE_VIDEO=0 -c src/fm_video.c  →  size: text 0 data 0 bss 0 ; nm: 0 symbols
+```
+سایر TUها (`fm_player.c:255/318/375/380/400`، `fm_video.h` عمومی) بدون گارد به `Video_Open/Video_Close/Video_GetInfo/Video_DecodeFrame/Video_Seek/...` ارجاع می‌دهند؛ هر برنامه‌ای که `fm_video.h` را include کند و از استاب استفاده نکند، لینک نمی‌شود. (فقط `fm_player.c` خودش با `#if FM_USE_VIDEO` گارد شده.)
+
+**Proposed fix:** یک بلوک `#else` در انتهای `fm_video.c` با استاب‌های «کم‌هزینه و بدون حافظه»:
+```c
+#else  /* !FM_USE_VIDEO */
+/* هیچ بافر/استاتیکی در این حالت وجود ندارد. */
+FM_Result Video_Open(const char *p, FM_Video *v) { (void)p; (void)v; return FM_ERR_UNSUPPORTED; }
+FM_Result Video_Close(FM_Video *v) { (void)v; return FM_ERR_NOT_OPEN; }
+FM_Result Video_GetInfo(const FM_Video *v, FM_VideoInfo *i) { (void)v; (void)i; return FM_ERR_UNSUPPORTED; }
+FM_Result Video_ReadFrame(FM_Video *v, void *b, size_t c, size_t *s)
+{ (void)v; (void)b; (void)c; if (s) *s = 0; return FM_ERR_UNSUPPORTED; }
+FM_Result Video_DecodeFrame(FM_Video *v, void *p, size_t c) { (void)v;(void)p;(void)c; return FM_ERR_UNSUPPORTED; }
+/* ... بقیه، همه const/بدون وضعیت ... */
+#endif /* FM_USE_VIDEO */
+```
+و در `fm_video.h` هم کل اعلان‌ها را بی‌گارد نگه دارید (همین الان هم بی‌گارد است) تا امضاها ثابت بمانند.
+
+---
+
+## V17 — `FM_EVENT_LOG` با فیلدهای ناموجود → شکست کامپایل با `FM_DEBUG_LEVEL >= 2` (متوسط)
+
+**Describe.** `fm_video.c:2336-2338`:
+```c
+FM_EVENT_LOG("opened %s (%ux%u, %.1f fps, %u frames)", path,
+             (unsigned)v->width, (unsigned)v->height,
+             (double)v->fps, (unsigned)v->frame_count);
+```
+`FM_Video` هیچ فیلد `width/height/fps/frame_count` ندارد (همه در `v->info` هستند). با پیش‌فرض `FM_DEBUG_LEVEL=1` (`fm_board_config.h:248`) ماکرو به `((void)0)` تبدیل می‌شود و خطا پنهان می‌ماند.
+
+**تأیید (کامپایلر):**
+```
+$ gcc -DFM_DEBUG_LEVEL=2 -c src/fm_video.c
+src/fm_video.c:2337:33: error: 'FM_Video' has no member named 'width'
+src/fm_video.c:2337:53: error: 'FM_Video' has no member named 'height'
+src/fm_video.c:2338:31: error: 'FM_Video' has no member named 'fps'
+```
+**Proposed fix:** `v->info.width, v->info.height, (double)v->info.fps, v->info.frame_count` — و در CI یک job با `FM_DEBUG_LEVEL=3` (تا همهٔ ماکروها باز شوند) اضافه کنید؛ این کلاس باگ (پنهان‌شدن کدِ لاگِ خراب پشت `((void)0)`) در سایر مقصدها هم دیده می‌شود.
+
+---
+
+## V18 — `h264_decode_attempt`: هر خطای ترمیم‌نشده = «فریم خراب» (متوسط)
+
+**Describe.** هنگام `H264BSD_ERROR`، بایت‌ها تا start-code بعدی رد می‌شوند؛ اگر `k + 2 >= len` شد، **بدون هیچ فریم تولیدشده** `FM_ERR_INVALID_FORMAT` برمی‌گردد (`fm_h264.c:500-533`). این حالت برای «NAL دنباله (AUD/SEI) در انتهای فریم» یا «پکت بریده‌شده در EOF» طبیعی است.
+
+**اثر مخرب:** `h264_decode()` این خطا را «زنجیرهٔ مرجع شکسته» تفسیر می‌کند → `bad_run++` → **ریست دیکودر + پخش مجدد keyframe** (`h264_reset_decoder` + `FM_Alloc` مجدد DPB). یعنی در یک کلیپ سالم می‌توانید هر چند فریم یک بار، دیکودر را کامل خراب/بازسازی کنید؛ روی H7 این ~۱۰۰ میلی‌ثانیه است و دقیقاً همان «stutter دوره‌ای» است که در `docs/REGRESSION_AUDIO_STUTTER.md` به گردن SD/SPI انداخته شده بود.
+
+**Proposed fix:** تفکیک «خطای سوختگی» از «بدون تصویر»:
+```c
+enum { H264_OUT_PIC = 0, H264_OUT_NO_PIC, H264_OUT_ERROR };
+static int h264_decode_attempt(..., uint32_t *out_status);
+...
+    if (k + 2 >= len)
+    {
+        /* NAL ناقص/دنبالهٔ پایان فریم: اگر تا اینجا تصویری تولید شده،
+         * این خطا را نادیده بگیر؛ وگرنه NO_PIC (نه ERROR). */
+        *out_status = any_pic ? H264_OUT_NO_PIC : H264_OUT_ERROR;
+        return (*out_status == H264_OUT_NO_PIC) ? FM_OK : FM_ERR_INVALID_FORMAT;
+    }
+```
+و در `h264_decode` فقط `H264_OUT_ERROR` باعث `bad_run++/reset` شود؛ `NO_PIC` فقط `FM_ERR_EOF`-مانند گزارش شود.
+
+---
+
+## V19 — MKV audio: index/streaming ناسازگار و CodecPrivate ۵۱۲ بایتی (متوسط)
+
+**Describe.**
+1. `FM_VIDEO_MAX_FRAMES` هم برای **فریم ویدئو** و هم برای **پکت صوتی** استفاده می‌شود (`priv->frames[]` و `priv->audio_frames[]`). در MKV، پکت‌های صوتی چند برابر ویدئو هستند، پس برای یک کلیپ ۲ دقیقه‌ای، ایندکس صدا در ~۲۵ ثانیه پر می‌شود. مسیر «streaming continuation» فقط برای AVI نوشته شده (`avi_audio`, `audio_scan_pos`)، پس MKV/MP4 بعد از پر شدن ایندکس **بی‌صدا** می‌شوند (`v->audio_frame_index >= priv->audio_count` → `FM_ERR_EOF`).
+2. `priv->audio_private[512]` برای MKV CodecPrivate. `A_VORBIS` در MKV سه هدر Xiph است و setup header می‌تواند > ۵۱۲ باشد → `mkv_priv_sz <= sizeof(...)` شرط است و در غیر این صورت **بی‌صدا** رد می‌شود؛ در MP4 امضای `dfLa` هم می‌تواند بزرگ باشد.
+3. `mkv_read_string` (`1825-1830`) با `sz >= cap` صرفاً برش می‌زند؛ `"V_MPEGH/ISO/HEVC"` داخل ۶۴ بایت جا می‌شود ولی `A_MS/ACM` با پارامترهای طولانی نه.
+
+**Proposed fix:**
+* یک آرایهٔ index جدا برای صدا با سقف مستقل (`FM_VIDEO_MAX_AUDIO_FRAMES`) یا اسکن مبتنی بر «آفست پکت + طول» با `cluster_idx` و `block_idx` به‌جای جدول کامل (چون MKV/Cues آفست کلاستر می‌دهد).
+* `audio_private` را بزرگ‌تر و قابل‌تنظیم کنید (`FM_VIDEO_AUDIO_PRIVATE_MAX`, پیش‌فرض ۴۰۹۶) و در صورت کمبود، CodecPrivate را با `FM_Alloc` نگه دارید.
+* در `Video_GetAudioInfo`، `sample_count` را از `audio_total` (که در MKV هرگز پر نمی‌شود!) یا از `DefaultDuration` و تعداد پکت‌ها محاسبه کنید.
+
+---
+
+## V20 — `Video_DecodeFrame`: alloc در مسیر داغ + گارد نبودن `pixels_cap` (متوسط/پایین)
+
+**Describe.**
+1. `2660`: برای هر فریم `FM_Alloc(cap)` و `FM_Free` — در ۳۰ fps یعنی ۶۰ فراخوانی تخصیص‌دهنده در ثانیه روی SDRAM (درست همان‌جایی که `simple_video` دنبال بودجهٔ ۶۶ میلی‌ثانیه است). `Video_DecodeFrameScaled` هم `2844` یک `FM_Alloc(native)` برای هر فریم دارد.
+2. `2660` `pixels_cap` را بررسی نمی‌کند؛ فقط پلاگین بررسی می‌کند (`fm_h264.c:446`). یک پلاگین HW سفارشی می‌تواند سرریز کند. برای مسیر `RAW` هم (`2681`) `Video_ReadFrame(..., pixels_cap, ...)` بررسی می‌کند، خوب است.
+
+**Proposed fix:**
+```c
+/* بافر صحنه (scratch) به‌اندازهٔ بزرگ‌ترین فریم، یک‌بار در Open یا به‌صورت lazy */
+if (priv->scratch == NULL || priv->scratch_cap < cap) { /* realloc با سقف */ }
+/* و گارد صریح قبل از فراخوانی پلاگین */
+if ((uint64_t)v->info.width * v->info.height * 3u > pixels_cap) return FM_ERR_TOO_LARGE;
+```
+(با توجه به V12 که `cw/ch` ممکن است کمتر از `info` باشند، این گارد باید بعد از به‌روزرسانی ابعاد اعمال شود.)
+
+---
+
+## تست‌های تأییدیه (Verification tests)
+
+همهٔ تست‌ها بدون تغییر سورس، با کپی در `/tmp` و **ASAN+UBSAN** اجرا شدند. نمونهٔ دستور ساخت:
+```bash
+gcc -std=c99 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+    -D_GNU_SOURCE -DFM_HOST_BUILD=1 -DFM_USE_VIDEO=1 -DFM_USE_H264=1 \
+    -DFM_USE_IMAGE=1 -DFM_USE_AUDIO=1 -DFM_USE_MP3=1 -DFM_USE_JPEG=1 -DFM_USE_PNG=1 \
+    -DFM_USE_CRC=1 -DFM_USE_STREAM=1 -DFM_DEBUG_LEVEL=0 \
+    -Iinclude -Ibackends -Isrc -Ithird_party/h264bsd/src -Ithird_party/stb -Ithird_party/dr_flac \
+    <harness>.c <lib objs> -lm
+```
+
+| تست | ورودی ساختگی | انتظار پس از اصلاح | وضعیت فعلی |
+|---|---|---|---|
+| T1 · `test_ebml_longsize` | EBML با Size ۵ بایتی | `FM_OK` یا `CORRUPTED` **بدون** OOB | `UBSAN: index 8 out of bounds for 'uint8_t[8]'` در `fm_video.c:1819` ❌ |
+| T2 · MKV معتبر (جدول V1) | Track+Video+Audio نرمال | `count=4`, `audio=2`, `rate=44100` | `count=1, audio=0` ❌ |
+| T3 · MKV با `SamplingFrequency` float64 | ۸ بایت IEEE | `rate=44100` | `arate=0.0` ❌ |
+| T4 · MKV با `PixelWidth` ۸ بایتی | fixnum > ۴ بایت | `320` | ASAN `stack-buffer-overflow` (حلقهٔ `k<vsz`) ❌ |
+| T5 · MKV xiph/fixed/ebml lacing | `csz=68, hlen=4` | ۴ فریم | ۱ فریم (V1+V5) ❌ |
+| T6 · AVI `strf` = {16, 18, 40} | PCM 44.1k/2ch | هر سه: `rate=44100, ch=2, bits=16` | OK ✅ (با پد) / بدون پد → `CORRUPTED` ❌ |
+| T7 · AVI BITMAPCOREHEADER | `biSize=12` | `320x240, codec=MJPEG از avih` | `320x240` ولی `codec` از مسیر اشتباه ⚠️ |
+| T8 · AVI RIFF size = 0x7FFFFFFF | فایل ۲۴ بایتی | رد سریع | پیمایش طولانی/`CORRUPTED` ⚠️ |
+| T9 · `HWDecoder_Register` برای همهٔ کدک‌ها | enum 0..10 | همه `FM_OK` | فقط `RAW..MPEG4`؛ HEVC/VP9/AV1 = `-1` ❌ |
+| T10 · `Audio_GetDecoder` | AAC/FLAC/OPUS/VORBIS | غیر-`NULL` | همه `(null)` ❌ |
+| T11 · کامپایل با `FM_DEBUG_LEVEL=2` | — | بدون خطا | ۴ خطای فیلد ناموجود ❌ |
+| T12 · کامپایل با `FM_USE_VIDEO=0` | `video_hooks_test.c` | بدون خطا | ۴ خطای `FM_H264Diag` ❌ |
+| T13 · `size`/`nm` روی `fm_video.c` با `FM_USE_VIDEO=0` | — | استاب‌ها، BSS=0 | `bss=0` ولی **بدون استاب** (لینک می‌شکند) ❌ |
+| T14 · `size` روی `fm_videohooks` | — | بدون `sv_rgb/sv_frame` | ۱۱٫۵ MB استاتیک ❌ |
+
+**پیشنهاد افزودن به `test/main.c` (پس از اصلاح):**
+1. `test_ebml_*` با فایل‌های ساختگی (بالا) — پوشش `slen>4`, `ilen==1`, unknown-size.
+2. `test_mkv_lacing_{xiph,fixed,ebml}` — شمارش فریم و مجموع بایت.
+3. `test_mp4_avcc_len_size_{1,2,4}` — با `lengthSizeMinusOne` متفاوت و بررسی خروجی Annex-B.
+4. `test_mp4_hvcc` — وجود `VPS/SPS/PPS` در پیشوند فریم.
+5. `test_hw_register_all_codecs` + `HWDecoder_Get` برای هر enum.
+6. `test_video_audiodec_reuse` — شمارندهٔ `init/close` باید ۱ باشد، نه N.
+7. `make asan` موجود را به `check` اضافه کنید با `FM_USE_VIDEO=0` هم (پوشش V15/V16).
+
+**اجرای ASAN/UBSAN روی مسیرهای عددی (نمونهٔ خروجی واقعی):**
+```
+$ ASAN_OPTIONS=detect_leaks=0 ./h1 1
+[EBML long size]
+src/fm_video.c:1819:52: runtime error: index 8 out of bounds for type 'uint8_t [8]'
+```
+```
+$ ASAN_OPTIONS=detect_leaks=0 ./mkvtest
+baseline (uint rate, 1-byte track, no lace) -> invalid format
+sampling rate as IEEE float64 (spec)       -> invalid format
+```
+```
+$ ./hwtest
+register H264 (3)  -> 0
+register HEVC (6)  -> -1
+register VP9  (8)  -> -1
+register AV1  (9)  -> -1
+```
+```
+$ ASAN_OPTIONS=detect_leaks=0 ./avitest
+strf_len=40 -> Open OK   audio=OK rate=44100 ch=2 bits=16
+strf_len=18 -> Open OK   audio=OK rate=44100 ch=2 bits=16
+strf_len=16 -> Open OK   audio=OK rate=44100 ch=2 bits=16
+```
+
+**پیشنهاد حالت‌های `check` در Makefile (بدون تغییر رفتار پیش‌فرض):**
+```make
+asan-video-off:
+	$(CC) -fsanitize=address,undefined -DFM_USE_VIDEO=0 ... \
+	      test/video_hooks_test.c $(LIBS) -lm -o fm_videohooks_off && ./fm_videohooks_off
+debuglevel3:
+	$(CC) -DFM_DEBUG_LEVEL=3 ...  # همهٔ ماکروهای لاگ باز شوند
+```
+
+---
+
+## ترتیب پیشنهادی رفع (impact / هزینه)
+
+1. **V1 + V2 + V5** — یک بازنویسی کوچک در `ebml_read` + گارد `hlen`: کل MKV را از «غیرقابل‌پخش» به «قابل‌پخش» می‌برد و ASAN/UBSAN را پاک می‌کند.
+2. **V11 + V12** — قید اصلی «HW else SW» و صحت تصویر؛ بدون این دو، H.265 هرگز کار نمی‌کند و H.264 crop دار جابه‌جا می‌شود.
+3. **V15 + V16 + V17** — `FM_USE_VIDEO=0` را واقعاً «صفر حافظه» و قابل کامپایل/لینک می‌کند.
+4. **V3 + V4 + V9 + V10** — صحت demux برای فایل‌های واقعی (نرخ صدا، طول NAL، HEVC config).
+5. **V13 + V14 + V19** — پایداری مسیر صوتی realtime.
+6. **V6 + V7 + V8 + V18 + V20** — مقاوم‌سازی و کارایی.
+
+> اگر `Report.txt` اصلی را بفرستید، همین موارد را با شماره‌های آن گزارش تطبیق می‌دهم و هر باگِ اضافه‌ای که آن فایل فهرست کرده و این‌جا پوشش داده نشده را اضافه می‌کنم. همچنین اگر اجازهٔ اعمال تغییر بدهید، می‌توانم فقط برای V1/V2/V11/V15/V17 پچ‌های مستقل و قابل‌بازبینی بسازم (هر کدام یک کامیت جدا + تست تأییدیه).
+
+
+
+
+
+
+
+                             # DIAGNOSE — File / Storage / Transfer
+
+**Repository:** `hamid-enf/Clain_Filemanagaer` · branch `arena/cd25b973-clain-filemanagaer`
+**Base commit:** `2edf567` ("Fix remaining Audio bugs …")
+**Scope:** VFS layer, copy/move/delete semantics, buffer management in transfer
+**Mode:** report only — **no source file in this repo was modified** (see §0.3)
+
+Traced surfaces (identical in the tracked tree and in `Clain_FileManager.zip`; checked with `md5sum`):
+
+| file | lines | role |
+|---|---|---|
+| `Clain_FileManager/FileManager_lib/src/fm_file.c` | 1722 | VFS front end, handle pool, copy/move/edit, read cache |
+| `Clain_FileManager/FileManager_lib/src/fm_transfer.c` | 483 | `FM_Transfer_*` (file level + raw level) |
+| `Clain_FileManager/FileManager_lib/src/fm_filesystem.c`¹ | 17 089 B | `FM_VFS_Resolve`, mount table (referenced only) |
+| `Clain_FileManager/FileManager_lib/test/main.c` | 9332 | existing host suite (baseline) |
+
+¹ present in `Clain_FileManager.zip` only; the tracked tree carries a subset of the library.
+
+---
+
+## 0. Method, baseline and reproduction
+
+### 0.1 Baseline (unmodified tree)
+
+```
+$ make -j8 fm_test && ./fm_test
+Results: 211/212 passed, 1 failures          (FM_USE_CACHE=1)
+  TEST Regression: ADPCM WAV small-chunk reads keep samples ... FAIL: adpcm small chunks (err=-3)
+
+$ make -j8 fm_test FM_USE_CACHE=0 && ./fm_test
+Results: 205/206 passed, 1 failures          (same single audio failure)
+
+$ make -j8 fm_test FM_USE_THREADS=1 && ./fm_test
+Results: 211/213 passed, 2 failures
+  TEST Regression: ADPCM WAV small-chunk reads keep samples ... FAIL   (pre-existing)
+  TEST Threads: concurrent registry stress  ... FAIL: concurrent access corrupted data  (pre-existing)
+```
+
+The two failures above are **pre-existing on the base commit** and outside this scope (audio;
+thread suite). They are recorded here so that any later run can distinguish them from regressions.
+
+### 0.2 Reproduction harnesses
+
+Every finding below was reproduced against the **unmodified** library with out-of-tree
+harnesses linked to `libfilemanager.a` (nothing was added to the repo). Harness sources are
+reproduced inline with each finding as *Test/A*, *Test/B*, … so they can be pasted into
+`test/main.c` (or a scratch harness) for confirmation. Reference build:
+
+```sh
+cd FileManager_lib
+make -j8 libfilemanager.a           # default: FM_USE_CACHE=1
+cc -std=gnu11 -DFM_HOST_BUILD=1 -DFM_USE_CACHE=1 -DFM_USE_POSIX=1 \
+   -DFM_USE_RAMDISK=1 -DFM_USE_FMFS=1 -Iinclude -o repro repro.c libfilemanager.a -lm
+```
+
+Full before/after matrix is in §5.
+
+### 0.3 How the proposed fixes were validated
+
+The snippets in §1–§4 were applied to a **scratch copy** of the library (`/tmp/patch1`, never
+inside the repository), rebuilt, and the harnesses re-run. Results: every finding flips to
+*clean*, and the surface suite is unchanged against baseline:
+
+```
+scratch copy + snippets :  211/212 passed, 1 failures   (same pre-existing audio failure)
+scratch copy, FM_USE_CACHE=0 : 205/206 passed, 1 failures (same)
+```
+
+The `FM_USE_*` compile/link matrix (§5.2) is green for both the unmodified and the patched
+sources, with the one pre-existing exception `FM_USE_CRC=0` (F-12).
+
+---
+
+## 1. `File_Move` — NULL check + `VFS_Resolve` error propagation
+
+### F-01 — NULL path arguments are dereferenced through the resolver
+* **File:line:** `src/fm_file.c:1470`–`1483` (`File_Move`), reached from `FM_VFS_Resolve` (`src/fm_filesystem.c:612`)
+* **Describe.** `File_Move()` has no `NULL` guard, unlike every other public entry point in the
+  file (`File_Delete` `FM_CHECK_PTR` at `:994`, `File_Copy` at `:1411`, `File_Rename`: no guard but
+  `FM_VFS_Resolve` returns `INVALID_ARGUMENT`). `FM_VFS_Resolve()` does return
+  `FM_ERR_INVALID_ARGUMENT` for `NULL`, but `File_Move` throws that away and returns
+  `FM_ERR_NOT_FOUND`.
+* **Root cause.** The first resolve is written as a boolean test with a hard-coded error:
+
+```c
+if (FM_VFS_Resolve(src_path, &m1, r1, sizeof(r1)) != FM_OK) {
+    return FM_ERR_NOT_FOUND;              /* every cause becomes NOT_FOUND */
+}
+```
+* **Observed.**
+  `File_Move(NULL, "/b")` → `-3 (not found)`; `File_Move("/nomount/x", …)` → `-3`;
+  `File_Move("/"+200 chars, …)` → `-3` while `File_Open` on the same path says
+  `-16 (too large for buffer)`; `File_Move("relative", …)` → `-3` (should be `INVALID_PATH`).
+* **Proposed fix.** Guard both arguments, and propagate `r` from *both* resolves;
+  only fall through to copy+delete when the destination really resolves.
+
+```c
+FM_Result r;
+FM_Bool dst_existed = FM_FALSE;
+
+if (src_path == NULL || dst_path == NULL) {
+    FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
+    return FM_ERR_INVALID_ARGUMENT;
+}
+r = FM_VFS_Resolve(src_path, &m1, r1, sizeof(r1));
+if (r != FM_OK) { FM_Core_SetLastError(r); return r; }      /* was: return NOT_FOUND */
+r = FM_VFS_Resolve(dst_path, &m2, r2, sizeof(r2));
+if (r != FM_OK) { FM_Core_SetLastError(r); return r; }      /* was: ignored */
+if (m1 == m2 && m1->fs->ops.rename != NULL) {
+    r = m1->fs->ops.rename(m1->fs, r1, r2);
+    FM_Core_SetLastError(r);
+    return r;
+}
+```
+* **Test/A (repro).**
+
+```c
+File_WriteText("/mv_a.txt", "0123456789");
+expect(File_Move(NULL, "/mv_b.txt", NULL, NULL)              == FM_ERR_INVALID_ARGUMENT);
+expect(File_Move("/mv_a.txt", NULL, NULL, NULL)              == FM_ERR_INVALID_ARGUMENT);
+expect(File_Move("/nomount/x.txt", "/mv_c.txt", NULL, NULL)  == FM_ERR_NOT_MOUNTED);
+expect(File_Move("/mv_a.txt", "/nomount/y.txt", NULL, NULL)  == FM_ERR_NOT_MOUNTED);
+expect(File_Move(long_path_over_FM_PATH_MAX, "/mv_b.txt", NULL, NULL) == FM_ERR_TOO_LARGE);
+expect(File_Move("relative.txt", "/mv_b.txt", NULL, NULL)    == FM_ERR_INVALID_PATH);
+```
+  Before: `-3, -1, -3, -3, -3, -3`. After: `-1, -1, -18, -18, -16, -2`.
+
+### F-02 — cross-mount rollback deletes a pre-existing destination
+* **File:line:** `src/fm_file.c:1495`–`1506`
+* **Describe.** On the copy+delete path, if the source delete fails the destination copy is
+  removed to "keep the move atomic". If the destination existed **before** the call (and was
+  overwritten by `File_Copy`), the rollback destroys the caller's data and cannot be undone:
+  the source is still present, the old destination is gone.
+* **Root cause.** Rollback without a pre-condition, plus overwrite-by-default in `File_Copy`.
+
+```c
+r = File_Delete(src_path);
+if (r != FM_OK) {
+    (void)File_Delete(dst_path); /* rollback: undo the copy */
+}
+```
+* **Observed.** Read-only source adapter (`delete_file` → `ACCESS`) + pre-existing
+  `/dst.txt = "IMPORTANT-PRE-EXISTING-DESTINATION"`: `Move → -4 (access denied)`,
+  `/dst.txt exists=0`, `/ro/src.txt still exists=1`.
+* **Proposed fix.** Record pre-existence and only remove what this call created (or refuse to
+  overwrite without an explicit flag — `FM_TransferOpts.no_overwrite` already exists at the
+  transfer layer but is not reachable from `File_Move`).
+
+```c
+(void)File_Exists(dst_path, &dst_existed);
+r = File_Copy(src_path, dst_path, progress, user_data);
+if (r != FM_OK) return r;
+r = File_Delete(src_path);
+if (r != FM_OK && !dst_existed) {
+    (void)File_Delete(dst_path);   /* only what we created */
+}
+```
+* **Test/B (repro).** Mount a `FM_FS` whose `ops.delete_file` returns `FM_ERR_ACCESS` at
+  `/ro`; `File_Move("/ro/src.txt", "/dst.txt")` where `/dst.txt` pre-exists.
+  Assert: return `FM_ERR_ACCESS`, `/ro/src.txt` exists, **`/dst.txt` unchanged**.
+
+---
+
+## 2. `File_PoolDump` — internal / external must be printed separately
+
+### F-03 — merged counter is printed as if it were the internal pool
+* **File:line:** `src/fm_file.c:410`–`448` (`File_PoolUsed`, `File_PoolDump`)
+* **Describe.** `File_PoolUsed()` returns `internal + external`, and `File_PoolDump()` prints
+  that total against `FM_MAX_OPEN_FILES` with the word *internal*, while the pool array
+  `g_pool[]` is exactly `FM_MAX_OPEN_FILES` entries. With 2 external (`File_OpenEx`) handles
+  open the header claims `3/8 internal` although only **1** of the 8 slots is used. The
+  external registry is also bounded by the same `FM_MAX_OPEN_FILES` (`:582`–`:598`) but shows
+  up under the pool's index numbering (`[x%lu]`), so the two limits cannot be told apart.
+* **Root cause.** One counter for two independent resources; the diagnostic exists precisely
+  for the `FM_ERR_NO_MEMORY (-14)` "handle leak" case (`include/fm_file.h:52`–`57`), where the
+  distinction is the evidence that identifies the leak.
+* **Observed.** `FM_MAX_OPEN_FILES=8`, 1 pool handle + 2 external handles:
+  `File_PoolUsed() = 3`, dump header `file pool: 3/8 internal`.
+* **Proposed fix.**
+
+```c
+void File_PoolDump(void)
+{
+    uint32_t i, internal = 0u, external = 0u;
+
+    for (i = 0; i < FM_MAX_OPEN_FILES; i++) {
+        if (g_pool[i].used) internal++;
+        if (g_external_files[i] != NULL && g_external_files[i]->used) external++;
+    }
+    FM_Log("file pool: %lu internal / %lu external (slots %u)",
+           (unsigned long)internal, (unsigned long)external,
+           (unsigned)FM_MAX_OPEN_FILES);
+    for (i = 0; i < FM_MAX_OPEN_FILES; i++) {
+        if (g_pool[i].used) FM_Log("  [i%lu] %s", (unsigned long)i, g_pool[i].path);
+        if (g_external_files[i] != NULL && g_external_files[i]->used)
+            FM_Log("  [x%lu] %s", (unsigned long)i, g_external_files[i]->path);
+    }
+}
+```
+  (Keep `File_PoolUsed()`'s total semantics for its documented use — "count only"; add
+  `File_PoolUsedSplit(uint32_t *internal, uint32_t *external)` if the UI needs both.)
+* **Test/C (repro).** Open 1 handle with `File_Open` and 2 with `File_OpenEx`; capture the
+  `FM_Log` sink (`FM_Log_SetSink`), call `File_PoolDump`, assert the header contains
+  `1 internal / 2 external` and that the `[i…]`/`[x…]` tags match the handle kinds.
+
+---
+
+## 3. `File_Copy` — partial destination must not survive a failure
+
+### F-04 — truncated destination left behind (and an intact one destroyed)
+* **File:line:** `src/fm_file.c:1441`–`1464`
+* **Describe.** The destination is opened with `CREATE|TRUNCATE` before the first byte is read.
+  If `FM_File_CopyStream()` or `File_Close(dst)` fails, the function returns the error but
+  leaves whatever was written (0 … n bytes) at `dst_path`. `FM_Transfer_CopyEx()`
+  (`src/fm_transfer.c:171`–`176`) does delete the incomplete copy — `File_Copy` does not, so
+  the two copy APIs disagree, and `File_Move`'s cross-mount path inherits the hole.
+  A pre-existing destination is truncated to 0 and silently replaced by a partial file.
+* **Root cause.** No cleanup/rollback after the stream; the open order also means the old
+  content is destroyed *before* it is known that the copy can succeed.
+* **Observed.** 40 000-byte source, destination side returns `FM_ERR_NO_SPACE` after 5 000
+  bytes: `File_Copy → -5 (no space left)`, `destination exists=1 size=5000`.
+* **Proposed fix.** (a) cleanup on every failure path; (b) better: copy to `dst + ".fm_tmp"`
+  (the same pattern `file_edit()` already uses at `:1536`) and `File_Rename` on success, so the
+  destination is never observed half-written and a pre-existing destination survives a failure.
+
+```c
+r = FM_File_CopyStream(src, dst, progress, user_data);
+if (r == FM_OK) { r = File_Close(dst); dst = NULL; }
+if (r != FM_OK) {
+    if (dst != NULL) (void)File_Close(dst);
+    (void)File_Close(src);
+    (void)File_Delete(dst_path);     /* no truncated destination */
+    FM_Core_SetLastError(r);
+    return r;
+}
+```
+  Minimal version shown; the temp-file + rename version is preferable and matches `file_edit`.
+* **Test/D (repro).** Mount a wrapper `FM_FS` over POSIX whose `file_write` returns
+  `FM_ERR_NO_SPACE` after N bytes; `File_Copy` a file larger than N; assert
+  `r == FM_ERR_NO_SPACE` **and** `File_Exists(dst) == FM_FALSE`; repeat with a pre-existing
+  destination and assert its old content is unchanged (temp-file variant).
+
+### F-05 — progress callback can report 100 % before the data is durable
+* **File:line:** `src/fm_file.c:1394`–`1403` (`FM_File_CopyStream`)
+* **Describe.** `progress(done, total, …)` is invoked as soon as the last chunk reaches
+  `File_Write()`; no flush has happened yet. A power loss after the 100 % callback loses the
+  tail of the file (nor flash / FATFS buffers). It is the classic "progress bar completes,
+  file is short" symptom.
+* **Root cause.** Reporting is tied to buffered writes, not to `File_Flush()`.
+* **Proposed fix.** Flush before the final report:
+
+```c
+if (r == FM_OK) { r = File_Flush(dst); }
+if (progress != NULL && r == FM_OK) { progress(done, total, user_data); }
+```
+* **Test/E.** Wrapper adapter that counts `file_flush` calls; assert one flush happens *before*
+  the last progress callback and that `done == total` only after it.
+
+---
+
+## 4. `FM_Transfer_Raw` — range vs capacity validation, erase sizing
+
+### F-06 — no range validation against `capacity` (writes past the device)
+* **File:line:** `src/fm_transfer.c:345`–`361` (guards), `396`–`434` (loop)
+* **Describe.** `FM_Transfer_Raw` checks `src->read`, `dst->write` and pointers — nothing else.
+  `Storage_ReadBlocks`/`Storage_WriteBlocks`/`Storage_EraseBlocks` all enforce
+  `offset > capacity || len > capacity - offset` (`src/fm_storage.c:503, 537, 570`), and the
+  callback contract in `include/fm_storage.h:56`–`60` documents the drivers as thin wrappers.
+  A driver that trusts the caller therefore gets `offset+len > capacity`; the transfer reports
+  `FM_OK`. `Storage_ReadBlocks` is also the documented *public* way to reach a device, so the
+  two entry points behave differently for the same illegal request.
+* **Root cause.** Validation lives only in the convenience wrappers, not in the transfer.
+* **Observed.** 1 024-byte destination, `FM_Transfer_Raw(src, 0, dst, 1008, 256, NULL)`
+  → `FM_OK`, driver's last write ended at **1264** (240 bytes past the end).
+* **Proposed fix.** Validate up front, in subtraction form (see F-08 — `offset+bytes`
+  overflows `uint64_t`):
+
+```c
+if (bytes > 0u) {
+    FM_CHECK(src_off <= src->capacity && bytes <= src->capacity - src_off,
+             FM_ERR_INVALID_ARGUMENT, "source range past capacity");
+    FM_CHECK(dst_off <= dst->capacity && bytes <= dst->capacity - dst_off,
+             FM_ERR_INVALID_ARGUMENT, "destination range past capacity");
+}
+```
+* **Test/F (repro).** Fake storage with `capacity = 1024` and an unchecked `write`;
+  `FM_Transfer_Raw(s, 0, d, 1008, 256, NULL)` must return `FM_ERR_INVALID_ARGUMENT` and the
+  driver must record **zero** writes. Same for `src_off = UINT64_MAX - 8` (no overflow wrap).
+
+### F-07 — one unaligned, oversized erase request; `(uint32_t)` truncation
+* **File:line:** `src/fm_transfer.c:352`–`361`
+* **Describe.** The whole destination range is erased in a single call,
+  `dst->erase(dst, dst_off, (uint32_t)bytes)`, with three consequences:
+
+  1. **Unaligned start/length.** NOR adapters accept only whole erase units —
+     `block_storage_erase` (`src/fm_device.c:191`) and `flash_storage_erase`
+     (`src/fm_device.c:369`) return `FM_ERR_INVALID_ARGUMENT` unless
+     `offset % erase_size == 0 && length % erase_size == 0`. Because the error is returned
+     as-is, the whole transfer aborts. `FM_Qspi_Erase` happens to round internally
+     (`src/fm_qspi.c:646`–`651`) — and then erases the sectors *before* `dst_off`, i.e. data
+     outside the requested region — so the two adapters behave inconsistently for the same call.
+  2. **32-bit truncation.** `bytes` is `uint64_t`; `(uint32_t)bytes` is `0` for any
+     `bytes` that is a multiple of 4 GiB — the region is *not erased* and is then programmed
+     onto dirty flash.
+  3. **No progress / no cancel.** Hours of sector erase with no `progress` callback.
+
+  The chunk loop below already knows the unit (`unit_mask`, `to_edge`); the erase does not.
+* **Root cause.** The erase is modelled as one opaque call instead of per-unit work, and the
+  width change 64 → 32 bits is unchecked.
+* **Observed.**
+  * 4 KiB erase unit, `FM_Transfer_Raw(src, 0, dst, 1024, 8192, NULL)`:
+    `erase(off=1024, len=8192)` → driver rejects → `FM_ERR_INVALID_ARGUMENT`;
+    zero erases, nothing copied.
+  * `bytes = 0x1_0000_0000` → `erase(len=0)` → nothing erased.
+* **Proposed fix.** Erase per destination unit, exactly aligned, with the 64-bit width kept:
+
+```c
+if (dst->erase != NULL && bytes > 0u) {
+    uint64_t left = bytes;
+    uint64_t at   = dst_off;
+    uint32_t unit = dst->erase_size;
+    if (unit == 0u) unit = dst->write_size;
+    if (unit != 0u) {
+        if ((dst_off % unit) != 0u) return FM_ERR_INVALID_ARGUMENT; /* keep contract explicit */
+        at = dst_off - (dst_off % unit);
+    }
+    while (left > 0u) {
+        uint32_t n = (left > (uint64_t)unit) ? unit : (uint32_t)left;
+        r = dst->erase(dst, at, n);
+        if (r != FM_OK && r != FM_ERR_UNSUPPORTED) return r;
+        if (r == FM_ERR_UNSUPPORTED) break;
+        at += n;
+        left = (left > (uint64_t)n) ? (left - n) : 0u;
+        if (!xfer_report(o, done_erased, bytes)) return FM_ERR_CANCELLED;
+    }
+}
+```
+  (Or route the erase through `Storage_EraseBlocks`' validation and let the driver round —
+  but pick **one** policy; today QSPI rounds down to the sector and CAP-block adapters refuse.)
+* **Test/G (repro).** Storage with `erase_size = 4096` that records `(off, len)` and rejects
+  non-multiples: `FM_Transfer_Raw(..., dst_off = 1024, 8192, …)` must succeed and produce
+  exactly `2` erase calls of `4096` at `0` and `4096`; `bytes = 1ull << 32` must produce
+  `1048576` calls (or be rejected by F-06's capacity check long before that).
+
+### F-08 — `FM_Transfer_RawVerify` dereferences unvalidated callbacks
+* **File:line:** `src/fm_transfer.c:446`–`482`
+* **Describe.** Only `a`/`b` are null-checked; `a->read`/`b->read` are called directly.
+  The public prototype (`include/fm_transfer.h:139`–`141`) promises the same inputs as
+  `FM_Transfer_Raw`, so a storage without `read` crashes instead of returning an error.
+* **Root cause.** The verify helper bypasses the guard block that `FM_Transfer_Raw` has.
+* **Observed.** `FM_Transfer_RawVerify(&st, 0, &st2, 0, 16)` with `read == NULL` →
+  **SIGSEGV** (exit 139).
+* **Proposed fix.**
+
+```c
+FM_CHECK(a->read != NULL, FM_ERR_UNSUPPORTED, "source has no read function");
+FM_CHECK(b->read != NULL, FM_ERR_UNSUPPORTED, "target has no read function");
+if (bytes > 0u) {
+    FM_CHECK(a_off <= a->capacity && bytes <= a->capacity - a_off,
+             FM_ERR_INVALID_ARGUMENT, "verify range past source capacity");
+    FM_CHECK(b_off <= b->capacity && bytes <= b->capacity - b_off,
+             FM_ERR_INVALID_ARGUMENT, "verify range past target capacity");
+}
+```
+* **Test/H (repro).** `FM_Transfer_RawVerify(&a, 0, &b, 0, 16)` with both `read == NULL`
+  must return `FM_ERR_UNSUPPORTED` and must not crash.
+
+### F-09 — `FM_Transfer_CopyEx(src == dst)` truncates the source
+* **File:line:** `src/fm_transfer.c:97`–`112`
+* **Describe.** `File_Copy` rejects a self-copy (`src/fm_file.c:1415`–`1432`, including the
+  "same mount, same relative path" case), `FM_Transfer_CopyEx` does not: it opens the source
+  for read, then opens the same path with `CREATE|TRUNCATE`, and copies zero bytes over it.
+  The file is destroyed and `FM_OK` is returned.
+* **Root cause.** The guard exists in one of two parallel implementations.
+* **Observed.** `/same.txt` = 24 bytes → `FM_Transfer_Copy("/same.txt", "/same.txt", NULL)`
+  → `FM_OK`, file is **0 bytes**. `FM_Transfer_Move` with equal paths would copy nothing and
+  then delete the source, i.e. **data loss reported as success**.
+* **Proposed fix.** Same resolve-and-compare block as `File_Copy` (or delegate:
+  `FM_Transfer_Copy` → `File_Copy` when `verify`/`no_overwrite` are off, keeping one code
+  path for copy semantics).
+* **Test/I (repro).** `File_WriteText("/same.txt", "…")`; expect
+  `FM_Transfer_Copy("/same.txt", "/same.txt", NULL) == FM_ERR_INVALID_ARGUMENT` and size
+  unchanged; same for `FM_Transfer_Move`.
+
+### F-10 — descriptor left open, and failed content left in place, on the verify path
+* **File:line:** `src/fm_transfer.c:191`–`227`
+* **Describe.** `chk` is registered in the external handle registry by `File_OpenEx` (`:586`)
+  and is closed only on the normal path at `:213`. The early returns at `:194` (`open` failed —
+  harmless, nothing registered) and `:216` (`r != FM_OK` after the read loop) leave `chk`
+  dirty: `f->used == 1`, `g_external_files[i] == &chk` pointing at a **stack object**, while
+  `:214`'s close is skipped. Additionally the CRC-mismatch return at `:223`–`:226` leaves the
+  corrupt destination on disk even though `verify` was requested.
+* **Root cause.** Two early returns interleaved with the close; `File_OpenEx`'s registry entry
+  is invisible to the caller; no cleanup on `FM_ERR_CORRUPTED`.
+* **Proposed fix.**
+
+```c
+r = File_OpenEx(&chk, dst_path, FM_OPEN_READ);
+if (r != FM_OK) return r;
+/* … read loop, leaving the outcome in r … */
+{
+    FM_Result rc = File_Close(&chk);        /* ALWAYS close what we opened */
+    if (r == FM_OK) r = rc;
+}
+if (r != FM_OK) return r;
+if (out_info != NULL) { out_info->crc_dest = crc_dst; out_info->verified = FM_TRUE; }
+if (crc_dst != crc_src) {
+    (void)File_Delete(dst_path);            /* a failed verify is a failed copy */
+    return FM_ERR_CORRUPTED;
+}
+```
+* **Test/J.** Wrapper adapter whose `file_read` fails (`FM_ERR_IO`) on the *second* open of the
+  destination, with `opts.verify = 1`; assert `File_PoolUsed()` is back to its previous value
+  after the call (no leaked external slot) and that a corrupt destination is deleted on
+  `FM_ERR_CORRUPTED` (inject a byte between write and verify).
+
+### F-11 — intermediate buffer is neither cache-maintained nor re-entrant
+* **File:line:** `src/fm_transfer.c:18`–`25` (`g_xfer_buf`), `415`–`428`; `src/fm_file.c:1529`
+* **Describe.** The header promises "buffer cache Clean/Invalidate around each chunk when the
+  other side is DMA" (`include/fm_transfer.h:24`–`26`). The implementation contains **no**
+  cache operation: `grep -c FM_Cache_ src/fm_transfer.c` → 0. `FM_File_CopyStream()` and
+  `file_edit()` share the single thread-local-free `FM_InternalBuffer()` (`src/fm_core.c:349`),
+  so a `File_Copy` progress callback that itself calls `File_Insert`/`File_Copy` overwrites the
+  chunk being copied.
+* **Root cause.** The documented invariant is not implemented; one scratch buffer serves
+  nested calls (only `FM_USE_THREADS` makes it thread-local, not recursion-safe).
+* **Proposed fix.** (a) call `FM_Cache_CleanForDma(buf, len)` before `dst->write` and
+  `FM_Cache_InvalidateAfterDma(buf, len)` after `src->read` when `FM_USE_DMA`; (b) keep a
+  small in-use flag next to the buffer and return `FM_ERR_BUSY` for nested users instead of
+  silently corrupting the copy.
+* **Test/K.** With `FM_USE_DMA=1` and a driver that asserts
+  `FM_Cache_DmaAligned(buf, len)`, run `FM_Transfer_Copy` of a 3-chunk file and assert the
+  clean/invalidate counters equal the chunk count. Separately: a progress callback that calls
+  `File_Copy` recursively must return `FM_ERR_BUSY` (or copy correctly), not corrupt data.
+
+### F-12 — `FM_USE_CRC=0` does not link
+* **File:line:** `src/fm_transfer.c:14`, `146`–`149`, `211`; `include/fm_config.h:79`–`81`;
+  `src/fm_crc.c:8`
+* **Describe.** `fm_crc.c` compiles its whole body out under `#if FM_USE_CRC`, but
+  `FM_Transfer_CopyEx` calls `CRC_Compute32()` unconditionally (also `src/fm_mediacache.c:57`).
+  `make fm_test FM_USE_CRC=0` fails at link:
+  `undefined reference to 'CRC_Compute32'` (`fm_transfer.c:148`, `:211`, `fm_mediacache.c:57`).
+* **Root cause.** The `verify` option is not gated, although it is documented as an optional
+  feature and the header for it is compiled out.
+* **Proposed fix.**
+
+```c
+#if FM_USE_CRC
+    if (o->verify) { … }                     /* both call sites + the final compare */
+#else
+    if (o->verify) return FM_ERR_UNSUPPORTED; /* verify needs FM_USE_CRC */
+#endif
+```
+* **Test/L.** CI target that builds with `FM_USE_CRC=0` (and `FM_USE_CACHE=0`,
+  `FM_USE_THREADS=1`, `FM_USE_INTERNAL_BUFFER=0`) and must link; plus a runtime test that
+  `FM_Transfer_CopyEx(..., {.verify=1})` returns `FM_ERR_UNSUPPORTED` in that build.
+
+---
+
+## 5. Cross-cutting findings (VFS / cache / semantics)
+
+### F-13 — read cache is keyed per handle, so another handle's write is invisible
+* **File:line:** `src/fm_file.c:112`–`196` (`FM_CacheLine.file` key), `720`–`770` (`File_Read`),
+  `803`–`811` (write invalidation), `1333`–`1403` (`FM_File_CopyStream`)
+* **Describe.** Cache lines are matched by `(f, offset)` where `f` is the `FM_File*`. `File_Write`
+  invalidates only the writing handle's lines (`cache_invalidate_file(f)`). Any second handle on
+  the same file — or the *same* path re-opened between two reads (`File_ReadAll` twice in a row,
+  `FM_File_CopyStream`, `File_Insert`) — keeps serving pre-write bytes.
+* **Root cause.** Invalidation by handle identity instead of by file identity (path/mount).
+* **Observed.** Reader handle primed (`"AAAAAAAA"`), writer handle overwrites with
+  `"BBBBBBBB"`, reader re-reads → `"AAAAAAAA"` while the backend holds `"BBBBBBBB"`.
+* **Proposed fix.** Key cache lines by `(mount, resolved path)` instead of `FM_File*`, or flush
+  **all** lines for a path on every write/rename/delete/truncate (cheap: `FM_CACHE_LINES=16`).
+* **Test/M (repro).** Two handles on one path (`FM_OPEN_READ` / `FM_OPEN_WRITE`), overwrite
+  through the writer, re-read through the reader; assert the new bytes. Also: read the whole
+  file twice with `File_ReadAll` around an out-of-band write and assert the second read differs.
+
+### F-14 — a hard I/O error is reported as `FM_OK` by the cached read path
+* **File:line:** `src/fm_file.c:766`–`770`
+* **Describe.** `return (total > 0) ? FM_OK : r;` discards any backend error once at least one
+  byte was served, so `FM_ERR_IO`, `FM_ERR_TIMEOUT` and `FM_ERR_CORRUPTED` all look like a clean
+  short read. Only `FM_ERR_EOF` should be masked. The non-cached path (`:776`–`790`) and the
+  large-read fast path (`:687`) already behave correctly, so the bug appears only for
+  `1 < len < 2 * FM_CACHE_LINE_SIZE` **and** `FM_USE_CACHE=1` — the configuration used by the
+  host Makefile and by `FM_BUFFERS=LARGE` board builds.
+* **Root cause.** A blanket "got some bytes" success rule instead of an EOF-specific one.
+* **Observed.** 900-byte read, backend returns `FM_ERR_IO` on the second 512-byte block:
+  `File_Read → 0 (OK), *read=512` — a truncated file reported as success.
+* **Proposed fix.**
+
+```c
+if (r == FM_ERR_EOF) return FM_OK;          /* short read at EOF is fine */
+return (total > 0 && r == FM_OK) ? FM_OK : r;
+```
+* **Test/N (repro).** Adapter that fails the second `file_read` with `FM_ERR_IO`; a 900-byte
+  `File_Read` must return `FM_ERR_IO` (and `*read` may still be 512).
+
+### F-15 — `file_edit()` temp name can overflow `FM_PATH_MAX`
+* **File:line:** `src/fm_file.c:1536`–`1538`
+* **Describe.** `strncat(tmp, ".fm_tmp", sizeof(tmp) - strlen(tmp) - 1)` silently truncates when
+  the path is near `FM_PATH_MAX` (the `strncpy` above already consumed the space), so the temp
+  file name collides with the original path or with another file's temp. `File_Insert`,
+  `File_DeleteRange` and `File_ReplaceRange` then "replace" the wrong entry.
+* **Root cause.** Unchecked concatenation onto a bounded buffer that is already full.
+* **Proposed fix.** Refuse the edit when `strlen(path) + sizeof(".fm_tmp") > sizeof(tmp)`
+  (`FM_ERR_INVALID_PATH`), or build the temp name from the directory + a short fixed suffix.
+* **Test/O.** `File_Insert` on a path of length `FM_PATH_MAX - 3` must return
+  `FM_ERR_INVALID_PATH` and leave every file untouched.
+
+### F-16 — `File_Delete` / `File_Rename` are not path-normalization consistent
+* **File:line:** `src/fm_file.c:988`–`1012`, `1024`–`1053`
+* **Describe.** `File_Copy` normalizes and compares *resolved relative* paths before copying
+  (`:1420`–`1432`), while `File_Move` compares raw strings (`:1417` in `File_Copy` only) and
+  `File_Delete`/`File_Rename` do no self-comparison at all: `File_Delete("/a/./b")` and
+  `File_Delete("/a/b")` reach the backend as different strings, and `File_Rename(p, p)` relies
+  on the adapter (FMFS treats it as a no-op, POSIX `rename(2)` succeeds, but a FATFS adapter
+  that maps it to "delete then create" would lose the file). Normalization must be one policy.
+* **Root cause.** Path canonicalization is applied at the resolver, but several call sites
+  still compare pre-normalized strings.
+* **Proposed fix.** Use `FM_VFS_Resolve()` + `strcmp(rel)` (as `File_Copy` already does) for
+  every self-comparison, and document `Rename(p, p)` as a no-op.
+* **Test/P.** `File_Rename("/a/b", "/a/./b")` → `FM_OK`, file intact; `File_Delete("/a/./b")`
+  removes the same entry as `File_Delete("/a/b")`.
+
+---
+
+## 6. Findings summary
+
+| # | Area | Severity | One-line |
+|---|---|---|---|
+| F-01 | File_Move | **High** | No NULL guard; every resolve error flattened to `NOT_FOUND` (`fm_file.c:1470`) |
+| F-02 | File_Move | **High** | Cross-mount rollback deletes a **pre-existing** destination (`fm_file.c:1500`) |
+| F-03 | File_PoolDump | Low | Merged counter printed as "internal" (`fm_file.c:430`) |
+| F-04 | File_Copy | **High** | Partial/truncated destination survives failure (`fm_file.c:1441`) |
+| F-05 | File_Copy | Medium | 100 % progress before flush (`fm_file.c:1394`) |
+| F-06 | Transfer_Raw | **Critical** | No capacity check → quiet writes past the device (`fm_transfer.c:345`) |
+| F-07 | Transfer_Raw | **High** | Single unaligned erase + `(uint32_t)` truncation (`fm_transfer.c:354`) |
+| F-08 | RawVerify | **High** | NULL `read` callback dereferenced (SIGSEGV) (`fm_transfer.c:446`) |
+| F-09 | Transfer_Copy | **Critical** | `src == dst` truncates the source, returns `FM_OK` (`fm_transfer.c:97`) |
+| F-10 | Transfer_Copy | Medium | `chk` handle leaked + corrupt destination kept on verify failure (`fm_transfer.c:191`) |
+| F-11 | Buffer mgmt | Medium | DMA cache maintenance documented but absent; shared scratch buffer (`fm_transfer.c:18`) |
+| F-12 | Build | Medium | `FM_USE_CRC=0` does not link (`fm_transfer.c:148`, `fm_crc.c:8`) |
+| F-13 | Cache | **High** | Per-handle cache key → stale reads after another handle's write (`fm_file.c:112`) |
+| F-14 | Cache | **High** | Hard I/O error masked as `FM_OK` in cached reads (`fm_file.c:770`) |
+| F-15 | file_edit | Medium | Temp-name overflow near `FM_PATH_MAX` (`fm_file.c:1538`) |
+| F-16 | VFS | Low | Inconsistent normalization for delete/rename self-paths (`fm_file.c:988`) |
+
+---
+
+## 7. Confirmation matrix (measured, not asserted)
+
+`✔` = harness reports the defect, `—` = clean. "fixed" = scratch copy with §1–§4 snippets
+applied (repository untouched).
+
+| Test | Harness | Before | After fix |
+|---|---|---|---|
+| A | `repro.c` §A — `File_Move` NULL / resolve errors | ✔ `-3` for `NULL`, unmounted, too-long, relative | — |
+| B | `move5.c` — rollback vs pre-existing destination | ✔ destination deleted | — |
+| C | `repro.c` §B — `File_PoolDump` header | ✔ `3/8 internal` for 1 internal + 2 external | — |
+| D | `repro.c` §C — `File_Copy` with full destination | ✔ `exists=1 size=5000/40000` | — |
+| F | `raw3.c` — `FM_Transfer_Raw` past capacity | ✔ wrote 240 B past a 1 024 B device | — |
+| G | `raw2.c`/`repro.c` §E — unaligned erase | ✔ driver rejects `erase(1024, 8192)` | — (`erase(0,4096)` ×2) |
+| H | `cache1.c` §J — `RawVerify` with no `read` | ✔ SIGSEGV (139) | — |
+| I | `xfer7.c` — `FM_Transfer_Copy(src==dst)` | ✔ 24 B file → 0 B, `FM_OK` | — |
+| M | `cache1.c` §I — cache coherency across handles | ✔ stale `"AAAAAAAA"` | ✔ **still reproduces** (fix not in §1–§4) |
+| N | `read6.c` — hard I/O error masked | ✔ `FM_OK`, `*read=512` | — |
+| L | `make fm_test FM_USE_CRC=0` | ✔ link error | — |
+
+---
+
+## 8. Regression / acceptance plan
+
+### 8.1 Insertion points in the existing suite
+
+`test/main.c` already has the right fixtures; no new framework is needed.
+
+| Finding | Where to add | Fixture already present |
+|---|---|---|
+| F-01, F-02 | next to `test_file_move_delete()` (`:345`) and the `"Regression: File_Move without rename falls back"` block (`:8430`) | `g_fs` (POSIX at `/`), the `NORENAME` copy-ops pattern at `:8415` |
+| F-03 | inside the `test_memory_fs()`/`test_threads()` area; use `FM_Log_SetSink` (`src/fm_log.c:18`) | `FM_Log_SetSink` + `File_OpenEx` |
+| F-04 | extend `test_file_copy()` (`:327`) with a quota wrapper (copy `g_fs.ops`, override `file_write`) | `PosixFS_Init` + ops copy at `:8415` |
+| F-05 | `test_transfer()` — `"Transfer_Copy verify=1 …"` block | `FM_TransferOpts` |
+| F-06, F-07, F-08 | `test_transfer()` — `"Transfer_Raw aligns chunks …"` (`:4411`) already builds `FM_Storage` doubles (`test_driver_read/write/erase`, `:69`–`:100`) | `g_ram_buf`, `test_driver_*` |
+| F-09 | `test_transfer()` — `"Transfer_Move removes the source"` (`:4385`) | same |
+| F-10 | `test_transfer()` + `File_PoolUsed()` | `File_PoolUsed` (`:410`) |
+| F-12 | Makefile target + `#if FM_USE_CRC` build & a runtime `verify` test | `asan`/`ports` targets as template |
+| F-13, F-14 | `test_cache()` (`:1240`, `#if FM_USE_CACHE && FM_USE_FMFS`) | cache stats + `File_SetCacheEnabled` |
+| F-15, F-16 | `test_file_seek`/`test_file_copy` neighbours | `FM_PATH_MAX` paths |
+
+### 8.2 Definition of done
+
+1. New tests fail on `2edf567` and pass with the fixes (one test per finding, named `F-0x …`).
+2. `make fm_test` → `213/214 passed` (baseline 211/212 + 2 new; the single pre-existing
+   ADPCM failure stays as-is) with `FM_USE_CACHE=1`, and `FM_USE_CACHE=0`.
+3. `FM_USE_THREADS=1` run must not gain failures beyond the two pre-existing ones
+   (ADPCM, `concurrent registry stress`).
+4. Compile/link matrix green:
+
+```sh
+for o in "-DFM_USE_CACHE=0" "-DFM_USE_CACHE=1" \
+         "-DFM_USE_THREADS=1 -DFM_SYNC_CUSTOM -Iports/pthread" \
+         "-DFM_USE_INTERNAL_BUFFER=0" "-DFM_USE_DMA=1"; do
+    make clean >/dev/null && make -j8 fm_test CFLAGS_EXTRA="$o" || exit 1
+done
+make -j8 fm_test FM_USE_CRC=0        # expected to link only after F-12
+```
+5. Erase accounting: the QSPI simulation counter used by
+   `"Transfer_Raw aligns chunks to the destination erase unit"` (`test/main.c:4411`) must stay
+   ≤ 8 erases for 4 sectors after the F-07 change (per-unit erase replaces the single call).
+
+### 8.3 Suggested landing order
+
+`F-06 / F-09` (data loss, one-line guards) → `F-01 / F-02 / F-04` (move & copy semantics) →
+`F-07 / F-08` (raw transfer) → `F-13 / F-14` (cache) → `F-03 / F-05 / F-10 / F-11 / F-12` →
+`F-15 / F-16` (clean-up). Each group is independent; the first three groups share
+`fm_file.c`/`fm_transfer.c` and can be reviewed as two patches.
+
+
+
+
+
+
+گزارش تشخیصی (Diagnostic Report) زیرسیستم Audio
+
+    وضعیت درخت کاری (arena/9241be59-clain-filemanagaer @ 2edf567): هیچ فایلی تغییر داده نشده است (working tree clean). تمامی کدهای اصلاحی زیر صرفاً به‌عنوان snippet پیشنهادی (بدون اعمال) ارائه شده‌اند.
+
+۱. فهرست باگ‌های Audio و وضعیت هرکدام (در محدودهٔ اسکوپ)
+شناسه / موضوع	فایل و خطوط مرتبط در درخت فعلی	وضعیت	خلاصهٔ وضعیت فنی
+Audio #2 — WAV IMA-ADPCM decode (pred int32_t accumulation & signed idx clamp)	src/fm_audio.c:140–171	Fixed	متغیر pred به int32_t ارتقا یافته (حذف سرریز علامت‌دار پیش از اشباع [-32768, 32767]) و idx از uint8_t به int تغییر کرده تا در گام -1 به 255 -> 88 جهش نکند و روی 0 کلمپ شود.
+Audio #3 — WAV IMA-ADPCM framing (carry alignment & partial-read bytes at EOF)	src/fm_audio.c:66–89, 189–194, 223–234, 259–278	Fixed	آفست WAV_ADPCM_CARRY به مضرب زوج گرد شده (WAV_ADPCM_CARRY_OFF) تا روی block_align فرد دسترسی غیرتراز int16_t* رخ ندهد؛ همچنین file_read_exact مقدار واقعی خوانده‌شده (read_out) را برمی‌گرداند و در EOF فقط got_bytes دیکد می‌شود.
+Audio #4 — FLAC / Vorbis / Opus file open (FM_ERR_TOO_LARGE به‌جای silent truncation)	src/fm_audio.c:341, 356–365 (FLAC)<br>src/fm_audio.c:392, 409–416 (Vorbis)<br>src/fm_audio.c:465, 556–565, 681–685 (Opus)	Fixed (مسیر اصلی) / Remaining (موارد مرزی)	سقف تعداد فریم‌های اعلام‌شده در هدر (و سقف بافر PCM در Opus) در کامیت 2edf567 اصلاح شده و FM_ERR_TOO_LARGE برمی‌گرداند؛ اما دو مورد مرزی باقی مانده است: ۱) رد شدن سقف سایز فایل فشرده (sz > max) هنوز FM_ERR_CORRUPTED می‌دهد نه FM_ERR_TOO_LARGE؛ ۲) استریم‌های با طول نامشخص در هدر (total_frames == 0 / <= 0) در صورت عبور از سقف موقت بدون خطا بریده می‌شوند.
+Audio #9 — Opus pending-packet FM_Realloc memory leak	src/fm_audio.c:605–611	Fixed	در شکست FM_Realloc(pend, pend_len + plen) هنگام سرهم‌کردن پکت‌های چندصفحه‌ای Ogg، اکنون FM_Free(pend) پیش از goto done; فراخوانی شده و نشت heap برطرف شده است.
+Audio Guards & Zero-RAM — Audio decoder registration با گاردهای FM_USE_AUDIO و صفر بودن حافظهٔ ایستا در FM_USE_AUDIO == 0	include/fm_config.h:116–120, 284–327<br>src/fm_vorbis.c:11, 87–102<br>src/fm_video.c:37–51, 3153<br>src/fm_audio.c:15–32, 2893<br>test/main.c:5648, 6302–6398<br>(+ در آرشیو کامل: fm_flac.c, fm_opus.c, fm_core.c)	Remaining	با FM_USE_AUDIO=0، کلیدهای FM_USE_FLAC/VORBIS/OPUS/AAC روشن می‌مانند؛ بیلد با خطای لینک undefined reference روی Audio_RegisterDecoder و Audio_GetDecoder می‌شکند و جداول استاتیک کدک‌ها + جدول ogg_crc_table[256] (۱۰۲۸ بایت .bss در fm_video.c) اشغال حافظه دارند.
+Vorbis Sample Count — stb_vorbis sample count در دیکدر پلاگین	src/fm_vorbis.c:68–75	Remaining	آرگومان چهارم stb_vorbis_get_samples_short_interleaved تعداد short (یعنی max_frames * channels) است، اما max_frames پاس داده شده؛ روی صدای استریو (channels == 2) ظرفیت دو بار بر ۲ تقسیم شده و خروجی نصف می‌شود (یا روی ۱ فریم استریو FM_ERR_EOF کاذب می‌دهد).
+Audio #5 — Opus default-silence without libopus	نیازمند src/fm_opus.c (خارج از این درخت) + هماهنگی با test/main.c:5605	Remaining (Blocked in tree)	در غیاب libopus (FM_OPUS_USE_LIBOPUS == 0)، دیکدر جایگزین در fm_opus.c بافر خروجی را با صفر (سکوت) پر کرده و FM_OK برمی‌گرداند. چون src/fm_opus.c در این درخت Git ترک نشده، فیکس کامل بدون افزودن این فایل ممکن نیست.
+۲. کالبدشکافی دقیق موارد Remaining و Snippetهای پیشنهادی (بدون اعمال)
+۲.۱. گاردهای FM_USE_AUDIO در ثبت دیکدرها و قید سخت FM_USE_AUDIO == 0 (Zero Static Memory)
+علت ریشه‌ای (تاییدشده با بررسی خروجی کامپایلر، ld، size و nm)
+
+هنگام کامپایل با -DFM_USE_AUDIO=0:
+
+    include/fm_config.h: در خطوط 116–120 تنها FM_USE_MP3 صفر می‌شود، اما در خطوط 284–327 ماکروهای FM_USE_FLAC، FM_USE_VORBIS، FM_USE_OPUS، FM_OPUS_USE_LIBOPUS و FM_USE_AAC همچنان مقدار FM_TIER1_CODEC_DEFAULT (1) می‌گیرند.
+    خطای لینک (undefined reference): کل بدنهٔ src/fm_audio.c (شامل Audio_RegisterDecoder و Audio_GetDecoder) زیر #if FM_USE_AUDIO کامپایل‌زدایی می‌شود (text=0, data=0, bss=0)، اما:
+        src/fm_vorbis.c:96 (و در پروژهٔ کامل src/fm_flac.c:80 و src/fm_opus.c:232) فقط #if FM_USE_VORBIS را چک کرده و Audio_RegisterDecoder را صدا می‌زند.
+        src/fm_video.c:3153 بدون گارد #if FM_USE_AUDIO مستقیماً Audio_GetDecoder(tag) را فراخوانی می‌کند.
+    نقض قید اشغال حافظهٔ ایستا در FM_USE_AUDIO == 0:
+        src/fm_vorbis.o: ساختار g_vorbis_ops (۳۲ بایت .data) و ۷۹۱ بایت کد را نگه می‌دارد (و در درخت کامل، fm_flac.o حدود ۸۲.۷ کیلوبایت و ۱۲ بایت .bss و fm_opus.o حدود ۱ کیلوبایت و ۳۲ بایت .data تولید می‌کنند).
+        src/fm_video.o: آرایهٔ static uint32_t ogg_crc_table[256] و static int inited در src/fm_video.c:37–40 (۱۰۲۸ بایت .bss) صرفاً متعلق به vorbis_build_ogg_from_mkv در مسیر دیکد صوتی Vorbis است ولی بدون گارد FM_USE_AUDIO همیشه در RAM ایستا می‌نشیند.
+        دام طراحی مهم: برای رفع خطای لینک هرگز نباید static FM_AudioDecoderEntry g_adec[4] را در fm_audio.c به بیرون از #if FM_USE_AUDIO برد، چون ۶۴ بایت .bss صوتی در حالت FM_USE_AUDIO == 0 باقی می‌گذارد. راه‌حل درست: صفر کردن زیرکدک‌ها در fm_config.h + گارد #if FM_USE_AUDIO در کدک‌ها و fm_video.c + استاب‌های بدون هیچ متغیر ایستا (bss = 0, data = 0) در شاخهٔ #else فایل fm_audio.c (جهت حفظ سازگاری لینک در صورت فراخوانی خارجی API).
+
+Snippetهای پیشنهادی
+
+الف) Clain_FileManager/FileManager_lib/include/fm_config.h — خاموش کردن تمام زیرکدک‌های صوتی در FM_USE_AUDIO == 0:
+
+C
+
+/* در انتهای بخش کدک‌های صوتی (بعد از تعریف FM_USE_AAC حوالی خط 328): */
+#if FM_USE_AUDIO == 0
+#undef FM_USE_MP3
+#define FM_USE_MP3 0
+#undef FM_USE_FLAC
+#define FM_USE_FLAC 0
+#undef FM_USE_VORBIS
+#define FM_USE_VORBIS 0
+#undef FM_USE_OPUS
+#define FM_USE_OPUS 0
+#undef FM_OPUS_USE_LIBOPUS
+#define FM_OPUS_USE_LIBOPUS 0
+#undef FM_USE_AAC
+#define FM_USE_AAC 0
+#endif
+
+ب) Clain_FileManager/FileManager_lib/src/fm_audio.c — بردن #includeهای کدک به داخل #if FM_USE_AUDIO و افزودن استاب‌های Zero-BSS در #else:
+
+C
+
+/* ابتدای fm_audio.c: تمام #include های dr_flac / stb_vorbis / fm_opus داخل #if FM_USE_AUDIO باشند */
+#if FM_USE_AUDIO
+#if FM_USE_FLAC
+#include "../third_party/dr_flac/dr_flac.h"
+#endif
+/* ... بدنهٔ فعلی fm_audio.c ... */
+
+#else /* FM_USE_AUDIO == 0: ZERO static/BSS buffers */
+
+FM_Result Audio_RegisterDecoder(const char *codec,
+                                const FM_AudioDecoderOps *ops)
+{
+    (void)codec;
+    (void)ops;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_UnregisterDecoder(const char *codec)
+{
+    (void)codec;
+    return FM_ERR_UNSUPPORTED;
+}
+
+const FM_AudioDecoderOps *Audio_GetDecoder(const char *codec)
+{
+    (void)codec;
+    return NULL;
+}
+
+#endif /* FM_USE_AUDIO */
+
+ج) Clain_FileManager/FileManager_lib/src/fm_vorbis.c — گارد ترکیبی #if FM_USE_AUDIO && FM_USE_VORBIS (تا حتی با -DFM_USE_AUDIO=0 -DFM_USE_VORBIS=1 نیز g_vorbis_ops ساخته نشود):
+
+C
+
+#if FM_USE_AUDIO && FM_USE_VORBIS
+/* ... پیاده‌سازی فعلی و g_vorbis_ops ... */
+#else
+FM_Result FM_Vorbis_Init(void) { return FM_ERR_UNSUPPORTED; }
+const FM_AudioDecoderOps *FM_Vorbis_GetOps(void) { return NULL; }
+#endif
+
+(همین الگو باید در صورت حضور در درخت کامل روی fm_flac.c، fm_opus.c و فراخوانی‌های FM_*_Init() در fm_core.c نیز رعایت شود).
+
+د) Clain_FileManager/FileManager_lib/src/fm_video.c — حذف اشغال ۱۰۲۸ بایت .bss جدول ogg_crc_table و محافظت از Audio_GetDecoder در FM_USE_AUDIO == 0:
+
+C
+
+/* خطوط 36–170 در fm_video.c: فقط وقتی صدای دیکدشوندهٔ Vorbis فعال است کامپایل شود */
+#if FM_USE_AUDIO && FM_USE_VORBIS
+static uint32_t ogg_crc_table[256];
+/* ... ogg_crc_init, ogg_crc, vorbis_build_ogg_from_mkv ... */
+#endif
+
+/* و در Video_ReadAudioFrame (خط 3153): */
+#if FM_USE_AUDIO
+        const FM_AudioDecoderOps *ops = Audio_GetDecoder(tag);
+        if (ops != NULL && ops->decode != NULL)
+        {
+            /* ... بلوک دیکد پکت صوتی؛ بخش MKV Vorbis synth داخل #if FM_USE_VORBIS ... */
+        }
+#endif
+
+هـ) Clain_FileManager/FileManager_lib/test/main.c — بستن #if FM_USE_AUDIO در محل درست:
+
+    در خط 5642، #endif زودهنگام قبل از test_adpcm_small_chunks برداشته شده و به بعد از test_adpcm_small_chunks (خط 5705) منتقل شود و توابع fake_aac_* / fake_mp3_encoder_* (خطوط 6302–6398) نیز زیر #if FM_USE_AUDIO قرار گیرند.
+
+۲.۲. باگ شمارش سمپل stb_vorbis در src/fm_vorbis.c
+علت ریشه‌ای
+
+در third_party/stb/stb_vorbis.c:5309:
+
+C
+
+int stb_vorbis_get_samples_short_interleaved(stb_vorbis *f, int channels, short *buffer, int num_shorts)
+{
+   int len = num_shorts / channels;
+   ...
+   return n; /* تعداد سمپل در هر کانال (frame) */
+}
+
+تابع در ورودی چهارم (num_shorts) ظرفیت بافر را برحسب تعداد کل int16_tها (interleaved shorts) می‌گیرد و خودش در خط اول len = num_shorts / channels را محاسبه می‌کند، سپس در خروجی تعداد فریم‌ها (n) را برمی‌گرداند.
+در src/fm_vorbis.c:68–75:
+
+C
+
+int max_frames = (int)(out_count / (size_t)channels);
+...
+frames = stb_vorbis_get_samples_short_interleaved(v, channels, out, max_frames);
+
+به تابع به‌اشتباه max_frames (به‌جای تعداد shortها) داده شده است؛ لذا stb_vorbis دوباره بر channels تقسیم می‌کند:
+
+    برای استریم مونو (channels == 1) تفاوتی دیده نمی‌شود (به همین علت وکتور مونو test_vorbis.ogg این باگ را لو نداده بود).
+    برای استریم استریو (channels == 2) فقط out_count / 4 فریم (یعنی نصف ظرفیت بافر) دیکد می‌شود و اگر out_count == 2 (یک فریم استریو) باشد، len = 1 / 2 = 0 شده و تابع به‌غلط FM_ERR_EOF برمی‌گرداند.
+
+Snippet پیشنهادی (Clain_FileManager/FileManager_lib/src/fm_vorbis.c:68–78)
+
+C
+
+        size_t max_frames_sz = out_count / (size_t)channels;
+        int num_shorts;
+        if (max_frames_sz == 0u) {
+            stb_vorbis_close(v);
+            return FM_ERR_TOO_LARGE;
+        }
+        if (max_frames_sz > (size_t)(INT_MAX / channels)) {
+            max_frames_sz = (size_t)(INT_MAX / channels);
+        }
+        num_shorts = (int)(max_frames_sz * (size_t)channels);
+        frames = stb_vorbis_get_samples_short_interleaved(v, channels, out, num_shorts);
+        if (frames < 0) frames = 0;
+        *out_samples = (size_t)frames * (size_t)channels;
+
+(نیاز به #include <limits.h> در بالای fm_vorbis.c برای INT_MAX).
+۲.۳. موارد مرزی باقیمانده در Audio #4 (FLAC / Vorbis / Opus FM_ERR_TOO_LARGE)
+
+در کامیت 2edf567 مسیر اصلی برش خاموش روی سقف فریم‌های اعلام‌شده فیکس شده است، اما سه مورد مرزی در src/fm_audio.c هنوز رفتار ناهماهنگ دارند:
+
+    سقف سایز فایل ورودی (sz): در flac_file_open (خط 341)، vorbis_file_open (خط 392) و opus_file_open (خط 465) اگر فایل سالم ولی بزرگ‌تر از سقف مجاز (10 MiB یا FM_OPUS_MAX_FILE_BYTES) باشد، FM_ERR_CORRUPTED برمی‌گردد در حالی که کد خطای صحیح FM_ERR_TOO_LARGE است.
+    استریم‌های با طول نامشخص در هدر (total_frames == 0 در FLAC و total_frames <= 0 در Vorbis): بافر موقت (1M فریم در FLAC و 256K فریم در Vorbis) تخصیص می‌یابد و اگر فایل واقعی بیشتر از این مقدار سمپل داشته باشد، حلقه بدون بررسی باقی‌ماندهٔ استریم متوقف شده و فایل را بی‌صدا برش می‌زند.
+    تشخیص زودهنگام و ایمن در برابر سرریز ۳۲ بیتی در opus_file_open (خط 556): عبارت (size_t)(total48 * channels) * sizeof(int16_t) روی MCUهای ۳۲ بیتی باید در uint64_t مقایسه شود و وقتی granule_final > preskip معلوم است و از FM_OPUS_MAX_PCM_BYTES فراتر می‌رود، بلافاصله قبل از تخصیص ۱۶ مگابایت و دیکد کل فایل، FM_ERR_TOO_LARGE برگردد.
+
+Snippet پیشنهادی (Clain_FileManager/FileManager_lib/src/fm_audio.c)
+
+C
+
+/* 1) تفکیک خطای سایز فایل از خرابی فایل (مشابهاً در flac / vorbis / opus): */
+if (r != FM_OK) return r;
+if (sz < 42u) return FM_ERR_CORRUPTED;
+if (sz > 10u * 1024u * 1024u) return FM_ERR_TOO_LARGE;
+
+/* 2) در flac_file_open: تشخیص برش در فایل‌های با totalPCMFrameCount == 0 */
+FM_Bool unknown_len = (p->totalPCMFrameCount == 0);
+/* ... پس از drflac_read_pcm_frames_s16(p, total_frames, pcm): */
+if (unknown_len && frames_read == total_frames) {
+    int16_t probe[8]; /* حداکثر 8 کانال در FLAC */
+    if (p->channels <= 8u && drflac_read_pcm_frames_s16(p, 1, probe) > 0) {
+        drflac_close(p);
+        FM_Free(data);
+        FM_Free(pcm);
+        return FM_ERR_TOO_LARGE;
+    }
+}
+
+/* 3) در vorbis_file_open: تشخیص برش در فایل‌های با total_frames <= 0 */
+FM_Bool unknown_len = (total_frames <= 0);
+/* ... پس از حلقهٔ while (pos < total_samples): */
+if (unknown_len && pos == total_samples) {
+    int16_t probe[2];
+    if (stb_vorbis_get_samples_short_interleaved(v, info.channels, probe, info.channels) > 0) {
+        stb_vorbis_close(v);
+        FM_Free(data);
+        FM_Free(pcm);
+        return FM_ERR_TOO_LARGE;
+    }
+}
+
+/* 4) در opus_file_open: محاسبهٔ 64 بیتی و خروج فوری برای طول معلومِ بیش از سقف */
+uint64_t want64 = total48 * (uint64_t)channels * (uint64_t)sizeof(int16_t);
+if (granule_final > (uint64_t)preskip && want64 > (uint64_t)FM_OPUS_MAX_PCM_BYTES) {
+    FM_Free(data);
+    return FM_ERR_TOO_LARGE;
+}
+if (want64 > (uint64_t)FM_OPUS_MAX_PCM_BYTES) {
+    want = FM_OPUS_MAX_PCM_BYTES;
+    truncated = 1;
+} else {
+    want = (size_t)want64;
+}
+
+۳. تحلیل اختصاصی Audio #5 (Opus Default-Silence without libopus)
+۳.۱. ماهیت باگ
+
+هنگامی که FM_USE_OPUS == 1 است اما FM_OPUS_USE_LIBOPUS == 0 است (حالت پیش‌فرض در بیلدهای هاست -DFM_HOST_BUILD=1 طبق include/fm_config.h:304–308 و یا پورت‌هایی که سورس third_party/opus را لینک نکرده‌اند):
+
+    پیاده‌سازی موجود در src/fm_opus.c (خطوط 162–200 و 222–235) یک شاخهٔ #else به نام silence fallback دارد که جدول g_opus_ops را همچنان فعال نگه می‌دارد، بایت TOC پکت‌های Opus را برای محاسبهٔ طول فریم پارس می‌کند، بافر خروجی را با صفر (out[i] = 0) پر می‌کند و FM_OK برمی‌گرداند!
+    در نتیجه هم Audio_Open() / Audio_Read() روی فایل‌های .opus/.ogg و هم Video_ReadAudioFrame() روی ویدیوهای دارای ترک صوتی Opus، بدون اعلام خطا (FM_ERR_UNSUPPORTED) موفق نشان داده می‌شوند ولی صرفاً سکوت مطلق (peak = 0) پخش می‌کنند.
+
+۳.۲. چرا نمی‌توان Audio #5 را در این Tree فیکس کرد و دقیقاً چه فایلی نیاز است؟
+
+    فقدان فایل در درخت Git فعلی: در این شاخه تنها فایل‌های زیر در Clain_FileManager/FileManager_lib/ ترک شده‌اند:
+        include/fm_audio.h, include/fm_config.h
+        src/fm_audio.c, src/fm_file.c, src/fm_h264.c, src/fm_transfer.c, src/fm_video.c, src/fm_vorbis.c
+        test/main.c
+        فایل Clain_FileManager/FileManager_lib/src/fm_opus.c (و هدر متناظرش include/fm_opus.h و همچنین src/fm_core.c) در این درخت وجود ندارد و فقط در آرشیو Clain_FileManager.zip است.
+    چرا دور زدن آن از داخل fm_audio.c یا fm_config.h ناکافی یا مخرب است؟
+        دو مسیر مستقل مصرف دیکدر Opus وجود دارد:
+            مسیر فایل مستقل (opus_file_open در src/fm_audio.c:539) که FM_Opus_GetOps() را صدا می‌زند.
+            مسیر رجیستری دیکدر (FM_Opus_Init() در src/fm_opus.c:227 که در FileManager_Init() داخل src/fm_core.c:134 صدا زده شده و Audio_RegisterDecoder("OPUS", &g_opus_ops) را ثبت می‌کند)؛ سپس Video_ReadAudioFrame() در src/fm_video.c:3153 با Audio_GetDecoder("OPUS") مستقیماً به fm_opus_do_decode در src/fm_opus.c وصل می‌شود و همچنان سکوت تولید می‌کند! همچنین هر کدی که مستقیماً FM_Opus_GetOps() یا FM_Opus_Init() را فراخوانی کند همچنان دیکدر سکوت را دریافت خواهد کرد.
+        تغییر اجباری FM_OPUS_USE_LIBOPUS=1 در fm_config.h بیلد را می‌شکند: در بیلد پیش‌فرض هاست (Makefile با FM_USE_OPUS_LIB=0 و CMakeLists.txt با FM_USE_OPUS_LIB=OFF و اسکریپت tools/check_ports.sh)، فایل‌های third_party/opus/*.c لینک نمی‌شوند؛ بنابراین فعال‌کردن FM_OPUS_USE_LIBOPUS=1 در fm_config.h منجر به خطای لینک undefined reference to opus_decoder_create / opus_decode / opus_decoder_destroy از داخل fm_opus.o می‌شود.
+    فایل‌های مورد نیاز برای رفع کامل Audio #5:
+        الزامی: اضافه کردن فایل Clain_FileManager/FileManager_lib/src/fm_opus.c به درخت Git (تا زمانی که FM_OPUS_USE_LIBOPUS == 0 است، بایت‌های سکوت تولید نشود و FM_Opus_Init() مقدار FM_ERR_UNSUPPORTED و FM_Opus_GetOps() مقدار NULL برگرداند و هیچ g_opus_ops ایستایی نیز اشغال نشود).
+        هماهنگ‌سازی تست (موجود در درخت): به‌روزرسانی test_opus_ogg در Clain_FileManager/FileManager_lib/test/main.c:5605–5641 تا در حالت !FM_OPUS_USE_LIBOPUS انتظار r == FM_ERR_UNSUPPORTED از Audio_Open داشته باشد.
+
+Snippet پیشنهادی برای زمان اضافه شدن src/fm_opus.c (به‌همراه گارد FM_USE_AUDIO)
+
+C
+
+/* در Clain_FileManager/FileManager_lib/src/fm_opus.c: */
+#if FM_USE_AUDIO && FM_USE_OPUS && FM_OPUS_USE_LIBOPUS
+
+#include "../third_party/opus/include/opus.h"
+/* ... OpusCtx و پیاده‌سازی واقعی fm_opus_do_init / fm_opus_do_decode / fm_opus_do_close با libopus ... */
+
+static const FM_AudioDecoderOps g_opus_ops = {
+    "OPUS",
+    fm_opus_do_init,
+    fm_opus_do_decode,
+    fm_opus_do_close
+};
+
+const FM_AudioDecoderOps *FM_Opus_GetOps(void)
+{
+    return &g_opus_ops;
+}
+
+FM_Result FM_Opus_Init(void)
+{
+    FM_Result r = Audio_RegisterDecoder("OPUS", &g_opus_ops);
+    if (r != FM_OK && r != FM_ERR_EXISTS) return r;
+    return FM_OK;
+}
+
+#else /* بدون FM_USE_AUDIO یا بدون FM_USE_OPUS یا بدون libopus: بدون سکوت جعلی و بدون حافظهٔ ایستا */
+
+const FM_AudioDecoderOps *FM_Opus_GetOps(void)
+{
+    return NULL;
+}
+
+FM_Result FM_Opus_Init(void)
+{
+    return FM_ERR_UNSUPPORTED;
+}
+
+#endif
+
+۴. تست‌های تاییدیه (Verification Tests)
+
+    نکتهٔ مهم یافت‌شده در اجرای تست فعلی: در test/main.c:5661 و 5678، تابع test_adpcm_small_chunks مسیر "/audio_test/wav_adpcm_ima_22k.wav" را باز می‌کند که پوشهٔ آن در آرشیو خالی است و خطای FM_ERR_NOT_FOUND (-3) می‌دهد، در حالی که فایل وکتور در "/test/vectors/wav_adpcm_ima_22k.wav" قرار دارد (با قرارگیری فایل در مسیر درست، تست با [22451 vs 22451 smp, peak 8140/8140] PASS عبور می‌کند).
+
+۴.۱. بررسی بیلد و اشغال صفر حافظهٔ ایستا در FM_USE_AUDIO == 0
+
+    بیلد کامل با غیرفعال‌سازی صدا:
+
+    Shell
+
+    make clean && make -j4 FM_USE_AUDIO=0 test
+
+        معیار پذیرش ۱ (لینک): بیلد و لینک بدون هیچ خطای undefined reference به Audio_RegisterDecoder / Audio_GetDecoder و بدون هشدار -Wunused-function کامل شود و تست‌ها پاس شوند.
+        معیار پذیرش ۲ (صفر بودن RAM/ROM ایستای صوتی):
+
+        Shell
+
+        size src/fm_audio.o src/fm_vorbis.o src/fm_flac.o src/fm_opus.o
+        nm -S src/fm_audio.o src/fm_vorbis.o src/fm_flac.o src/fm_opus.o src/fm_video.o \
+           | grep -E " [bBdDrR] .*(g_adec|g_aenc|g_wav_raw|g_mp3|g_aac|g_vorbis_ops|g_flac_ops|g_opus_ops|drflac|ogg_crc_table)"
+
+        خروجی
+        grep باید کاملاً خالی باشد و در size مقدار data = 0 و bss = 0 برای واحدهای ترجمهٔ صوتی برقرار باشد.
+
+۴.۲. تست تاییدیه WAV IMA-ADPCM (Audio #2 & #3)
+
+    اشباع pred در int32_t و کلمپ علامت‌دار idx: ساخت یک بلاک ۸ بایتی IMA-ADPCM در حافظه/فایل شامل:
+        بلاک الف: pred = 32700, idx = 88 (step = 32767) و نیبل 0x07 (افزایش شدید مثبت) ← نمونهٔ خروجی باید دقیقاً 32767 اشباع شود (نه منفی بر اثر سرریز int16_t).
+        بلاک ب: pred = 0, idx = 0 (step = 7) و دو نیبل پیاپی 0x00 (index_delta = -1) و سپس نیبل 0x04 ← چون idx پس از گام اول باید روی 0 بماند (نه wrap به 255 -> 88)، نمونهٔ بعدی نباید جهش دامنه‌ای بیش از چند واحد داشته باشد (abs(sample) < 32).
+    block_align فرد و فایل بریده‌شده در EOF (زیر UBSan/ASan):
+        ساخت فایل WAV با format = 0x11 و block_align = 13 (فرد) و خواندن با Audio_Read تحت make asan (-fsanitize=address,undefined) ← عدم بروز خطای misaligned address روی int16_t*.
+        نوشتن data_size = 64 در هدر WAV ولی بریدن فایل واقعی روی ۱۰ بایت از بخش data (معادل ۱ هدر ۴ بایتی + ۶ بایت نیبل = ۱۳ نمونه) ← Audio_Read باید دقیقاً ۱۳ نمونه برگرداند و بایت‌های مقداردهی‌نشدهٔ ۵۴ بایت انتهایی بافر را دیکد نکند.
+
+۴.۳. تست تاییدیه FM_ERR_TOO_LARGE در FLAC / Vorbis / Opus (Audio #4) و نشت FM_Realloc (Audio #9)
+
+    سقف فریم‌های PCM:
+        ساخت هدر FLAC که در STREAMINFO مقدار totalPCMFrameCount = (10 * 1024 * 1024) + 1 دارد ← Audio_Open باید دقیقاً FM_ERR_TOO_LARGE برگرداند.
+        ساخت فایل Ogg Opus با granulepos نهایی بزرگ‌تر از ظرفیت FM_OPUS_MAX_PCM_BYTES (یا تست با -DFM_OPUS_MAX_PCM_BYTES=8192 روی test/vectors/test_opus.ogg) ← Audio_Open باید FM_ERR_TOO_LARGE برگرداند (نه FM_OK با صدای بریده‌شده).
+    تزریق خطای تخصیص روی FM_Realloc (Audio #9):
+        ساخت فایل Ogg Opus با پکت چندصفحه‌ای (مقدار segment lacing برابر 255 در صفحهٔ اول و ادامه در صفحهٔ دوم)، نصب allocator شمارشی/تزریق خطا از طریق FM_Allocator_Set به‌طوری که در فراخوانی realloc مقدار NULL برگرداند ← Audio_Open باید FM_ERR_NO_MEMORY برگرداند و شمارندهٔ alloc_calls == free_calls (صفر بایت نشت در ASan/LSan) باشد.
+
+۴.۴. تست تاییدیه شمارش سمپل استریو در fm_vorbis.c
+
+    تولید (یا سینتیسایز) یک بافر Ogg Vorbis استریو (channels = 2) با N فریم (مثلاً N = 1024 فریم = 2048 سمپل int16_t):
+        فراخوانی FM_Vorbis_GetOps()->decode(ctx, ogg, ogg_len, out, 2, &out_samples) (ظرفیت دقیقاً ۱ فریم استریو = ۲ عدد short) ← باید FM_OK و out_samples == 2 برگرداند (در کد فعلی FM_ERR_EOF و 0 برمی‌گرداند).
+        فراخوانی با out_count = 2048 ← باید کل out_samples == 2048 سمپل را برگرداند (در کد فعلی 1024 برمی‌گرداند).
+
+۴.۵. تست تاییدیه Audio #5 (پس از افزودن src/fm_opus.c)
+
+    حالت بدون libopus (make test با FM_USE_OPUS_LIB=0):
+        FM_Opus_GetOps() == NULL و FM_Opus_Init() == FM_ERR_UNSUPPORTED.
+        Audio_Open("/test/vectors/test_opus.ogg", &a) == FM_ERR_UNSUPPORTED (حذف کامل رفتار 48000 samples, peak 0).
+    حالت با libopus (make FM_USE_OPUS_LIB=1 test و make asan FM_USE_OPUS_LIB=1):
+        Audio_Open("/test/vectors/test_opus.ogg", &a) == FM_OK، مجموع نمونه‌ها 48000 و دامنهٔ پیک غیرصفر (peak == 8343 > 1000).
+
+(یافتهٔ جانبی خارج از اسکوپ جهت اطلاع: در src/fm_audio.c:1886–1888 داخل ماکروی FM_EVENT_LOG فیلدهای a->sample_rate، a->channels و a->codec_name نوشته شده‌اند که در صورت کامپایل با FM_DEBUG_LEVEL >= FM_DEBUG_MEDIUM خطای کامپایل می‌دهند و فرم صحیح آن‌ها a->info.sample_rate، a->info.channels و a->info.codec است).
+
+
+
+
+
+         
