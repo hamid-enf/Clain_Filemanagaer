@@ -15723,6 +15723,7 @@ static void test_sync_report(void)
     if (r == FM_OK) r = sr_verify("/sr_b2.bin", 30000, 22);
     (void)File_Delete("/sr_a.bin");
     (void)File_Delete("/sr_a2.bin");
+    (void)File_Delete("/sr_b.bin");
     (void)File_Delete("/sr_b2.bin");
     (void)File_Delete("/sr_n.bin");
     CHECK_RESULT(r, "claims");
