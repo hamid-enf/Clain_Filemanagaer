@@ -143,15 +143,39 @@ typedef struct
 {
     uint16_t count[16];
     uint16_t symbol[288];
+    uint16_t nsym;          /* symbols that have a code               */
+    uint8_t  maxlen;        /* longest code in use, 0 = empty table   */
 } Huff;
 
-static int huff_build(Huff *h, const uint8_t *lengths, int n)
+/* Which of the three Deflate alphabets a table is for; they differ in
+ * what an incomplete code means (same rules as zlib's inflate_table). */
+#define HUFF_CODELEN 0      /* code-length alphabet: must be complete */
+#define HUFF_LITLEN  1      /* complete, or ONE code of length 1      */
+#define HUFF_DIST    2      /* as LITLEN, or no code at all           */
+
+/* Build a canonical Huffman table and VALIDATE it.  A set of lengths
+ * that over-subscribes the code space (more codes than bit patterns) or
+ * leaves part of it unused does not describe a prefix code; decoding
+ * with it "works" and yields wrong symbols, i.e. a corrupt PNG used to
+ * load as a picture of noise.  RFC 1951 allows exactly two incomplete
+ * cases: a single code of length 1 (one distance / one literal used)
+ * and a distance alphabet with no code at all (block is all literals).
+ * The latter is accepted here and fails only if a match really tries
+ * to use a distance. */
+static int huff_build(Huff *h, const uint8_t *lengths, int n, int kind)
 {
     int i;
     int len;
     int k;
+    int left = 1;
+    int used = 0;
+    int maxlen = 0;
 
     memset(h, 0, sizeof(*h));
+    if (n < 0 || n > 288)
+    {
+        return -1;
+    }
     for (i = 0; i < n; i++)
     {
         if (lengths[i] > 15)
@@ -159,8 +183,43 @@ static int huff_build(Huff *h, const uint8_t *lengths, int n)
             return -1;
         }
         h->count[lengths[i]]++;
+        if (lengths[i] != 0u)
+        {
+            used++;
+            if ((int)lengths[i] > maxlen)
+            {
+                maxlen = (int)lengths[i];
+            }
+        }
     }
     h->count[0] = 0;
+    for (len = 1; len <= 15; len++)
+    {
+        left <<= 1;
+        left -= (int)h->count[len];
+        if (left < 0)
+        {
+            return -1;                       /* over-subscribed */
+        }
+    }
+    if (used == 0)
+    {
+        if (kind != HUFF_DIST)
+        {
+            return -1;                       /* nothing to decode with */
+        }
+    }
+    else if (left != 0)
+    {
+        /* incomplete: only "one code, one bit long" is legal, and never
+         * for the code-length alphabet */
+        if (kind == HUFF_CODELEN || used != 1 || maxlen != 1)
+        {
+            return -1;
+        }
+    }
+    h->maxlen = (uint8_t)maxlen;
+    h->nsym = (uint16_t)used;
     k = 0;
     for (len = 1; len <= 15; len++)
     {
@@ -182,7 +241,10 @@ static int huff_decode(Inf *z, const Huff *h)
     int index = 0;
     int i;
 
-    for (i = 1; i <= 15; i++)
+    /* Stop at the longest code the table has: an empty table (the
+     * legal "no distances" case) is refused at once instead of after
+     * eating 15 bits of the stream. */
+    for (i = 1; i <= (int)h->maxlen; i++)
     {
         int b = inf_bits(z, 1);
 
@@ -193,16 +255,21 @@ static int huff_decode(Inf *z, const Huff *h)
         code = (code << 1) | b;
         {
             int count = (int)h->count[i];
+            int off = code - first;
 
-            if (code - first < count)
+            if (off >= 0 && off < count)
             {
-                return (int)h->symbol[index + (code - first)];
+                if (index + off >= (int)h->nsym)
+                {
+                    return -1;
+                }
+                return (int)h->symbol[index + off];
             }
             index += count;
             first = (first + count) << 1;
         }
     }
-    return -1;
+    return -1;                /* unused code of an incomplete table */
 }
 
 static const uint16_t k_len_base[29] = {
@@ -245,11 +312,18 @@ static int inf_put(Inf *z, uint8_t b)
     return 0;
 }
 
+/* The ring index below is "& 32767": the window must be exactly the
+ * 32 KiB Deflate allows a match to reach back. */
+typedef char png_window_is_32k[(FM_PNG_WINDOW == 32768u) ? 1 : -1];
+
 static int inf_copy(Inf *z, int dist, int len)
 {
     size_t from;
 
-    if (dist <= 0 || (size_t)dist > z->produced)
+    /* A distance beyond the window would read a ring slot that newer
+     * output has already overwritten: the stream is invalid (RFC 1951
+     * limits distances to 32768), not a reason to emit stale bytes. */
+    if (dist <= 0 || dist > (int)FM_PNG_WINDOW || (size_t)dist > z->produced)
     {
         return -1;
     }
@@ -335,8 +409,8 @@ static int inf_fixed(Inf *z)
     for (; i < 280; i++) lengths[i] = 7;
     for (; i < 288; i++) lengths[i] = 8;
     for (i = 0; i < 32; i++) lengths[288 + i] = 5;
-    if (huff_build(&lit, lengths, 288) < 0 ||
-        huff_build(&dist, lengths + 288, 32) < 0)
+    if (huff_build(&lit, lengths, 288, HUFF_LITLEN) < 0 ||
+        huff_build(&dist, lengths + 288, 32, HUFF_DIST) < 0)
     {
         return -1;
     }
@@ -381,7 +455,7 @@ static int inf_dynamic(Inf *z)
         }
         clen[k_clen_order[i]] = (uint8_t)v;
     }
-    if (huff_build(&cl, clen, 19) < 0)
+    if (huff_build(&cl, clen, 19, HUFF_CODELEN) < 0)
     {
         return -1;
     }
@@ -445,8 +519,12 @@ static int inf_dynamic(Inf *z)
             lengths[i++] = val;
         }
     }
-    if (huff_build(&lit, lengths, nlit) < 0 ||
-        huff_build(&dist, lengths + nlit, ndist) < 0)
+    if (lengths[256] == 0u)
+    {
+        return -1;            /* no end-of-block code: block never ends */
+    }
+    if (huff_build(&lit, lengths, nlit, HUFF_LITLEN) < 0 ||
+        huff_build(&dist, lengths + nlit, ndist, HUFF_DIST) < 0)
     {
         return -1;
     }
@@ -455,19 +533,31 @@ static int inf_dynamic(Inf *z)
 
 static int inf_stored(Inf *z)
 {
-    int len;
-    int nlen;
+    int b0;
+    int b1;
+    int b2;
+    int b3;
+    uint32_t len;
+    uint32_t nlen;
 
     inf_align(z);
-    len = inf_get(z);
-    len |= inf_get(z) << 8;
-    nlen = inf_get(z);
-    nlen |= inf_get(z) << 8;
-    if (len < 0 || nlen < 0 || (len ^ 0xFFFF) != nlen)
+    /* inf_get() is -1 at end of input: test every byte BEFORE composing
+     * (shifting a negative int is undefined behaviour). */
+    b0 = inf_get(z);
+    b1 = inf_get(z);
+    b2 = inf_get(z);
+    b3 = inf_get(z);
+    if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0)
     {
         return -1;
     }
-    while (len-- > 0)
+    len = (uint32_t)b0 | ((uint32_t)b1 << 8);
+    nlen = (uint32_t)b2 | ((uint32_t)b3 << 8);
+    if ((len ^ 0xFFFFu) != nlen)
+    {
+        return -1;
+    }
+    while (len-- > 0u)
     {
         int b = inf_get(z);
 
@@ -604,6 +694,17 @@ FM_Result Image_ProbePNG(const void *png, size_t png_size, FM_ImageInfo *info)
     {
         return FM_ERR_CORRUPTED;
     }
+    {
+        /* Same check the decoder does: callers size buffers from what
+         * is reported here, so a damaged header must not be believed. */
+        uint32_t crc = PNG_CRC_RUN("IHDR", 4, PNG_CRC_INIT);
+
+        crc = PNG_CRC_RUN(p + 16, 13, crc);
+        if (PNG_CRC_FIN(crc) != png_be32(p + 29))
+        {
+            return FM_ERR_CRC;
+        }
+    }
     w = png_be32(p + 16);
     h = png_be32(p + 20);
     depth = p[24];
@@ -699,7 +800,8 @@ static FM_Result png_read(PngRead *r, void *dst, size_t n)
         }
         return FM_OK;
     }
-    if (r->mem == NULL || r->mem_pos + n > r->mem_len)
+    if (r->mem == NULL || r->mem_pos > r->mem_len ||
+        n > r->mem_len - r->mem_pos)
     {
         return FM_ERR_EOF;
     }
@@ -714,12 +816,34 @@ static FM_Result png_skip(PngRead *r, uint32_t n)
     {
         return File_Seek(r->file, (int64_t)n, FM_SEEK_CUR);
     }
-    if (r->mem_pos + n > r->mem_len)
+    if (r->mem_pos > r->mem_len || n > r->mem_len - r->mem_pos)
     {
         return FM_ERR_EOF;
     }
     r->mem_pos += n;
     return FM_OK;
+}
+
+/* Skip a chunk's payload and its CRC.  The length is a raw 32-bit field
+ * from the file: `len + 4u` wrapped to 3 for 0xFFFFFFFF and the parser
+ * then read chunk data as the next chunk header.  PNG limits a chunk to
+ * 2^31 - 1 bytes; anything longer is not a PNG chunk. */
+#define PNG_CHUNK_MAX 0x7FFFFFFFu
+
+static FM_Result png_skip_chunk(PngRead *r, uint32_t len)
+{
+    FM_Result e;
+
+    if (len > PNG_CHUNK_MAX)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    e = png_skip(r, len);
+    if (e == FM_OK)
+    {
+        e = png_skip(r, 4u);
+    }
+    return e;
 }
 
 static int png_need(Inf *z)
@@ -764,6 +888,10 @@ static int png_need(Inf *z)
                 (void)png_skip(p->in, 4);
                 return -1;
             }
+            if (len > PNG_CHUNK_MAX)
+            {
+                return -1;
+            }
             if (memcmp(hdr + 4, "IDAT", 4) == 0)
             {
                 p->idat_left = len;
@@ -776,7 +904,7 @@ static int png_need(Inf *z)
             }
             else
             {
-                if (png_skip(p->in, len + 4u) != FM_OK)
+                if (png_skip_chunk(p->in, len) != FM_OK)
                 {
                     return -1;
                 }
@@ -1016,6 +1144,10 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
         }
         else if (memcmp(type, "IDAT", 4) == 0)
         {
+            if (len > PNG_CHUNK_MAX)
+            {
+                return FM_ERR_CORRUPTED;
+            }
             feed.idat_left = len;
             feed.in_idat = FM_TRUE;
             feed.crc = PNG_CRC_RUN("IDAT", 4, PNG_CRC_INIT);
@@ -1027,7 +1159,7 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
         }
         else
         {
-            if (png_skip(in, len + 4u) != FM_OK)
+            if (png_skip_chunk(in, len) != FM_OK)
             {
                 return FM_ERR_CORRUPTED;
             }
@@ -1077,6 +1209,25 @@ static FM_Result png_decode(PngRead *in, FM_Image *img, void *pixel_buffer,
     return FM_OK;
 }
 
+/* The window / row / previous-row buffers are one static set: hold the
+ * codec claim for the whole decode so a second decode or an encode (a
+ * nested call from the FM_SetIdle hook, another task) cannot run over
+ * them half way. */
+static FM_Result png_decode_claimed(PngRead *in, FM_Image *img,
+                                    void *pixel_buffer, size_t capacity,
+                                    uint16_t max_w, uint16_t max_h)
+{
+    FM_Result r = FM_CodecScratch_Enter();
+
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    r = png_decode(in, img, pixel_buffer, capacity, max_w, max_h);
+    FM_CodecScratch_Leave();
+    return r;
+}
+
 FM_Result Image_DecodePNG(const void *png, size_t png_size,
                           FM_Image *img, void *pixel_buffer, size_t capacity)
 {
@@ -1089,7 +1240,7 @@ FM_Result Image_DecodePNG(const void *png, size_t png_size,
     memset(&in, 0, sizeof(in));
     in.mem = (const uint8_t *)png;
     in.mem_len = png_size;
-    return png_decode(&in, img, pixel_buffer, capacity, 0, 0);
+    return png_decode_claimed(&in, img, pixel_buffer, capacity, 0, 0);
 }
 
 FM_Result FM_PNG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
@@ -1103,7 +1254,7 @@ FM_Result FM_PNG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
     }
     memset(&in, 0, sizeof(in));
     in.file = f;
-    return png_decode(&in, img, pixel_buffer, capacity, max_w, max_h);
+    return png_decode_claimed(&in, img, pixel_buffer, capacity, max_w, max_h);
 }
 
 FM_Result FM_PNG_ProbeFile(FM_File *f, FM_ImageInfo *info)
@@ -1155,7 +1306,7 @@ static FM_Result png_out_bytes(PngOut *o, const void *p, uint32_t n)
         }
         return FM_OK;
     }
-    if (o->mem_len + n > o->mem_cap)
+    if (o->mem_len > o->mem_cap || n > o->mem_cap - o->mem_len)
     {
         return FM_ERR_TOO_LARGE;
     }
@@ -1266,7 +1417,7 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
     uint32_t y;
     uint32_t adler = 1;
     FM_Result r;
-    uint64_t need;
+    size_t need;
     uint64_t raw;
     uint32_t nblocks;
     uint64_t zlen;
@@ -1276,16 +1427,21 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    need = (uint64_t)img->width * img->height * Image_BytesPerPixel(img->format);
-    if (need > img->data_capacity)
+    r = FM_Image_CheckSource(img, &need);
+    if (r != FM_OK)
     {
-        return FM_ERR_TOO_LARGE;
+        return r;
     }
     row_bytes = 1u + (size_t)img->width * 3u;
     if (row_bytes == 0u || row_bytes > 65535u ||
         row_bytes > FM_PNG_MAX_STRIDE + 1u)
     {
         return FM_ERR_TOO_LARGE;
+    }
+    r = FM_CodecScratch_Enter();     /* g_png_row is shared with decode */
+    if (r != FM_OK)
+    {
+        return r;
     }
     rowp = g_png_row;
     raw = (uint64_t)img->height * row_bytes;
@@ -1295,8 +1451,9 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
         nblocks = 1u;
     }
     zlen = 2u + (uint64_t)nblocks * 5u + raw + 4u;
-    if (zlen > UINT32_MAX)
+    if (zlen > PNG_CHUNK_MAX)
     {
+        FM_CodecScratch_Leave();
         return FM_ERR_TOO_LARGE;
     }
 
@@ -1381,6 +1538,7 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
     {
         r = png_write_chunk(o, "IEND", ihdr, 0);
     }
+    FM_CodecScratch_Leave();
     return r;
 }
 

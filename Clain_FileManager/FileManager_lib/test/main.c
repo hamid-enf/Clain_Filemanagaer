@@ -11123,6 +11123,7 @@ typedef struct
     uint32_t       seg_len;         /* Segment size-field width (0 = 4)   */
     int            long_void;       /* add a Void with a 5-byte size      */
     int            unknown_cluster; /* Cluster with the "unknown" size    */
+    const char    *acodec;          /* NULL = "A_PCM/INT/LIT"             */
 } MkvOpt;
 
 /* EBML header, Segment, Tracks, and an open Cluster with its Timecode
@@ -11165,7 +11166,8 @@ static void mkv_head(Eb *e, const MkvOpt *o, size_t *seg_at, size_t *clu_at)
         te = eb_open(e, 0xAEu);
         eb_uint(e, 0xD7u, 2u, 1u);
         eb_uint(e, 0x83u, 2u, 1u);
-        eb_bin(e, 0x86u, "A_PCM/INT/LIT", 13);
+        eb_bin(e, 0x86u, o->acodec ? o->acodec : "A_PCM/INT/LIT",
+               strlen(o->acodec ? o->acodec : "A_PCM/INT/LIT"));
         sub = eb_open(e, 0xE1u);
         if (o->rate_f32) eb_f32(e, 0xB5u, (float)o->rate);
         else             eb_f64(e, 0xB5u, o->rate);
@@ -11628,6 +11630,62 @@ static size_t vr_sps_add_crop(const uint8_t *sps, size_t len, uint8_t *out,
     return on;
 }
 #endif /* FM_USE_H264 */
+
+#if FM_USE_AUDIO
+/* Fake track decoder for V13: one sample per input byte, plus the number
+ * of packets this context has decoded before. */
+static int      g_vr_ad_inits;
+static int      g_vr_ad_closes;
+static int      g_vr_ad_decodes;
+static int      g_vr_ad_bad_ctx;
+static uint32_t g_vr_ad_rate;
+static uint32_t g_vr_ad_state;
+
+static FM_Result vr_ad_init(void **ctx, const FM_AudioInfo *info)
+{
+    g_vr_ad_inits++;
+    g_vr_ad_rate = info->sample_rate;
+    g_vr_ad_state = 0u;
+    *ctx = &g_vr_ad_state;
+    return FM_OK;
+}
+
+static FM_Result vr_ad_decode(void *ctx, const uint8_t *in, size_t in_size,
+                              int16_t *out, size_t out_count,
+                              size_t *out_samples)
+{
+    uint32_t *seen = (uint32_t *)ctx;
+    size_t k;
+
+    g_vr_ad_decodes++;
+    if (ctx != &g_vr_ad_state)
+    {
+        g_vr_ad_bad_ctx++;
+        return FM_ERR_INTERNAL;
+    }
+    if (in_size > out_count)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    for (k = 0; k < in_size; k++)
+    {
+        out[k] = (int16_t)(in[k] + *seen);
+    }
+    (*seen)++;
+    *out_samples = in_size;
+    return FM_OK;
+}
+
+static void vr_ad_close(void *ctx)
+{
+    (void)ctx;
+    g_vr_ad_closes++;
+}
+
+static const FM_AudioDecoderOps g_vr_ad_ops = {
+    "vr-fake", vr_ad_init, vr_ad_decode, vr_ad_close
+};
+#endif /* FM_USE_AUDIO */
 
 static void test_video_report(void)
 {
@@ -12709,9 +12767,1355 @@ static void test_video_report(void)
         (void)File_Delete("/vr.mp4");
     }
 #endif /* FM_USE_H264 */
+
+    /* ---------------- V13 ---------------- */
+    {
+        static const uint8_t P0[] = { 0x11, 0x22, 0x33, 0x44, 0x55 };
+        static const uint8_t P1[] = { 0x66, 0x77, 0x88 };
+        const uint8_t *pf[2];
+        uint32_t ps[2];
+        const FM_AudioDecoderOps *saved_flac = Audio_GetDecoder("FLAC");
+        const FM_AudioDecoderOps *saved_aac = Audio_GetDecoder("AAC");
+
+        pf[0] = P0; ps[0] = sizeof(P0);
+        pf[1] = P1; ps[1] = sizeof(P1);
+        (void)Audio_UnregisterDecoder("FLAC");
+        (void)Audio_UnregisterDecoder("AAC");
+
+        TEST("V13 audio track without a decoder: UNSUPPORTED, not raw bytes");
+        VR_BEGIN();
+        o.rate = 48000.0;
+        o.acodec = "A_FLAC";
+        mkv_head(&e, &o, &seg_at, &clu_at);
+        mkv_block(&e, 0xA3u, 1u, 0u, &vf[0], &vs[0], 1u);
+        mkv_block(&e, 0xA3u, 2u, 0u, &pf[0], &ps[0], 1u);
+        mkv_block(&e, 0xA3u, 2u, 0u, &pf[1], &ps[1], 1u);
+        mkv_tail(&e, &o, seg_at, clu_at);
+        r = vr_write("/vr.mkv", &e);
+        if (r == FM_OK) r = Video_Open("/vr.mkv", &vid);
+        if (r == FM_OK)
+        {
+            FM_AudioTrackInfo ai;
+            uint8_t ab[64];
+            size_t got = 0;
+
+            r = Video_GetAudioInfo(&vid, &ai);
+            if (r == FM_OK && (ai.codec != FM_VIDEO_AUDIO_FLAC ||
+                               ai.decodable != FM_FALSE))
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            if (r == FM_OK &&
+                Video_ReadAudioFrame(&vid, ab, sizeof(ab), &got)
+                    != FM_ERR_UNSUPPORTED)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            (void)Video_Close(&vid);
+        }
+        CHECK_RESULT(r, "no decoder");
+
+        TEST("V13 AAC track without a decoder: ADTS-framed pass-through");
+        VR_BEGIN();
+        o.rate = 48000.0;
+        o.acodec = "A_AAC";
+        mkv_head(&e, &o, &seg_at, &clu_at);
+        mkv_block(&e, 0xA3u, 1u, 0u, &vf[0], &vs[0], 1u);
+        mkv_block(&e, 0xA3u, 2u, 0u, &pf[0], &ps[0], 1u);
+        mkv_tail(&e, &o, seg_at, clu_at);
+        r = vr_write("/vr.mkv", &e);
+        if (r == FM_OK) r = Video_Open("/vr.mkv", &vid);
+        if (r == FM_OK)
+        {
+            uint8_t ab[64];
+            size_t got = 0;
+
+            r = Video_ReadAudioFrame(&vid, ab, sizeof(ab), &got);
+            /* 7-byte ADTS header (sync 0xFFF, frame length 12) + payload */
+            if (r == FM_OK &&
+                (got != 7u + sizeof(P0) || ab[0] != 0xFFu ||
+                 (ab[1] & 0xF0u) != 0xF0u ||
+                 ((((uint32_t)ab[3] & 3u) << 11) | ((uint32_t)ab[4] << 3) |
+                  ((uint32_t)ab[5] >> 5)) != 7u + sizeof(P0) ||
+                 memcmp(ab + 7, P0, sizeof(P0)) != 0))
+            {
+                r = FM_ERR_CRC;
+            }
+            (void)Video_Close(&vid);
+        }
+        CHECK_RESULT(r, "aac adts");
+
+#if FM_USE_AUDIO
+        TEST("V13 audio track: one decoder context for the whole track");
+        VR_BEGIN();
+        o.rate = 48000.0;
+        o.acodec = "A_FLAC";
+        mkv_head(&e, &o, &seg_at, &clu_at);
+        mkv_block(&e, 0xA3u, 1u, 0u, &vf[0], &vs[0], 1u);
+        mkv_block(&e, 0xA3u, 2u, 0u, &pf[0], &ps[0], 1u);
+        mkv_block(&e, 0xA3u, 2u, 0u, &pf[1], &ps[1], 1u);
+        mkv_tail(&e, &o, seg_at, clu_at);
+        g_vr_ad_inits = 0; g_vr_ad_closes = 0; g_vr_ad_decodes = 0;
+        g_vr_ad_rate = 0; g_vr_ad_bad_ctx = 0;
+        r = vr_write("/vr.mkv", &e);
+        if (r == FM_OK) r = Audio_RegisterDecoder("FLAC", &g_vr_ad_ops);
+        if (r == FM_OK) r = Video_Open("/vr.mkv", &vid);
+        if (r == FM_OK)
+        {
+            FM_AudioTrackInfo ai;
+            int16_t pcm[16];
+            size_t got = 0;
+
+            r = Video_GetAudioInfo(&vid, &ai);
+            if (r == FM_OK && ai.decodable != FM_TRUE)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            /* packet 1: 5 bytes -> 5 samples (10 bytes of PCM) */
+            if (r == FM_OK)
+            {
+                r = Video_ReadAudioFrame(&vid, (uint8_t *)pcm, sizeof(pcm),
+                                         &got);
+            }
+            if (r == FM_OK && (got != 10u || pcm[0] != 0x11 || pcm[4] != 0x55))
+            {
+                r = FM_ERR_CRC;
+            }
+            if (r == FM_OK)
+            {
+                r = Video_ReadAudioFrame(&vid, (uint8_t *)pcm, sizeof(pcm),
+                                         &got);
+            }
+            /* the fake decoder adds the number of packets it has seen
+             * before: only a context that survives gives 0x66 + 1 */
+            if (r == FM_OK && (got != 6u || pcm[0] != 0x67 || pcm[2] != 0x89))
+            {
+                r = FM_ERR_CRC;
+            }
+            if (r == FM_OK &&
+                Video_ReadAudioFrame(&vid, (uint8_t *)pcm, sizeof(pcm), &got)
+                    != FM_ERR_EOF)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            if (r == FM_OK && (g_vr_ad_inits != 1 || g_vr_ad_decodes != 2 ||
+                               g_vr_ad_closes != 0 || g_vr_ad_rate != 48000u ||
+                               g_vr_ad_bad_ctx != 0))
+            {
+                r = FM_ERR_INTERNAL;
+            }
+            (void)Video_Close(&vid);
+            if (r == FM_OK && g_vr_ad_closes != 1) r = FM_ERR_INTERNAL;
+        }
+        (void)Audio_UnregisterDecoder("FLAC");
+        CHECK_RESULT(r, "persistent decoder");
+#endif /* FM_USE_AUDIO */
+
+        if (saved_flac != NULL) (void)Audio_RegisterDecoder("FLAC", saved_flac);
+        if (saved_aac != NULL)  (void)Audio_RegisterDecoder("AAC", saved_aac);
+        (void)File_Delete("/vr.mkv");
+    }
 #undef VR_BEGIN
 }
 #endif /* FM_USE_VIDEO */
+
+#if FM_USE_IMAGE
+/* ================================================================ */
+/* Image report regressions (Report.txt D-01..D-09, O-02, O-03, O-05) */
+/* ================================================================ */
+
+/* CRC-32 of our own so the PNG builders work with FM_USE_CRC=0 too. */
+TEST_MAYBE_UNUSED static uint32_t ir_crc32(const uint8_t *p, size_t n,
+                                           uint32_t crc)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        uint32_t k;
+
+        crc ^= p[i];
+        for (k = 0; k < 8u; k++)
+        {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+
+typedef struct
+{
+    uint8_t b[512];
+    size_t  n;
+} IrBuf;
+
+TEST_MAYBE_UNUSED static void ir_put(IrBuf *o, const void *p, size_t n)
+{
+    if (o->n + n <= sizeof(o->b))
+    {
+        memcpy(o->b + o->n, p, n);
+    }
+    o->n += n;
+}
+
+TEST_MAYBE_UNUSED static void ir_be32(IrBuf *o, uint32_t v)
+{
+    uint8_t b[4];
+
+    b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16);
+    b[2] = (uint8_t)(v >> 8);  b[3] = (uint8_t)v;
+    ir_put(o, b, 4);
+}
+
+/* One chunk; `claim` is the length field (normally == n). */
+TEST_MAYBE_UNUSED static void ir_chunk(IrBuf *o, const char *type,
+                                       const uint8_t *data, size_t n)
+{
+    uint32_t crc = ir_crc32((const uint8_t *)type, 4, 0xFFFFFFFFu);
+
+    ir_be32(o, (uint32_t)n);
+    ir_put(o, type, 4);
+    if (n != 0u)
+    {
+        ir_put(o, data, n);
+        crc = ir_crc32(data, n, crc);
+    }
+    ir_be32(o, crc ^ 0xFFFFFFFFu);
+}
+
+TEST_MAYBE_UNUSED static void ir_head(IrBuf *o, uint32_t w, uint32_t h,
+                                      uint8_t color)
+{
+    static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    uint8_t ihdr[13];
+
+    memset(o, 0, sizeof(*o));
+    memset(ihdr, 0, sizeof(ihdr));
+    ihdr[0] = (uint8_t)(w >> 24); ihdr[1] = (uint8_t)(w >> 16);
+    ihdr[2] = (uint8_t)(w >> 8);  ihdr[3] = (uint8_t)w;
+    ihdr[4] = (uint8_t)(h >> 24); ihdr[5] = (uint8_t)(h >> 16);
+    ihdr[6] = (uint8_t)(h >> 8);  ihdr[7] = (uint8_t)h;
+    ihdr[8] = 8;
+    ihdr[9] = color;
+    ir_put(o, sig, 8);
+    ir_chunk(o, "IHDR", ihdr, 13);
+}
+
+/* Complete gray/RGB PNG around one zlib stream. */
+TEST_MAYBE_UNUSED static void ir_png(IrBuf *o, uint32_t w, uint32_t h,
+                                     uint8_t color, const uint8_t *z,
+                                     size_t zn)
+{
+    ir_head(o, w, h, color);
+    ir_chunk(o, "IDAT", z, zn);
+    ir_chunk(o, "IEND", NULL, 0);
+}
+
+TEST_MAYBE_UNUSED static uint32_t ir_adler(const uint8_t *p, size_t n)
+{
+    uint32_t a = 1;
+    uint32_t b = 0;
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        a = (a + p[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+/* zlib stream with the raw bytes in one stored block. */
+TEST_MAYBE_UNUSED static size_t ir_zstored(uint8_t *z, const uint8_t *raw,
+                                           size_t n)
+{
+    uint32_t ad = ir_adler(raw, n);
+    size_t k = 0;
+
+    z[k++] = 0x78; z[k++] = 0x01; z[k++] = 0x01;
+    z[k++] = (uint8_t)n; z[k++] = (uint8_t)(n >> 8);
+    z[k++] = (uint8_t)~n; z[k++] = (uint8_t)(~n >> 8);
+    memcpy(z + k, raw, n); k += n;
+    z[k++] = (uint8_t)(ad >> 24); z[k++] = (uint8_t)(ad >> 16);
+    z[k++] = (uint8_t)(ad >> 8);  z[k++] = (uint8_t)ad;
+    return k;
+}
+
+/* Deflate bit writer: fields LSB first, Huffman codes MSB first. */
+typedef struct
+{
+    uint8_t b[400];
+    size_t  bit;
+} IrBits;
+
+TEST_MAYBE_UNUSED static void ir_bits(IrBits *w, uint32_t v, uint32_t n)
+{
+    uint32_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (((v >> i) & 1u) != 0u && w->bit < sizeof(w->b) * 8u)
+        {
+            w->b[w->bit >> 3] = (uint8_t)(w->b[w->bit >> 3] |
+                                          (1u << (w->bit & 7u)));
+        }
+        w->bit++;
+    }
+}
+
+TEST_MAYBE_UNUSED static void ir_code(IrBits *w, uint32_t code, uint32_t len)
+{
+    while (len-- > 0u)
+    {
+        ir_bits(w, (code >> len) & 1u, 1u);
+    }
+}
+
+/* zlib header + a final dynamic-Huffman block header.  The code-length
+ * alphabet is the 16 symbols 0..15 at 4 bits each (a complete code in
+ * which length L is simply written as the 4-bit number L); with
+ * `cl_incomplete` symbol 15 is left out, which leaves 1/16 of the code
+ * space unused. */
+TEST_MAYBE_UNUSED static void ir_dyn_begin(IrBits *w, const uint8_t *ll,
+                                           uint32_t nlit, const uint8_t *dl,
+                                           uint32_t ndist, int cl_incomplete)
+{
+    static const uint8_t order[19] = {
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+    };
+    uint32_t i;
+
+    memset(w, 0, sizeof(*w));
+    ir_bits(w, 0x78u, 8); ir_bits(w, 0x01u, 8);
+    ir_bits(w, 1u, 1);                 /* BFINAL */
+    ir_bits(w, 2u, 2);                 /* dynamic */
+    ir_bits(w, nlit - 257u, 5);
+    ir_bits(w, ndist - 1u, 5);
+    ir_bits(w, 15u, 4);                /* all 19 code-length lengths */
+    for (i = 0; i < 19u; i++)
+    {
+        uint32_t len = (order[i] < 16u) ? 4u : 0u;
+
+        if (cl_incomplete && order[i] == 15u)
+        {
+            len = 0u;
+        }
+        ir_bits(w, len, 3);
+    }
+    for (i = 0; i < nlit; i++)  ir_code(w, ll[i], 4);
+    for (i = 0; i < ndist; i++) ir_code(w, dl[i], 4);
+}
+
+TEST_MAYBE_UNUSED static size_t ir_dyn_end(IrBits *w, uint8_t *z)
+{
+    size_t n = (w->bit + 7u) / 8u;
+
+    memcpy(z, w->b, n);
+    memset(z + n, 0, 4);               /* Adler-32 (not checked) */
+    return n + 4u;
+}
+
+/* Decode a built PNG; *px receives the first `want` RGB pixels' red. */
+TEST_MAYBE_UNUSED static FM_Result ir_decode(const IrBuf *o, uint8_t *rgb,
+                                             size_t cap)
+{
+    FM_Image img;
+
+    if (o->n > sizeof(o->b))
+    {
+        return FM_ERR_INTERNAL;        /* test buffer too small */
+    }
+    memset(&img, 0, sizeof(img));
+    return Image_DecodePNG(o->b, o->n, &img, rgb, cap);
+}
+
+#if FM_USE_PNG && !FM_USE_THREADS
+static const uint8_t *g_ir_nest_png;
+static size_t         g_ir_nest_len;
+static FM_Result      g_ir_nest_result;
+static int            g_ir_nest_calls;
+
+static void ir_idle_png(void)
+{
+    uint8_t px[4 * 2 * 3];
+    FM_Image img;
+
+    if (g_ir_nest_calls++ == 0)
+    {
+        g_ir_nest_result = Image_DecodePNG(g_ir_nest_png, g_ir_nest_len,
+                                           &img, px, sizeof(px));
+    }
+}
+#endif
+
+#if FM_USE_JPEG && !FM_USE_THREADS
+static uint8_t   g_ir_jpg[2048];
+static size_t    g_ir_jpg_len;
+static FM_Result g_ir_jnest_result;
+static int       g_ir_jnest_calls;
+
+static void ir_idle_jpeg(void)
+{
+    static uint8_t px[64 * 64 * 3];
+    FM_Image img;
+
+    if (g_ir_jnest_calls++ == 0)
+    {
+        g_ir_jnest_result = Image_DecodeJPEG(g_ir_jpg, g_ir_jpg_len, &img,
+                                             px, sizeof(px));
+    }
+}
+#endif
+
+static FM_Result ir_fake_decode(const uint8_t *data, size_t size,
+                                FM_Image *img, void *pixel_buffer,
+                                size_t capacity)
+{
+    (void)data; (void)size; (void)img; (void)pixel_buffer; (void)capacity;
+    return FM_ERR_UNSUPPORTED;
+}
+
+static const FM_ImageCodecOps g_ir_ops_a = { "ir-a", NULL, ir_fake_decode };
+static const FM_ImageCodecOps g_ir_ops_b = { "ir-b", NULL, ir_fake_decode };
+
+#if FM_USE_THREADS && FM_HOST_BUILD && FM_USE_PNG
+#define IR_TW 48u
+#define IR_TH 40u
+typedef struct
+{
+    uint32_t seed;
+    int      failed;
+} IrThread;
+
+static void ir_fill(uint8_t *p, uint32_t seed)
+{
+    uint32_t i;
+
+    for (i = 0; i < IR_TW * IR_TH * 3u; i++)
+    {
+        p[i] = (uint8_t)((i * (seed * 2u + 1u)) ^ (seed * 37u) ^ (i >> 5));
+    }
+}
+
+static void *ir_thread(void *arg)
+{
+    IrThread *t = (IrThread *)arg;
+    static const size_t cap = IR_TW * IR_TH * 3u + IR_TH * 8u + 256u;
+    uint8_t *src = (uint8_t *)malloc(IR_TW * IR_TH * 3u);
+    uint8_t *png = (uint8_t *)malloc(cap);
+    uint8_t *ref = (uint8_t *)malloc(cap);
+    uint8_t *out = (uint8_t *)malloc(IR_TW * IR_TH * 3u);
+    char name[8];
+    FM_Image img;
+    size_t ref_len = 0;
+    int i;
+
+    (void)snprintf(name, sizeof(name), "IR%u", (unsigned)t->seed);
+    if (src == NULL || png == NULL || ref == NULL || out == NULL)
+    {
+        t->failed = 1;
+    }
+    else
+    {
+        ir_fill(src, t->seed);
+        memset(&img, 0, sizeof(img));
+        img.width = (uint16_t)IR_TW; img.height = (uint16_t)IR_TH;
+        img.format = FM_PIXEL_RGB888;
+        img.data = src;
+        img.data_capacity = IR_TW * IR_TH * 3u;
+        if (Image_EncodePNG(&img, ref, cap, &ref_len) != FM_OK)
+        {
+            t->failed = 1;
+        }
+        for (i = 0; i < 60 && !t->failed; i++)
+        {
+            FM_Image dec;
+            size_t len = 0;
+
+            if (Image_EncodePNG(&img, png, cap, &len) != FM_OK ||
+                len != ref_len || memcmp(png, ref, len) != 0)
+            {
+                t->failed = 2;
+                break;
+            }
+            memset(out, 0, IR_TW * IR_TH * 3u);
+            if (Image_DecodePNG(png, len, &dec, out,
+                                IR_TW * IR_TH * 3u) != FM_OK ||
+                memcmp(out, src, IR_TW * IR_TH * 3u) != 0)
+            {
+                t->failed = 3;
+                break;
+            }
+            if (Image_RegisterCodec(name, &g_ir_ops_a) != FM_OK ||
+                Image_GetCodec(name) != &g_ir_ops_a ||
+                Image_UnregisterCodec(name) != FM_OK ||
+                Image_GetCodec(name) != NULL)
+            {
+                t->failed = 4;
+                break;
+            }
+        }
+    }
+    free(src); free(png); free(ref); free(out);
+    return NULL;
+}
+#endif
+
+static void test_image_report(void)
+{
+    static uint8_t rgb[64 * 64 * 3];
+    FM_Result r;
+    uint32_t i;
+
+    (void)i;
+    (void)rgb;
+    (void)FS_Unmount("/");
+    r = Storage_Mount("ram");
+    if (r == FM_OK) r = FS_Mount("/", &g_fs);
+    if (r != FM_OK)
+    {
+        TEST("Image report: remount POSIX");
+        FAIL(FM_ResultString(r));
+        return;
+    }
+
+#if FM_USE_PNG
+    /* ---------------- D-01 ---------------- */
+    {
+        static uint8_t ll[259];
+        uint8_t dl[1];
+        uint8_t z[420];
+        IrBits w;
+        IrBuf png;
+        size_t zn;
+
+        /* control: 1x1 gray, scanline {0, 0x55}.  Literal code
+         * {0:1 bit, 0x55:2, EOB:2} is complete; the distance alphabet
+         * has no code at all (legal: the block is all literals). */
+        TEST("D-01 png: valid dynamic block, empty distance table");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 1; ll[0x55] = 2; ll[256] = 2;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
+        ir_code(&w, 0u, 1); ir_code(&w, 2u, 2); ir_code(&w, 3u, 2);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 1, 1, 0, z, zn);
+        rgb[0] = 0;
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        if (r == FM_OK && rgb[0] != 0x55u) r = FM_ERR_CRC;
+        CHECK_RESULT(r, "valid dynamic");
+
+        /* control: one distance code of length 1 (legal incomplete
+         * code).  4x1 gray, scanline {0, P, P, P, P} as literal 0,
+         * literal P, match(len 3, dist 1). */
+        TEST("D-01 png: single 1-bit distance code is accepted");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 2; ll[0x66] = 2; ll[256] = 2; ll[257] = 2;
+        dl[0] = 1;
+        ir_dyn_begin(&w, ll, 258u, dl, 1u, 0);
+        ir_code(&w, 0u, 2); ir_code(&w, 1u, 2);   /* 0, P            */
+        ir_code(&w, 3u, 2);                       /* length 3        */
+        ir_code(&w, 0u, 1);                       /* distance 1      */
+        ir_code(&w, 2u, 2);                       /* end of block    */
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 4, 1, 0, z, zn);
+        memset(rgb, 0, 12);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        if (r == FM_OK && (rgb[0] != 0x66u || rgb[3] != 0x66u ||
+                           rgb[6] != 0x66u || rgb[9] != 0x66u))
+        {
+            r = FM_ERR_CRC;
+        }
+        CHECK_RESULT(r, "one distance code");
+
+        /* five 2-bit codes: more codes than 2-bit patterns */
+        TEST("D-01 png: over-subscribed literal table is CORRUPTED");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 2; ll[0x55] = 2; ll[256] = 2; ll[257] = 2; ll[258] = 2;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 259u, dl, 1u, 0);
+        ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 2u, 2);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 1, 1, 0, z, zn);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "over-subscribed");
+
+        /* three 2-bit codes: a quarter of the code space is unused */
+        TEST("D-01 png: incomplete literal table is CORRUPTED");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 2; ll[0x55] = 2; ll[256] = 2;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
+        ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 2u, 2);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 1, 1, 0, z, zn);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "incomplete");
+
+        TEST("D-01 png: incomplete code-length table is CORRUPTED");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 1; ll[0x55] = 2; ll[256] = 2;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 257u, dl, 1u, 1);
+        ir_code(&w, 0u, 1); ir_code(&w, 2u, 2); ir_code(&w, 3u, 2);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 1, 1, 0, z, zn);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "incomplete code lengths");
+
+        /* guards: these were already refused (after reading on) */
+        TEST("D-01 png: match with an empty distance table is CORRUPTED");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 2; ll[0x66] = 2; ll[256] = 2; ll[257] = 2;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 258u, dl, 1u, 0);
+        ir_code(&w, 0u, 2); ir_code(&w, 1u, 2); ir_code(&w, 3u, 2);
+        ir_code(&w, 0u, 1); ir_code(&w, 2u, 2);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 4, 1, 0, z, zn);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "no distance code");
+
+        TEST("D-01 png: table without an end-of-block code is CORRUPTED");
+        memset(ll, 0, sizeof(ll));
+        ll[0] = 1; ll[0x55] = 1;
+        dl[0] = 0;
+        ir_dyn_begin(&w, ll, 257u, dl, 1u, 0);
+        ir_code(&w, 0u, 1); ir_code(&w, 1u, 1);
+        zn = ir_dyn_end(&w, z);
+        ir_png(&png, 1, 1, 0, z, zn);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "no EOB");
+    }
+
+    /* ---------------- D-02 ---------------- */
+    TEST("D-02 png: distance outside the produced data is CORRUPTED");
+    {
+        /* fixed-Huffman block for a 4x1 gray image: literal 0, then a
+         * length-4 match.  (a) distance 4 with one byte produced --
+         * reads window bytes nothing in this stream wrote; (b) distance
+         * symbol 30, which no valid stream contains; (c) control:
+         * literal 0, literal 0x21, match(3, distance 1), literal... */
+        uint8_t z[32];
+        IrBits w;
+        IrBuf png;
+        size_t zn;
+        uint32_t k;
+
+        r = FM_OK;
+        for (k = 0; k < 3u && r == FM_OK; k++)
+        {
+            FM_Result e;
+
+            memset(&w, 0, sizeof(w));
+            ir_bits(&w, 0x78u, 8); ir_bits(&w, 0x01u, 8);
+            ir_bits(&w, 1u, 1); ir_bits(&w, 1u, 2);       /* final, fixed */
+            ir_code(&w, 0x30u, 8);                        /* literal 0    */
+            if (k == 2u)
+            {
+                ir_code(&w, 0x30u + 0x21u, 8);            /* literal 0x21 */
+                ir_code(&w, 1u, 7);                       /* length 3     */
+                ir_code(&w, 0u, 5);                       /* distance 1   */
+            }
+            else
+            {
+                ir_code(&w, 2u, 7);                       /* length 4     */
+                ir_code(&w, (k == 0u) ? 3u : 30u, 5);     /* distance     */
+            }
+            ir_code(&w, 0u, 7);                           /* end of block */
+            zn = ir_dyn_end(&w, z);
+            ir_png(&png, 4, 1, 0, z, zn);
+            memset(rgb, 0, 12);
+            e = ir_decode(&png, rgb, sizeof(rgb));
+            if (k == 2u)
+            {
+                r = e;
+                if (r == FM_OK && (rgb[0] != 0x21u || rgb[9] != 0x21u))
+                {
+                    r = FM_ERR_CRC;
+                }
+            }
+            else if (e != FM_ERR_CORRUPTED)
+            {
+                r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+            }
+        }
+    }
+    CHECK_RESULT(r, "distance");
+
+    /* ---------------- D-03 ---------------- */
+    TEST("D-03 png: stored block cut inside its header (no UB)");
+    r = FM_OK;
+    for (i = 0; i < 4u && r == FM_OK; i++)
+    {
+        /* zlib header, BFINAL/BTYPE byte, then 0..3 of the 4 LEN/NLEN
+         * bytes.  Under UBSan the old code shifted a negative int. */
+        static const uint8_t z[7] = { 0x78, 0x01, 0x01, 0x02, 0x00, 0xFD, 0xFF };
+        IrBuf png;
+        FM_Result e;
+
+        ir_png(&png, 1, 1, 0, z, 3u + i);
+        e = ir_decode(&png, rgb, sizeof(rgb));
+        if (e != FM_ERR_CORRUPTED)
+        {
+            r = (e == FM_OK) ? FM_ERR_INVALID_FORMAT : e;
+        }
+    }
+    CHECK_RESULT(r, "truncated stored header");
+
+    {
+        static const uint8_t raw[2] = { 0, 0x77 };
+        uint8_t z[32];
+        size_t zn = ir_zstored(z, raw, sizeof(raw));
+        IrBuf png;
+
+        TEST("D-03 png: chunk length 0xFFFFFFFF before IDAT is CORRUPTED");
+        /* len + 4 wrapped to 3: the parser skipped 3 bytes and carried
+         * on, so this file -- 3 filler bytes, then a good IDAT -- loaded. */
+        ir_head(&png, 1, 1, 0);
+        ir_be32(&png, 0xFFFFFFFFu); ir_put(&png, "tEXt", 4);
+        ir_put(&png, "abc", 3);
+        ir_chunk(&png, "IDAT", z, zn);
+        ir_chunk(&png, "IEND", NULL, 0);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "wrap before IDAT");
+
+        TEST("D-03 png: chunk length 0xFFFFFFFC between IDATs is CORRUPTED");
+        /* len + 4 wrapped to 0: nothing skipped, next IDAT accepted */
+        ir_head(&png, 1, 1, 0);
+        ir_chunk(&png, "IDAT", z, 3);
+        ir_be32(&png, 0xFFFFFFFCu); ir_put(&png, "tEXt", 4);
+        ir_chunk(&png, "IDAT", z + 3, zn - 3u);
+        ir_chunk(&png, "IEND", NULL, 0);
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        r = (r == FM_ERR_CORRUPTED) ? FM_OK
+                                    : ((r == FM_OK) ? FM_ERR_INVALID_FORMAT : r);
+        CHECK_RESULT(r, "wrap between IDATs");
+
+        TEST("D-03 png: split IDAT + ancillary chunk still decodes");
+        ir_head(&png, 1, 1, 0);
+        ir_chunk(&png, "tEXt", (const uint8_t *)"k\0v", 3);
+        ir_chunk(&png, "IDAT", z, 3);
+        ir_chunk(&png, "IDAT", z + 3, zn - 3u);
+        ir_chunk(&png, "IEND", NULL, 0);
+        rgb[0] = 0;
+        r = ir_decode(&png, rgb, sizeof(rgb));
+        if (r == FM_OK && rgb[0] != 0x77u) r = FM_ERR_CRC;
+        CHECK_RESULT(r, "control");
+
+        /* ---------------- D-05 ---------------- */
+        TEST("D-05 png: damaged IHDR is FM_ERR_CRC in probe and GetInfo");
+        {
+            FM_ImageInfo inf;
+
+            ir_png(&png, 1, 1, 0, z, zn);
+            r = Image_ProbePNG(png.b, png.n, &inf);
+            if (r == FM_OK && (inf.width != 1u || inf.height != 1u))
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            if (r == FM_OK)
+            {
+                png.b[18] = 0x40;       /* width 1 -> 16385, CRC stale */
+                if (Image_ProbePNG(png.b, png.n, &inf) != FM_ERR_CRC)
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+            }
+            if (r == FM_OK) r = File_WriteAll("/ir_bad.png", png.b, png.n);
+            if (r == FM_OK &&
+                Image_GetInfo("/ir_bad.png", &inf) != FM_ERR_CRC)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            /* PNG signature and nothing behind it: a broken PNG, not
+             * "some other format" */
+            if (r == FM_OK) r = File_WriteAll("/ir_bad.png", png.b, 20);
+            if (r == FM_OK &&
+                Image_GetInfo("/ir_bad.png", &inf) != FM_ERR_CORRUPTED)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            (void)File_Delete("/ir_bad.png");
+        }
+        CHECK_RESULT(r, "ihdr crc");
+    }
+
+#if !FM_USE_THREADS
+    /* ---------------- D-04 ---------------- */
+    TEST("D-04 png: nested decode from the idle hook gets BUSY");
+    {
+        /* outer: 4x4 gray, row 0 literal, rows 1..3 "Up" with zero
+         * deltas -- every row depends on the shared previous-row
+         * buffer the nested decode would overwrite */
+        static const uint8_t raw_o[20] = {
+            0, 10, 20, 30, 40,  2, 0, 0, 0, 0,
+            2, 0, 0, 0, 0,      2, 0, 0, 0, 0
+        };
+        static const uint8_t raw_n[10] = {
+            0, 200, 201, 202, 203,  0, 210, 211, 212, 213
+        };
+        uint8_t z[48];
+        IrBuf outer;
+        static IrBuf nested;
+        size_t zn;
+
+        zn = ir_zstored(z, raw_o, sizeof(raw_o));
+        ir_png(&outer, 4, 4, 0, z, zn);
+        zn = ir_zstored(z, raw_n, sizeof(raw_n));
+        ir_png(&nested, 4, 2, 0, z, zn);
+        g_ir_nest_png = nested.b;
+        g_ir_nest_len = nested.n;
+        g_ir_nest_result = FM_OK;
+        g_ir_nest_calls = 0;
+        memset(rgb, 0, 48);
+        FM_SetIdle(ir_idle_png);
+        r = ir_decode(&outer, rgb, sizeof(rgb));
+        FM_SetIdle(NULL);
+        if (r == FM_OK && (g_ir_nest_calls == 0 ||
+                           g_ir_nest_result != FM_ERR_BUSY))
+        {
+            r = FM_ERR_BUSY;
+        }
+        for (i = 0; i < 16u && r == FM_OK; i++)
+        {
+            if (rgb[i * 3u] != (uint8_t)(10u * ((i % 4u) + 1u)))
+            {
+                r = FM_ERR_CRC;
+            }
+        }
+        /* and the claim is released again */
+        if (r == FM_OK) r = ir_decode(&nested, rgb, sizeof(rgb));
+        if (r == FM_OK && rgb[0] != 200u) r = FM_ERR_CRC;
+    }
+    CHECK_RESULT(r, "nested png");
+#endif /* !FM_USE_THREADS */
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+    TEST("D-04/D-06 png: 3 threads encode+decode+registry, serial results");
+    {
+        pthread_t th[3];
+        IrThread ctx[3];
+        int started = 0;
+
+        r = FM_OK;
+        for (i = 0; i < 3u; i++)
+        {
+            ctx[i].seed = i + 1u;
+            ctx[i].failed = 0;
+            if (pthread_create(&th[i], NULL, ir_thread, &ctx[i]) != 0)
+            {
+                r = FM_ERR_INTERNAL;
+                break;
+            }
+            started++;
+        }
+        for (i = 0; i < (uint32_t)started; i++)
+        {
+            (void)pthread_join(th[i], NULL);
+            if (ctx[i].failed != 0)
+            {
+                printf("[thread %u: step %d] ", (unsigned)i, ctx[i].failed);
+                r = FM_ERR_CRC;
+            }
+        }
+    }
+    CHECK_RESULT(r, "concurrent png");
+#endif
+#endif /* FM_USE_PNG */
+
+#if FM_USE_JPEG && !FM_USE_THREADS
+    TEST("D-04 jpeg: nested decode from the idle hook gets BUSY");
+    {
+        static uint8_t ref[64 * 64 * 3];
+        FM_Image img;
+
+        g_ir_jpg_len = 0;
+        r = File_ReadAll("/test/vectors/tiny64.jpg", g_ir_jpg,
+                         sizeof(g_ir_jpg), &g_ir_jpg_len);
+        if (r == FM_OK)
+        {
+            r = Image_DecodeJPEG(g_ir_jpg, g_ir_jpg_len, &img, ref,
+                                 sizeof(ref));
+        }
+        if (r == FM_OK)
+        {
+            g_ir_jnest_calls = 0;
+            g_ir_jnest_result = FM_OK;
+            memset(rgb, 0, sizeof(rgb));
+            FM_SetIdle(ir_idle_jpeg);
+            r = Image_DecodeJPEG(g_ir_jpg, g_ir_jpg_len, &img, rgb,
+                                 sizeof(rgb));
+            FM_SetIdle(NULL);
+        }
+        if (r == FM_OK && (g_ir_jnest_calls == 0 ||
+                           g_ir_jnest_result != FM_ERR_BUSY))
+        {
+            r = FM_ERR_BUSY;
+        }
+        /* picojpeg's static state survived: same picture as alone */
+        if (r == FM_OK && memcmp(rgb, ref, sizeof(ref)) != 0)
+        {
+            r = FM_ERR_CRC;
+        }
+    }
+    CHECK_RESULT(r, "nested jpeg");
+#endif
+
+    /* ---------------- D-06 ---------------- */
+    TEST("D-06 codec registry: no duplicate entry, no match on \"\"");
+    r = Image_RegisterCodec("IRA", &g_ir_ops_a);
+    if (r == FM_OK) r = Image_RegisterCodec("IRB", &g_ir_ops_a);
+    if (r == FM_OK) r = Image_UnregisterCodec("IRA");   /* frees a slot
+                                                          * in front */
+    if (r == FM_OK) r = Image_RegisterCodec("IRB", &g_ir_ops_b);
+    if (r == FM_OK && Image_GetCodec("IRB") != &g_ir_ops_b)
+    {
+        r = FM_ERR_NOT_FOUND;
+    }
+    if (r == FM_OK) r = Image_UnregisterCodec("IRB");
+    /* one registration, one unregister: it must be gone (the old
+     * first-fit left the earlier entry behind) */
+    if (r == FM_OK && (Image_GetCodec("IRB") != NULL ||
+                       Image_UnregisterCodec("IRB") != FM_ERR_NOT_FOUND))
+    {
+        r = FM_ERR_EXISTS;
+    }
+    if (r == FM_OK && (Image_UnregisterCodec("") != FM_ERR_INVALID_ARGUMENT ||
+                       Image_GetCodec("") != NULL))
+    {
+        r = FM_ERR_INVALID_FORMAT;
+    }
+    (void)Image_UnregisterCodec("IRA");
+    (void)Image_UnregisterCodec("IRB");
+    CHECK_RESULT(r, "registry");
+
+    /* ---------------- D-07 ---------------- */
+    TEST("D-07 encoders refuse data_size smaller than the picture");
+    {
+        static uint8_t pix[8 * 8 * 3];
+        static uint8_t out[2048];
+        FM_Image img;
+        size_t n = 0;
+        FM_Bool ex = FM_TRUE;
+        FM_Result e;
+
+        memset(pix, 0x40, sizeof(pix));
+        memset(&img, 0, sizeof(img));
+        img.width = 8; img.height = 8;
+        img.format = FM_PIXEL_RGB888;
+        img.data = pix;
+        img.data_capacity = sizeof(pix);
+        img.data_size = 3u;                     /* one valid pixel */
+        r = FM_OK;
+        if (Image_EncodeBMP(&img, out, sizeof(out), &n) != FM_ERR_TOO_LARGE)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        e = Image_EncodePNG(&img, out, sizeof(out), &n);
+        if (e != (FM_USE_PNG ? FM_ERR_TOO_LARGE : FM_ERR_UNSUPPORTED))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        e = Image_EncodeJPEG(&img, out, sizeof(out), &n);
+        if (e != (FM_USE_JPEG ? FM_ERR_TOO_LARGE : FM_ERR_UNSUPPORTED))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        /* through Image_Save: refused before the file is created */
+        (void)File_Delete("/ir_s.bmp");
+        if (Image_Save("/ir_s.bmp", &img) != FM_ERR_TOO_LARGE ||
+            File_Exists("/ir_s.bmp", &ex) != FM_OK || ex)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        /* control: with the real size (or 0 = unspecified) it encodes */
+        img.data_size = sizeof(pix);
+        if (r == FM_OK) r = Image_EncodeBMP(&img, out, sizeof(out), &n);
+        img.data_size = 0u;
+        if (r == FM_OK) r = Image_EncodeBMP(&img, out, sizeof(out), &n);
+    }
+    CHECK_RESULT(r, "data_size");
+
+    TEST("Image_Save: extension rules, no file wiped or left half-written");
+    {
+        static uint8_t pix[4 * 4 * 3];
+        static uint8_t wide[1];
+        FM_Image img;
+        FM_Bool ex = FM_FALSE;
+        uint8_t keep[4];
+        size_t got = 0;
+
+        memset(pix, 0x80, sizeof(pix));
+        memset(&img, 0, sizeof(img));
+        img.width = 4; img.height = 4;
+        img.format = FM_PIXEL_RGB888;
+        img.data = pix;
+        img.data_capacity = sizeof(pix);
+        /* unknown extension: UNSUPPORTED and the existing file is
+         * still there, untouched */
+        r = File_WriteAll("/ir_s.xyz", "KEEP", 4);
+        if (r == FM_OK && Image_Save("/ir_s.xyz", &img) != FM_ERR_UNSUPPORTED)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        if (r == FM_OK) r = File_ReadAll("/ir_s.xyz", keep, sizeof(keep), &got);
+        if (r == FM_OK && (got != 4u || memcmp(keep, "KEEP", 4) != 0))
+        {
+            r = FM_ERR_CRC;
+        }
+        (void)File_Delete("/ir_s.xyz");
+        /* O-03: FAT hands back upper-case names */
+        if (r == FM_OK) r = Image_Save("/IR_S.BMP", &img);
+        if (r == FM_OK)
+        {
+            FM_ImageInfo inf;
+
+            r = Image_GetInfo("/IR_S.BMP", &inf);
+            if (r == FM_OK && (inf.width != 4u || inf.height != 4u))
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+        }
+        (void)File_Delete("/IR_S.BMP");
+#if FM_USE_PNG
+        if (r == FM_OK) r = Image_Save("/IR_S.PNG", &img);
+        if (r == FM_OK)
+        {
+            FM_ImageInfo inf;
+
+            r = Image_GetInfo("/IR_S.PNG", &inf);
+            if (r == FM_OK && strcmp(inf.codec, "PNG") != 0)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+        }
+        (void)File_Delete("/IR_S.PNG");
+        /* a row longer than the PNG encoder supports: it fails after
+         * the file was created -- the stub must not stay behind */
+        if (r == FM_OK)
+        {
+            FM_Image big;
+
+            memset(&big, 0, sizeof(big));
+            big.width = (uint16_t)(FM_PNG_MAX_STRIDE / 3u + 8u);
+            big.height = 1;
+            big.format = FM_PIXEL_GRAY8;
+            big.data = (uint8_t *)malloc(big.width);
+            big.data_capacity = big.width;
+            if (big.data == NULL)
+            {
+                r = FM_ERR_NO_MEMORY;
+            }
+            else
+            {
+                memset(big.data, 0, big.width);
+                if (Image_Save("/ir_big.png", &big) != FM_ERR_TOO_LARGE ||
+                    File_Exists("/ir_big.png", &ex) != FM_OK || ex)
+                {
+                    r = FM_ERR_INVALID_FORMAT;
+                }
+                free(big.data);
+            }
+            (void)File_Delete("/ir_big.png");
+        }
+#else
+        /* codec compiled out: UNSUPPORTED, and no empty file */
+        if (r == FM_OK && (Image_Save("/ir_s.png", &img) != FM_ERR_UNSUPPORTED ||
+                           File_Exists("/ir_s.png", &ex) != FM_OK || ex))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+#endif
+        (void)wide;
+    }
+    CHECK_RESULT(r, "image save");
+
+    /* ---------------- O-02 ---------------- */
+    TEST("O-02 BMP header: biSizeImage counts the row padding");
+    {
+        uint8_t pix[3 * 2 * 3];
+        uint8_t out[128];
+        FM_Image img;
+        size_t n = 0;
+
+        memset(pix, 1, sizeof(pix));
+        memset(&img, 0, sizeof(img));
+        img.width = 3; img.height = 2;
+        img.format = FM_PIXEL_RGB888;
+        img.data = pix;
+        img.data_capacity = sizeof(pix);
+        r = Image_EncodeBMP(&img, out, sizeof(out), &n);
+        /* 3 px = 9 bytes, padded to 12 per row, 2 rows */
+        if (r == FM_OK && (n != 54u + 24u || out[34] != 24u || out[35] != 0u))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+    }
+    CHECK_RESULT(r, "biSizeImage");
+
+    /* ---------------- D-08 / D-09 ---------------- */
+    TEST("D-08 Image_Rotate validates the SOURCE buffer too");
+    {
+        static uint8_t small[4 * 4 * 3];
+        static uint8_t dstb[8 * 8 * 3];
+        FM_Image s;
+        FM_Image d;
+
+        memset(small, 7, sizeof(small));
+        memset(&s, 0, sizeof(s));
+        memset(&d, 0, sizeof(d));
+        s.width = 8; s.height = 8;              /* claims 192 bytes ... */
+        s.format = FM_PIXEL_RGB888;
+        s.data = small;
+        s.data_capacity = sizeof(small);        /* ... has 48 */
+        d.data = dstb;
+        d.data_capacity = sizeof(dstb);
+        r = (Image_Rotate(&s, &d, 90) == FM_ERR_TOO_LARGE)
+                ? FM_OK : FM_ERR_INVALID_FORMAT;
+        /* data_size counts as well */
+        s.width = 4; s.height = 4;
+        s.data_size = 3u;
+        if (r == FM_OK && Image_Rotate(&s, &d, 180) != FM_ERR_TOO_LARGE)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        s.data_size = 0u;
+        if (r == FM_OK) r = Image_Rotate(&s, &d, 90);
+        if (r == FM_OK && (d.width != 4u || d.height != 4u || dstb[0] != 7u))
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+    }
+    CHECK_RESULT(r, "rotate source");
+
+    TEST("D-09 Image_ScaleEx checks both buffer capacities");
+    {
+        uint8_t src[4 * 4 * 3];
+        uint8_t a[8 * 8 * 3];
+        uint8_t b[8 * 8 * 3];
+
+        for (i = 0; i < sizeof(src); i++) src[i] = (uint8_t)(i * 5u);
+        r = FM_OK;
+        if (Image_ScaleEx(src, sizeof(src) - 1u, 4, 4, FM_PIXEL_RGB888,
+                          a, sizeof(a), 8, 8, FM_SCALE_NEAREST)
+                != FM_ERR_TOO_LARGE ||
+            Image_ScaleEx(src, sizeof(src), 4, 4, FM_PIXEL_RGB888,
+                          a, sizeof(a) - 1u, 8, 8, FM_SCALE_BILINEAR)
+                != FM_ERR_TOO_LARGE ||
+            Image_ScaleEx(src, sizeof(src), 4, 4, FM_PIXEL_RGB888,
+                          a, sizeof(a), 8, 8, (FM_ScaleMode)7)
+                != FM_ERR_INVALID_ARGUMENT)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        /* exact capacities: same pixels as the unchecked entry point */
+        memset(a, 0, sizeof(a));
+        memset(b, 1, sizeof(b));
+        if (r == FM_OK)
+        {
+            r = Image_ScaleEx(src, sizeof(src), 4, 4, FM_PIXEL_RGB888,
+                              a, sizeof(a), 8, 8, FM_SCALE_BILINEAR);
+        }
+        if (r == FM_OK)
+        {
+            r = Image_Scale(src, 4, 4, FM_PIXEL_RGB888, b, 8, 8,
+                            FM_SCALE_BILINEAR);
+        }
+        if (r == FM_OK && memcmp(a, b, sizeof(a)) != 0) r = FM_ERR_CRC;
+    }
+    CHECK_RESULT(r, "scale ex");
+
+#if (FM_IMAGE_MAX_BYTES) <= 0xFFFFFFFFu
+    /* Only where a pixel buffer cannot exceed 4 GiB -- a 32-bit target,
+     * or a host build with -DFM_IMAGE_MAX_BYTES=0xFFFFFFFFu (the matrix
+     * has that entry).  65535 x 65535 x 4 is 17 GB: each call below
+     * must refuse the size itself; a wrapped size_t product would pass
+     * the capacity check and run off the 16-byte buffer. */
+    TEST("D-08 sizes beyond the limit are TOO_LARGE, not wrapped");
+    {
+        static uint8_t tiny[16];
+        FM_Image big;
+        FM_Image d;
+        size_t bytes = 0;
+        uint8_t bmp[54];
+
+        memset(&big, 0, sizeof(big));
+        memset(&d, 0, sizeof(d));
+        big.width = 65535u; big.height = 65535u;
+        big.format = FM_PIXEL_RGBA8888;
+        big.data = tiny;
+        big.data_capacity = SIZE_MAX;           /* forged */
+        d.data = tiny;
+        d.data_capacity = SIZE_MAX;
+        r = FM_OK;
+        if (Image_BufferSize(65535u, 65535u, FM_PIXEL_RGBA8888, &bytes)
+                != FM_ERR_TOO_LARGE ||
+            Image_Flip(&big, FM_IMAGE_FLIP_VERTICAL) != FM_ERR_TOO_LARGE ||
+            Image_Rotate(&big, &d, 90) != FM_ERR_TOO_LARGE ||
+            Image_ScaleEx(tiny, SIZE_MAX, 65535u, 65535u, FM_PIXEL_RGBA8888,
+                          tiny, SIZE_MAX, 1, 1, FM_SCALE_NEAREST)
+                != FM_ERR_TOO_LARGE ||
+            Image_Scale(tiny, 1, 1, FM_PIXEL_RGBA8888, tiny, 65535u, 65535u,
+                        FM_SCALE_NEAREST) != FM_ERR_TOO_LARGE)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        /* a BMP header announcing 65535 x 65535: ResizeFile must not
+         * size an allocation from it */
+        memset(bmp, 0, sizeof(bmp));
+        bmp[0] = 'B'; bmp[1] = 'M';
+        bmp[10] = 54; bmp[14] = 40;
+        bmp[18] = 0xFF; bmp[19] = 0xFF;
+        bmp[22] = 0xFF; bmp[23] = 0xFF;
+        bmp[26] = 1; bmp[28] = 24;
+        if (r == FM_OK) r = File_WriteAll("/ir_huge.bmp", bmp, sizeof(bmp));
+        if (r == FM_OK &&
+            Image_ResizeFile("/ir_huge.bmp", "/ir_out.bmp", 4, 4,
+                             FM_SCALE_NEAREST) != FM_ERR_TOO_LARGE)
+        {
+            r = FM_ERR_INVALID_FORMAT;
+        }
+        (void)File_Delete("/ir_huge.bmp");
+        (void)File_Delete("/ir_out.bmp");
+    }
+    CHECK_RESULT(r, "size limit");
+#endif
+
+#if FM_USE_JPEG
+    /* ---------------- O-05 ---------------- */
+    TEST("O-05 jpeg probe: scan budget on filler and endless segments");
+    {
+        const uint32_t budget = (uint32_t)FM_JPEG_PROBE_BUDGET;
+        const uint32_t over = budget / 16u + 8u;     /* segments */
+        const size_t cap = 2u + (size_t)over * 4u + 32u;
+        uint8_t *f = (budget <= 0x100000u) ? (uint8_t *)malloc(cap) : NULL;
+        static const uint8_t sof[] = {
+            0xFF, 0xC0, 0x00, 0x11, 8, 0x00, 0x10, 0x00, 0x20, 3,
+            1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1
+        };
+        FM_ImageInfo inf;
+        size_t n;
+
+        if (f == NULL)
+        {
+            printf("(budget too large for this test) ");
+            r = FM_OK;
+        }
+        else
+        {
+            /* control: 100 empty APP1 segments, then the frame header */
+            n = 0;
+            f[n++] = 0xFF; f[n++] = 0xD8;
+            for (i = 0; i < 100u; i++)
+            {
+                f[n++] = 0xFF; f[n++] = 0xE1; f[n++] = 0; f[n++] = 2;
+            }
+            memcpy(f + n, sof, sizeof(sof)); n += sizeof(sof);
+            r = File_WriteAll("/ir_p.jpg", f, n);
+            if (r == FM_OK) r = Image_GetInfo("/ir_p.jpg", &inf);
+            if (r == FM_OK && (inf.width != 32u || inf.height != 16u))
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            /* more segments than the budget pays for: given up on */
+            n = 2;
+            for (i = 0; i < over; i++)
+            {
+                f[n++] = 0xFF; f[n++] = 0xE1; f[n++] = 0; f[n++] = 2;
+            }
+            memcpy(f + n, sof, sizeof(sof)); n += sizeof(sof);
+            if (r == FM_OK) r = File_WriteAll("/ir_p.jpg", f, n);
+            if (r == FM_OK &&
+                Image_GetInfo("/ir_p.jpg", &inf) != FM_ERR_INVALID_FORMAT)
+            {
+                r = FM_ERR_INVALID_FORMAT;
+            }
+            (void)File_Delete("/ir_p.jpg");
+            free(f);
+        }
+    }
+    CHECK_RESULT(r, "probe budget");
+#endif
+}
+#else /* !FM_USE_IMAGE */
+/* FM_USE_IMAGE=0 used to drop every Image_* symbol except the six JPEG /
+ * PNG stubs: an application that keeps one call (behind a run-time
+ * "have images?" check, say) no longer linked.  All of them must link
+ * and say "not supported", like the video and audio modules do. */
+static void test_image_report(void)
+{
+    uint8_t a[16];
+    uint8_t b[16];
+    FM_Image img;
+    FM_ImageInfo inf;
+    FM_ImageDecoder dec;
+    FM_ImageCodecOps ops;
+    size_t n = 123u;
+    FM_Result r = FM_OK;
+
+    TEST("FM_USE_IMAGE=0: every Image_* entry links, UNSUPPORTED");
+    memset(a, 0, sizeof(a));
+    memset(b, 0, sizeof(b));
+    memset(&img, 0, sizeof(img));
+    memset(&dec, 0xA5, sizeof(dec));
+    memset(&ops, 0, sizeof(ops));
+#define IR_OFF(call) do { if ((call) != FM_ERR_UNSUPPORTED) \
+                              r = FM_ERR_INVALID_FORMAT; } while (0)
+    IR_OFF(Image_Load("/x.bmp", &img, a, sizeof(a)));
+    IR_OFF(Image_LoadEx("/x.bmp", &img, a, sizeof(a), 4, 4));
+    IR_OFF(Image_Save("/x.bmp", &img));
+    IR_OFF(Image_GetInfo("/x.bmp", &inf));
+    IR_OFF(Image_SetWorkBuffer(a, sizeof(a)));
+    IR_OFF(Image_DecodeBMP(a, sizeof(a), &img, b, sizeof(b)));
+    IR_OFF(Image_EncodeBMP(&img, b, sizeof(b), &n));
+    IR_OFF(Image_DecodeJPEG(a, sizeof(a), &img, b, sizeof(b)));
+    IR_OFF(Image_EncodeJPEG(&img, b, sizeof(b), &n));
+    IR_OFF(Image_DecodePNG(a, sizeof(a), &img, b, sizeof(b)));
+    IR_OFF(Image_EncodePNG(&img, b, sizeof(b), &n));
+    IR_OFF(Image_RegisterCodec("X", &ops));
+    IR_OFF(Image_UnregisterCodec("X"));
+    IR_OFF(Image_OpenStream(NULL, &dec, &inf));
+    IR_OFF(Image_ReadLine(&dec, a, sizeof(a)));
+    IR_OFF(Image_StreamDecode(NULL, &img, NULL, NULL, NULL));
+    IR_OFF(Image_BufferSize(2, 2, FM_PIXEL_RGB888, &n));
+    IR_OFF(Image_Convert(&img, &img, FM_PIXEL_RGB888));
+    IR_OFF(Image_ConvertRGB565to888(a, b, 1));
+    IR_OFF(Image_ConvertRGB888to565(a, b, 1));
+    IR_OFF(Image_ConvertRGB888toGray(a, b, 1));
+    IR_OFF(Image_ApplyEffect(&img, FM_IMAGE_EFFECT_INVERT, 0));
+    IR_OFF(Image_Scale(a, 1, 1, FM_PIXEL_RGB888, b, 1, 1, FM_SCALE_NEAREST));
+    IR_OFF(Image_ScaleEx(a, sizeof(a), 1, 1, FM_PIXEL_RGB888, b, sizeof(b),
+                         1, 1, FM_SCALE_NEAREST));
+    IR_OFF(Image_ResizeFile("/x.bmp", "/y.bmp", 1, 1, FM_SCALE_NEAREST));
+    IR_OFF(Image_Flip(&img, FM_IMAGE_FLIP_VERTICAL));
+    IR_OFF(Image_Rotate(&img, &img, 90));
+#undef IR_OFF
+    n = 123u;
+    if (Image_GetWorkBuffer(&n) != NULL || n != 0u ||
+        Image_GetCodec("X") != NULL ||
+        Image_BytesPerPixel(FM_PIXEL_RGB888) != 0u)
+    {
+        r = FM_ERR_INVALID_FORMAT;
+    }
+    Image_CloseDecoder(&dec);
+    Image_CloseDecoder(NULL);
+    if (dec.stream != NULL) r = FM_ERR_INVALID_FORMAT;
+    CHECK_RESULT(r, "image stubs");
+}
+#endif /* FM_USE_IMAGE */
 
 /* ================================================================ */
 /* The file-handle pool is a fixed FM_MAX_OPEN_FILES array: one handle
@@ -12805,6 +14209,7 @@ int main(void)
 #if FM_USE_IMAGE
     RUN_SUITE(test_scale);
 #endif
+    RUN_SUITE(test_image_report);
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_hook);
 #endif

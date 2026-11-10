@@ -54,6 +54,25 @@ void     FM_InternalBufferRelease(void);
 /* FM_TRUE when both paths resolve to the same entry of the same mount. */
 FM_Bool FM_File_SamePath(const char *a, const char *b);
 
+#if FM_USE_IMAGE || FM_USE_MJPEG
+/* Exclusive use of the still-image / MJPEG codec state: the PNG window
+ * and row buffers, the BMP row scratch, the JPEG work buffer and the
+ * file-static state of picojpeg (shared by JPEG stills and MJPEG video).
+ *
+ *   FM_USE_THREADS=1  blocks until the other thread is done, so two
+ *                     tasks decoding at once are serialised.  Must not
+ *                     be re-entered from the same thread (FM_SetIdle
+ *                     hook, codec callback): the port mutexes are not
+ *                     recursive.
+ *   FM_USE_THREADS=0  the only way in twice is a nested call from such
+ *                     a hook; it gets FM_ERR_BUSY and the outer codec
+ *                     run is left intact.
+ *
+ * Every FM_OK from Enter must be paired with exactly one Leave. */
+FM_Result FM_CodecScratch_Enter(void);
+void      FM_CodecScratch_Leave(void);
+#endif
+
 #if FM_USE_IMAGE
 /* Shrink (sw,sh) so dest RGB/gray fits `capacity` and optional max_w/max_h
  * (0 = no clamp).  Aspect ratio is preserved. */
@@ -61,6 +80,13 @@ FM_Result FM_Image_FitSize(uint16_t src_w, uint16_t src_h, size_t capacity,
                            size_t bpp, uint16_t max_w, uint16_t max_h,
                            uint16_t *dst_w, uint16_t *dst_h);
 FM_Result FM_Image_ReadExact(FM_File *f, void *data, uint32_t size);
+/* width*height*bpp in 64 bits; FM_ERR_TOO_LARGE when it exceeds
+ * FM_IMAGE_MAX_BYTES / size_t, FM_ERR_INVALID_ARGUMENT for a zero. */
+FM_Result FM_Image_Bytes(uint32_t width, uint32_t height, size_t bpp,
+                         size_t *bytes);
+/* Pixel bytes an encoder / transform will read from `img`, checked
+ * against BOTH data_capacity and (when given) data_size. */
+FM_Result FM_Image_CheckSource(const FM_Image *img, size_t *need);
 
 #if FM_USE_JPEG
 FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,

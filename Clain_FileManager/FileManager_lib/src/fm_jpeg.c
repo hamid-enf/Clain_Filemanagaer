@@ -324,6 +324,7 @@ FM_Result FM_JPEG_ProbeFile(FM_File *f, FM_ImageInfo *info)
 {
     uint8_t b[2];
     FM_Result r;
+    uint32_t budget = (uint32_t)FM_JPEG_PROBE_BUDGET;
 
     if (f == NULL || info == NULL)
     {
@@ -345,8 +346,23 @@ FM_Result FM_JPEG_ProbeFile(FM_File *f, FM_ImageInfo *info)
         uint8_t lenb[2];
         uint16_t len;
 
+        /* Every byte read one at a time and every segment costs budget:
+         * a file of 0xFF fill, or of millions of 4-byte segments, is not
+         * a JPEG worth scanning to the end (on an SD card that is
+         * seconds of blocked UI per megabyte). */
+        if (budget < 16u)
+        {
+            return FM_ERR_INVALID_FORMAT;
+        }
+        budget -= 16u;
+        FM_Idle();
         do
         {
+            if (budget == 0u)
+            {
+                return FM_ERR_INVALID_FORMAT;
+            }
+            budget--;
             r = jpeg_read_u8(f, &b[0]);
             if (r != FM_OK)
             {
@@ -355,6 +371,11 @@ FM_Result FM_JPEG_ProbeFile(FM_File *f, FM_ImageInfo *info)
         } while (b[0] != 0xFFu);
         do
         {
+            if (budget == 0u)
+            {
+                return FM_ERR_INVALID_FORMAT;
+            }
+            budget--;
             r = jpeg_read_u8(f, &marker);
             if (r != FM_OK)
             {
@@ -410,7 +431,28 @@ FM_Result FM_JPEG_ProbeFile(FM_File *f, FM_ImageInfo *info)
     return FM_ERR_INVALID_FORMAT;
 }
 
+static FM_Result jpeg_sw_decode_run(JpegSrc *src, FM_Image *img,
+                                    void *pixel_buffer, size_t capacity,
+                                    uint16_t max_w, uint16_t max_h);
+
+/* picojpeg keeps its whole decoder state in file statics, and MJPEG
+ * video frames go through the same decoder: one picture at a time. */
 static FM_Result jpeg_sw_decode_src(JpegSrc *src, FM_Image *img,
+                                    void *pixel_buffer, size_t capacity,
+                                    uint16_t max_w, uint16_t max_h)
+{
+    FM_Result r = FM_CodecScratch_Enter();
+
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    r = jpeg_sw_decode_run(src, img, pixel_buffer, capacity, max_w, max_h);
+    FM_CodecScratch_Leave();
+    return r;
+}
+
+static FM_Result jpeg_sw_decode_run(JpegSrc *src, FM_Image *img,
                                     void *pixel_buffer, size_t capacity,
                                     uint16_t max_w, uint16_t max_h)
 {
@@ -564,8 +606,14 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
         uint64_t sz = 0;
         uint8_t *blob;
 
+        /* The work buffer is one shared block: hold the codec claim
+         * while the file sits in it.  When the claim is not available
+         * (nested call) the hardware path is skipped and the software
+         * decoder below reports FM_ERR_BUSY. */
         if (File_Size(f, &sz) == FM_OK && sz > 0u &&
-            sz <= (16u * 1024u * 1024u))
+            sz <= (16u * 1024u * 1024u) &&
+            (uint64_t)sz <= (uint64_t)FM_IMAGE_MAX_BYTES &&
+            FM_CodecScratch_Enter() == FM_OK)
         {
             size_t work_cap = 0;
             uint8_t *work = (uint8_t *)Image_GetWorkBuffer(&work_cap);
@@ -593,6 +641,7 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
                     }
                     if (r == FM_OK)
                     {
+                        FM_CodecScratch_Leave();
                         return r;
                     }
                 }
@@ -601,6 +650,7 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
                     FM_Free(blob);
                 }
             }
+            FM_CodecScratch_Leave();
         }
     }
     if (File_Seek(f, (int64_t)pos, FM_SEEK_SET) != FM_OK)
@@ -1226,17 +1276,17 @@ static FM_Result jpeg_encode(JpegOut *o, const FM_Image *img)
 
 static FM_Result jpeg_encode_common(const FM_Image *img, JpegOut *o)
 {
-    uint64_t need;
+    FM_Result r;
 
     if (img == NULL || img->data == NULL || img->width == 0 ||
         img->height == 0 || Image_BytesPerPixel(img->format) == 0)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    need = (uint64_t)img->width * img->height * Image_BytesPerPixel(img->format);
-    if (need > img->data_capacity)
+    r = FM_Image_CheckSource(img, NULL);   /* capacity AND data_size */
+    if (r != FM_OK)
     {
-        return FM_ERR_TOO_LARGE;
+        return r;
     }
     o->bits = 0;
     o->nbits = 0;

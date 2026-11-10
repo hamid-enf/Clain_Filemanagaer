@@ -4090,8 +4090,8 @@ FM_Result Video_DecodeFrameScaled(FM_Video *v, void *pixels_out,
         }
         else
         {
-            r = Image_Scale(scratch, w, h, FM_PIXEL_RGB888, pixels_out,
-                            out_w, out_h, mode);
+            r = Image_ScaleEx(scratch, native, w, h, FM_PIXEL_RGB888,
+                              pixels_out, pixels_cap, out_w, out_h, mode);
         }
     }
     if (own)

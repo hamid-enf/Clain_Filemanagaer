@@ -138,6 +138,15 @@ if [ "$MODE" != "quick" ]; then
     # No scratch buffer: File_Copy / File_Insert report FM_ERR_NO_MEMORY by
     # design, so only the build is checked (report F-12, Test/L).
     CFLAGS_EXTRA="-DFM_USE_INTERNAL_BUFFER=0" link_one "FM_USE_INTERNAL_BUFFER=0"
+    # Image report D-04: the codec scratch claim is a real mutex with
+    # threads on; the suite runs a 3-thread PNG encode/decode stress.
+    run_one "THREADS=1 IMAGE=0"            FM_USE_THREADS=1 FM_USE_IMAGE=0
+    run_one "THREADS=1 JPEG=0 PNG=0"       FM_USE_THREADS=1 FM_USE_JPEG=0 FM_USE_PNG=0
+    # Image report D-08: no 32-bit host run is available, so the 4 GiB
+    # pixel-buffer limit of a 32-bit size_t is imposed through the
+    # config knob; that enables the "sizes beyond the limit" test.
+    CFLAGS_EXTRA="-DFM_IMAGE_MAX_BYTES=0xFFFFFFFFu" \
+        run_one "FM_IMAGE_MAX_BYTES=4GiB (32-bit size_t limit, simulated)"
 fi
 
 make clean >/dev/null 2>&1

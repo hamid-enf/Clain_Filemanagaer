@@ -158,8 +158,33 @@ static void mjpeg_blit(const pjpeg_image_info_t *info, int mcu_x, int mcu_y,
     }
 }
 
+static FM_Result mjpeg_decode_run(const void *compressed, size_t size,
+                                  void *frame_out, size_t frame_cap);
+
+/* picojpeg's state is file-static and shared with JPEG still decoding
+ * (Image_Load): one picture at a time. */
 static FM_Result mjpeg_decode(void *ctx, const void *compressed, size_t size,
                               void *frame_out, size_t frame_cap)
+{
+    FM_Result r;
+
+    (void)ctx;
+    if (compressed == NULL || frame_out == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    r = FM_CodecScratch_Enter();
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    r = mjpeg_decode_run(compressed, size, frame_out, frame_cap);
+    FM_CodecScratch_Leave();
+    return r;
+}
+
+static FM_Result mjpeg_decode_run(const void *compressed, size_t size,
+                                  void *frame_out, size_t frame_cap)
 {
     pjpeg_image_info_t info;
     MjpegSrc src;
@@ -168,11 +193,6 @@ static FM_Result mjpeg_decode(void *ctx, const void *compressed, size_t size,
     int mcu_y = 0;
     uint8_t *rgb = (uint8_t *)frame_out;
 
-    (void)ctx;
-    if (compressed == NULL || frame_out == NULL)
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
     src.data = (const uint8_t *)compressed;
     src.size = size;
     src.pos = 0;
@@ -186,7 +206,10 @@ static FM_Result mjpeg_decode(void *ctx, const void *compressed, size_t size,
     {
         return FM_ERR_INVALID_FORMAT;
     }
-    if ((size_t)info.m_width * (size_t)info.m_height * 3u > frame_cap)
+    /* 64-bit product: 65535 x 65535 x 3 wraps a 32-bit size_t to a
+     * value that passes this check. */
+    if ((uint64_t)info.m_width * (uint64_t)info.m_height * 3u >
+        (uint64_t)frame_cap)
     {
         return FM_ERR_TOO_LARGE;
     }

@@ -198,6 +198,16 @@ FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
                       FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh,
                       FM_ScaleMode mode);
 
+/* Same, with the size of both buffers: FM_ERR_TOO_LARGE when either is
+ * smaller than width*height*bytes-per-pixel, before a single pixel is
+ * touched.  Image_Scale() cannot check that (it only sees pointers) and
+ * is kept for callers whose buffers are sized by construction; new code
+ * should call this one. */
+FM_Result Image_ScaleEx(const void *src, size_t src_cap,
+                        uint16_t sw, uint16_t sh, FM_PixelFormat fmt,
+                        void *dst, size_t dst_cap,
+                        uint16_t dw, uint16_t dh, FM_ScaleMode mode);
+
 /* Load an image, scale it, and save it (BMP) — resizing "on storage".
  * Uses the fm_alloc.h allocation hooks for the working buffers. */
 FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,

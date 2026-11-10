@@ -35,20 +35,30 @@ static uint8_t g_image_line[FM_IMAGE_LINE_MAX];
 static uint8_t *g_image_work;
 static size_t   g_image_work_cap;
 
+/* Pointer and size change together: read and write them as a pair
+ * under the lock, or a reader could see the new pointer with the old
+ * (larger) size.  The buffer itself is used under the codec claim. */
 FM_Result Image_SetWorkBuffer(void *buf, size_t size)
 {
+    FM_Lock();
     g_image_work = (uint8_t *)buf;
     g_image_work_cap = (buf == NULL) ? 0u : size;
+    FM_Unlock();
     return FM_OK;
 }
 
 void *Image_GetWorkBuffer(size_t *size)
 {
+    void *p;
+
+    FM_Lock();
+    p = g_image_work;
     if (size != NULL)
     {
         *size = g_image_work_cap;
     }
-    return g_image_work;
+    FM_Unlock();
+    return p;
 }
 
 static uint16_t image_rd16(const uint8_t *p)
@@ -99,7 +109,6 @@ size_t Image_BytesPerPixel(FM_PixelFormat format)
 FM_Result Image_BufferSize(uint16_t width, uint16_t height,
                            FM_PixelFormat format, size_t *bytes)
 {
-    uint64_t total;
     size_t bpp;
 
     if (width == 0 || height == 0 || bytes == NULL)
@@ -111,12 +120,63 @@ FM_Result Image_BufferSize(uint16_t width, uint16_t height,
     {
         return FM_ERR_UNSUPPORTED;
     }
-    total = (uint64_t)width * height * bpp;
-    if (total > SIZE_MAX)
+    return FM_Image_Bytes(width, height, bpp, bytes);
+}
+
+/* The one place a pixel-buffer size is computed.  65535 x 65535 x 4 is
+ * 17 GB: in size_t arithmetic on a 32-bit MCU it wraps to a few bytes,
+ * the allocation succeeds and the decoder writes the whole picture into
+ * it.  So multiply in 64 bits and compare before narrowing. */
+FM_Result FM_Image_Bytes(uint32_t width, uint32_t height, size_t bpp,
+                         size_t *bytes)
+{
+    uint64_t total;
+
+    if (width == 0u || height == 0u || bpp == 0u || bytes == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (bpp > 16u)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    total = (uint64_t)width * (uint64_t)height * (uint64_t)bpp;
+    if (total > (uint64_t)SIZE_MAX || total > (uint64_t)FM_IMAGE_MAX_BYTES)
     {
         return FM_ERR_TOO_LARGE;
     }
     *bytes = (size_t)total;
+    return FM_OK;
+}
+
+/* data_capacity is what the buffer can hold, data_size (when not 0) how
+ * much of it is valid pixels.  Encoders used to look at the capacity
+ * only: an image declaring 100x100 over a buffer whose first 3 bytes
+ * are valid was encoded from 29997 bytes nobody wrote. */
+FM_Result FM_Image_CheckSource(const FM_Image *img, size_t *need)
+{
+    size_t n = 0;
+    FM_Result r;
+
+    if (img == NULL || img->data == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    r = FM_Image_Bytes(img->width, img->height,
+                       Image_BytesPerPixel(img->format), &n);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    if (n > img->data_capacity ||
+        (img->data_size != 0u && (uint64_t)n > img->data_size))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (need != NULL)
+    {
+        *need = n;
+    }
     return FM_OK;
 }
 
@@ -473,6 +533,12 @@ static FM_Result image_load_stream(FM_Stream *s, FM_Image *img,
         Image_CloseDecoder(&dec);
         return FM_ERR_TOO_LARGE;
     }
+    r = FM_CodecScratch_Enter();         /* g_image_line is one buffer */
+    if (r != FM_OK)
+    {
+        Image_CloseDecoder(&dec);
+        return r;
+    }
     for (y = 0; y < info.height; y++)
     {
         uint16_t dy;
@@ -480,6 +546,7 @@ static FM_Result image_load_stream(FM_Stream *s, FM_Image *img,
         r = Image_ReadLine(&dec, g_image_line, sizeof(g_image_line));
         if (r != FM_OK)
         {
+            FM_CodecScratch_Leave();
             Image_CloseDecoder(&dec);
             return r;
         }
@@ -509,9 +576,14 @@ static FM_Result image_load_stream(FM_Stream *s, FM_Image *img,
             }
         }
     }
+    FM_CodecScratch_Leave();
     Image_CloseDecoder(&dec);
     return FM_OK;
 }
+
+static const uint8_t k_image_png_sig[8] = {
+    137, 80, 78, 71, 13, 10, 26, 10
+};
 
 FM_Result Image_Load(const char *path, FM_Image *img, void *pixel_buffer,
                      size_t capacity)
@@ -560,8 +632,7 @@ FM_Result Image_LoadEx(const char *path, FM_Image *img, void *pixel_buffer,
         (void)File_Close(&file);
         return r;
     }
-    if (rd >= 8u && magic[0] == 0x89u && magic[1] == (uint8_t)'P' &&
-        magic[2] == (uint8_t)'N' && magic[3] == (uint8_t)'G')
+    if (rd >= 8u && memcmp(magic, k_image_png_sig, 8) == 0)
     {
 #if FM_USE_PNG
         r = FM_PNG_LoadFile(&file, img, pixel_buffer, capacity,
@@ -623,9 +694,16 @@ FM_Result Image_GetInfo(const char *path, FM_ImageInfo *info)
         (void)File_Close(&file);
         return r;
     }
-    if (rd >= 33u && magic[0] == 0x89u && magic[1] == (uint8_t)'P')
+    if (rd >= 8u && memcmp(magic, k_image_png_sig, 8) == 0)
     {
+        /* The whole 8-byte signature, as the decoder checks it: two
+         * matching bytes used to send any "\x89P..." file to the PNG
+         * probe, which then refused it as an invalid PNG. */
         (void)File_Close(&file);
+        if (rd < 33u)
+        {
+            return FM_ERR_CORRUPTED;     /* signature, then no IHDR */
+        }
         return Image_ProbePNG(magic, rd, info);
     }
     if (File_Seek(&file, 0, FM_SEEK_SET) != FM_OK)
@@ -722,7 +800,10 @@ static FM_Result image_bmp_header(uint8_t *h, uint16_t width,
     image_wr32(h + 22, height);
     image_wr16(h + 26, 1);
     image_wr16(h + 28, 24);
-    image_wr32(h + 34, (uint32_t)width * height * 3u);
+    /* biSizeImage is the pixel array as stored, row padding included --
+     * exactly what follows the 54-byte header (file_size is already
+     * range-checked by the callers). */
+    image_wr32(h + 34, (file_size >= 54u) ? (file_size - 54u) : 0u);
     return FM_OK;
 }
 
@@ -731,9 +812,9 @@ FM_Result Image_EncodeBMP(const FM_Image *img, void *out, size_t out_cap,
 {
     uint32_t row_stride;
     uint64_t total;
-    uint64_t source_size;
     uint8_t *dst;
     uint32_t y;
+    FM_Result rc;
 
     if (img == NULL || out == NULL || out_len == NULL || img->data == NULL ||
         img->width == 0 || img->height == 0 ||
@@ -741,11 +822,10 @@ FM_Result Image_EncodeBMP(const FM_Image *img, void *out, size_t out_cap,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    source_size = (uint64_t)img->width * img->height *
-                  Image_BytesPerPixel(img->format);
-    if (source_size > img->data_capacity)
+    rc = FM_Image_CheckSource(img, NULL);
+    if (rc != FM_OK)
     {
-        return FM_ERR_TOO_LARGE;
+        return rc;
     }
     row_stride = ((uint32_t)img->width * 3u + 3u) & ~3u;
     total = 54u + (uint64_t)row_stride * img->height;
@@ -781,7 +861,6 @@ FM_Result Image_Save(const char *path, const FM_Image *img)
     uint8_t header[54];
     uint32_t row_stride;
     uint64_t total;
-    uint64_t source_size;
     uint32_t y;
     FM_Result r;
     char ext[8];
@@ -792,15 +871,13 @@ FM_Result Image_Save(const char *path, const FM_Image *img)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    source_size = (uint64_t)img->width * img->height *
-                  Image_BytesPerPixel(img->format);
-    if (source_size > img->data_capacity ||
-        (img->data_size != 0u && source_size > img->data_size))
+    /* data_size (when given) is the number of VALID pixel bytes: an
+     * image that claims more pixels than it holds would be encoded
+     * from bytes the caller never wrote. */
+    r = FM_Image_CheckSource(img, NULL);
+    if (r != FM_OK)
     {
-        /* data_size (when given) is the number of VALID pixel bytes: an
-         * image that claims more pixels than it holds would be encoded
-         * from bytes the caller never wrote. */
-        return FM_ERR_TOO_LARGE;
+        return r;
     }
     ext[0] = '\0';
     (void)Path_GetExtension(path, ext, sizeof(ext));
@@ -1414,9 +1491,9 @@ static void image_scale_set(uint8_t *p, FM_PixelFormat fmt, size_t idx,
     }
 }
 
-FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
-                      FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh,
-                      FM_ScaleMode mode)
+static FM_Result image_scale_run(const void *src, uint16_t sw, uint16_t sh,
+                                 FM_PixelFormat fmt, void *dst, uint16_t dw,
+                                 uint16_t dh, FM_ScaleMode mode)
 {
     const uint8_t *in = (const uint8_t *)src;
     uint8_t *out = (uint8_t *)dst;
@@ -1585,6 +1662,67 @@ FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
     return FM_OK;
 }
 
+/* Scaling indexes both buffers from the declared dimensions alone, so
+ * the dimensions have to be proven against the real buffer sizes first.
+ * `src_cap` / `dst_cap` are the bytes available behind `src` / `dst`. */
+FM_Result Image_ScaleEx(const void *src, size_t src_cap,
+                        uint16_t sw, uint16_t sh, FM_PixelFormat fmt,
+                        void *dst, size_t dst_cap,
+                        uint16_t dw, uint16_t dh, FM_ScaleMode mode)
+{
+    size_t bpp = Image_BytesPerPixel(fmt);
+    size_t src_need = 0;
+    size_t dst_need = 0;
+    FM_Result r;
+
+    if (src == NULL || dst == NULL || sw == 0 || sh == 0 || dw == 0 ||
+        dh == 0 || bpp == 0)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (mode != FM_SCALE_NEAREST && mode != FM_SCALE_BILINEAR)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    r = FM_Image_Bytes(sw, sh, bpp, &src_need);
+    if (r == FM_OK)
+    {
+        r = FM_Image_Bytes(dw, dh, bpp, &dst_need);
+    }
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    if (src_need > src_cap || dst_need > dst_cap)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    return image_scale_run(src, sw, sh, fmt, dst, dw, dh, mode);
+}
+
+/* Legacy entry point without capacities: the caller vouches that both
+ * buffers hold width*height*bpp bytes.  Prefer Image_ScaleEx. */
+FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
+                      FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh,
+                      FM_ScaleMode mode)
+{
+    size_t bpp = Image_BytesPerPixel(fmt);
+    size_t n = 0;
+
+    if (src == NULL || dst == NULL || sw == 0 || sh == 0 || dw == 0 ||
+        dh == 0 || bpp == 0)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    /* at least refuse sizes the address space cannot hold */
+    if (FM_Image_Bytes(sw, sh, bpp, &n) != FM_OK ||
+        FM_Image_Bytes(dw, dh, bpp, &n) != FM_OK)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    return image_scale_run(src, sw, sh, fmt, dst, dw, dh, mode);
+}
+
 FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
                            uint16_t dw, uint16_t dh, FM_ScaleMode mode)
 {
@@ -1595,6 +1733,8 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
     uint8_t *src_buf = NULL;
     uint8_t *rgb_buf = NULL;
     uint8_t *dst_buf = NULL;
+    size_t src_bytes = 0;
+    size_t dst_bytes = 0;
     FM_Result r;
 
     if (src_path == NULL || dst_path == NULL || dw == 0 || dh == 0)
@@ -1614,13 +1754,23 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
     {
         return FM_ERR_INVALID_FORMAT;
     }
-    src_buf = (uint8_t *)FM_Alloc((size_t)info.width * info.height * 3u);
+    /* Sizes from a file header: checked 64-bit products, never a bare
+     * size_t multiply (65535 x 65535 x 3 wraps on a 32-bit target). */
+    r = FM_Image_Bytes(info.width, info.height, 3u, &src_bytes);
+    if (r == FM_OK)
+    {
+        r = FM_Image_Bytes(dw, dh, 3u, &dst_bytes);
+    }
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    src_buf = (uint8_t *)FM_Alloc(src_bytes);
     if (src_buf == NULL)
     {
         return FM_ERR_NO_MEMORY;
     }
-    r = Image_Load(src_path, &src, src_buf,
-                   (size_t)info.width * info.height * 3u);
+    r = Image_Load(src_path, &src, src_buf, src_bytes);
     if (r != FM_OK)
     {
         FM_Free(src_buf);
@@ -1628,7 +1778,7 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
     }
     if (src.format != FM_PIXEL_RGB888)
     {
-        rgb_buf = (uint8_t *)FM_Alloc((size_t)info.width * info.height * 3u);
+        rgb_buf = (uint8_t *)FM_Alloc(src_bytes);
         if (rgb_buf == NULL)
         {
             FM_Free(src_buf);
@@ -1636,7 +1786,7 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
         }
         memset(&rgb, 0, sizeof(rgb));
         rgb.data = rgb_buf;
-        rgb.data_capacity = (size_t)info.width * info.height * 3u;
+        rgb.data_capacity = src_bytes;
         r = Image_Convert(&src, &rgb, FM_PIXEL_RGB888);
         if (r != FM_OK)
         {
@@ -1650,15 +1800,15 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
         rgb = src;
     }
 
-    dst_buf = (uint8_t *)FM_Alloc((size_t)dw * dh * 3u);
+    dst_buf = (uint8_t *)FM_Alloc(dst_bytes);
     if (dst_buf == NULL)
     {
         FM_Free(src_buf);
         if (rgb_buf != NULL) FM_Free(rgb_buf);
         return FM_ERR_NO_MEMORY;
     }
-    r = Image_Scale(rgb.data, rgb.width, rgb.height, FM_PIXEL_RGB888,
-                    dst_buf, dw, dh, mode);
+    r = Image_ScaleEx(rgb.data, src_bytes, rgb.width, rgb.height,
+                      FM_PIXEL_RGB888, dst_buf, dst_bytes, dw, dh, mode);
     if (r != FM_OK)
     {
         FM_Free(src_buf);
@@ -1672,8 +1822,8 @@ FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
     out.channels = 3;
     out.bit_depth = 24;
     out.data = dst_buf;
-    out.data_capacity = (size_t)dw * dh * 3u;
-    out.data_size = (size_t)dw * dh * 3u;
+    out.data_capacity = dst_bytes;
+    out.data_size = dst_bytes;
     (void)strcpy(out.codec, "RAW");
     r = Image_Save(dst_path, &out);
 
@@ -1696,9 +1846,9 @@ static void image_copy_pixel(uint8_t *dst, const uint8_t *src, size_t bpp)
 FM_Result Image_Flip(FM_Image *img, FM_ImageFlip axis)
 {
     size_t bpp;
-    size_t required;
     uint16_t x;
     uint16_t y;
+    FM_Result rc;
 
     if (img == NULL || img->data == NULL || img->width == 0 ||
         img->height == 0)
@@ -1710,11 +1860,10 @@ FM_Result Image_Flip(FM_Image *img, FM_ImageFlip axis)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    required = (size_t)img->width * img->height * bpp;
-    if (required > img->data_capacity ||
-        (img->data_size != 0 && required > img->data_size))
+    rc = FM_Image_CheckSource(img, NULL);
+    if (rc != FM_OK)
     {
-        return FM_ERR_TOO_LARGE;
+        return rc;
     }
 
     if (axis == FM_IMAGE_FLIP_HORIZONTAL)
@@ -1792,11 +1941,17 @@ FM_Result Image_Rotate(const FM_Image *src, FM_Image *dst, int degrees)
     }
     dw = (turn == 90 || turn == 270) ? src->height : src->width;
     dh = (turn == 90 || turn == 270) ? src->width : src->height;
-    if ((size_t)dw * dh > SIZE_MAX / bpp)
+    /* The source is read through width/height just like the
+     * destination is written: validate it too (capacity AND data_size),
+     * a forged FM_Image used to be read far past its buffer. */
     {
-        return FM_ERR_TOO_LARGE;
+        FM_Result rc = FM_Image_CheckSource(src, &needed);
+
+        if (rc != FM_OK)
+        {
+            return rc;
+        }
     }
-    needed = (size_t)dw * dh * bpp;
     if (needed > dst->data_capacity)
     {
         return FM_ERR_TOO_LARGE;
@@ -1878,10 +2033,23 @@ FM_Result Image_RegisterCodec(const char *codec, const FM_ImageCodecOps *ops)
         return FM_ERR_INVALID_ARGUMENT;
     }
     FM_Lock();
+    /* Replace an existing registration first.  A single first-fit pass
+     * took the first FREE slot even when the name was registered in a
+     * later one, leaving two entries for one codec (and Unregister then
+     * removed only the newer). */
     for (i = 0; i < 4u; i++)
     {
-        if (g_icodec[i].codec[0] == '\0' ||
+        if (g_icodec[i].codec[0] != '\0' &&
             strcmp(g_icodec[i].codec, codec) == 0)
+        {
+            g_icodec[i].ops = ops;
+            FM_Unlock();
+            return FM_OK;
+        }
+    }
+    for (i = 0; i < 4u; i++)
+    {
+        if (g_icodec[i].codec[0] == '\0')
         {
             (void)strcpy(g_icodec[i].codec, codec);
             g_icodec[i].ops = ops;
@@ -1897,17 +2065,17 @@ FM_Result Image_UnregisterCodec(const char *codec)
 {
     uint32_t i;
 
-    if (codec == NULL)
+    if (codec == NULL || codec[0] == '\0')
     {
-        return FM_ERR_INVALID_ARGUMENT;
+        return FM_ERR_INVALID_ARGUMENT;  /* "" would match a free slot */
     }
     FM_Lock();
     for (i = 0; i < 4u; i++)
     {
-        if (strcmp(g_icodec[i].codec, codec) == 0)
+        if (g_icodec[i].codec[0] != '\0' &&
+            strcmp(g_icodec[i].codec, codec) == 0)
         {
-            g_icodec[i].codec[0] = '\0';
-            g_icodec[i].ops = NULL;
+            memset(&g_icodec[i], 0, sizeof(g_icodec[i]));
             FM_Unlock();
             return FM_OK;
         }
@@ -1916,22 +2084,288 @@ FM_Result Image_UnregisterCodec(const char *codec)
     return FM_ERR_NOT_FOUND;
 }
 
+/* Looked up under the same lock Register/Unregister write under.  The
+ * returned ops must outlive their registration: keep them in static
+ * storage, and do not unregister while a decode may still be running. */
 const FM_ImageCodecOps *Image_GetCodec(const char *codec)
 {
+    const FM_ImageCodecOps *ops = NULL;
     uint32_t i;
 
-    if (codec == NULL)
+    if (codec == NULL || codec[0] == '\0')
     {
         return NULL;
     }
+    FM_Lock();
     for (i = 0; i < 4u; i++)
     {
-        if (strcmp(g_icodec[i].codec, codec) == 0)
+        if (g_icodec[i].codec[0] != '\0' &&
+            strcmp(g_icodec[i].codec, codec) == 0)
         {
-            return g_icodec[i].ops;
+            ops = g_icodec[i].ops;
+            break;
         }
     }
+    FM_Unlock();
+    return ops;
+}
+
+#else /* !FM_USE_IMAGE */
+
+/* Image support is compiled out: every public entry point still links
+ * and reports FM_ERR_UNSUPPORTED (or the neutral value), with no static
+ * storage behind it -- the same contract as FM_USE_VIDEO / FM_USE_AUDIO
+ * = 0.  The JPEG / PNG entry points have their stubs in fm_jpeg.c and
+ * fm_png.c. */
+
+FM_Result Image_Load(const char *path, FM_Image *img, void *pixel_buffer,
+                     size_t capacity)
+{
+    (void)path;
+    (void)img;
+    (void)pixel_buffer;
+    (void)capacity;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_LoadEx(const char *path, FM_Image *img, void *pixel_buffer,
+                       size_t capacity, uint16_t max_w, uint16_t max_h)
+{
+    (void)path;
+    (void)img;
+    (void)pixel_buffer;
+    (void)capacity;
+    (void)max_w;
+    (void)max_h;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_Save(const char *path, const FM_Image *img)
+{
+    (void)path;
+    (void)img;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_GetInfo(const char *path, FM_ImageInfo *info)
+{
+    (void)path;
+    (void)info;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_SetWorkBuffer(void *buf, size_t size)
+{
+    (void)buf;
+    (void)size;
+    return FM_ERR_UNSUPPORTED;
+}
+
+void *Image_GetWorkBuffer(size_t *size)
+{
+    if (size != NULL)
+    {
+        *size = 0u;
+    }
     return NULL;
+}
+
+FM_Result Image_DecodeBMP(const void *bmp_data, size_t bmp_size,
+                          FM_Image *img, void *pixel_buffer, size_t capacity)
+{
+    (void)bmp_data;
+    (void)bmp_size;
+    (void)img;
+    (void)pixel_buffer;
+    (void)capacity;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_EncodeBMP(const FM_Image *img, void *out, size_t out_cap,
+                          size_t *out_len)
+{
+    (void)img;
+    (void)out;
+    (void)out_cap;
+    (void)out_len;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_RegisterCodec(const char *codec, const FM_ImageCodecOps *ops)
+{
+    (void)codec;
+    (void)ops;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_UnregisterCodec(const char *codec)
+{
+    (void)codec;
+    return FM_ERR_UNSUPPORTED;
+}
+
+const FM_ImageCodecOps *Image_GetCodec(const char *codec)
+{
+    (void)codec;
+    return NULL;
+}
+
+FM_Result Image_OpenStream(FM_Stream *s, FM_ImageDecoder *dec,
+                           FM_ImageInfo *info)
+{
+    (void)s;
+    (void)dec;
+    (void)info;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ReadLine(FM_ImageDecoder *dec, void *line_out,
+                         size_t line_cap)
+{
+    (void)dec;
+    (void)line_out;
+    (void)line_cap;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_StreamDecode(FM_Stream *s, FM_Image *img,
+                             FM_ImageLineCb line_cb, void *user_data,
+                             FM_ProgressCallback progress)
+{
+    (void)s;
+    (void)img;
+    (void)line_cb;
+    (void)user_data;
+    (void)progress;
+    return FM_ERR_UNSUPPORTED;
+}
+
+void Image_CloseDecoder(FM_ImageDecoder *dec)
+{
+    if (dec != NULL)
+    {
+        memset(dec, 0, sizeof(*dec));
+    }
+}
+
+size_t Image_BytesPerPixel(FM_PixelFormat format)
+{
+    (void)format;
+    return 0u;
+}
+
+FM_Result Image_BufferSize(uint16_t width, uint16_t height,
+                           FM_PixelFormat format, size_t *bytes)
+{
+    (void)width;
+    (void)height;
+    (void)format;
+    (void)bytes;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_Convert(const FM_Image *src, FM_Image *dst,
+                        FM_PixelFormat dst_format)
+{
+    (void)src;
+    (void)dst;
+    (void)dst_format;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ConvertRGB565to888(const void *src, void *dst,
+                                   size_t pixel_count)
+{
+    (void)src;
+    (void)dst;
+    (void)pixel_count;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ConvertRGB888to565(const void *src, void *dst,
+                                   size_t pixel_count)
+{
+    (void)src;
+    (void)dst;
+    (void)pixel_count;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ConvertRGB888toGray(const void *src, void *dst,
+                                    size_t pixel_count)
+{
+    (void)src;
+    (void)dst;
+    (void)pixel_count;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ApplyEffect(FM_Image *img, FM_ImageEffect effect,
+                            int32_t amount)
+{
+    (void)img;
+    (void)effect;
+    (void)amount;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
+                      FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh,
+                      FM_ScaleMode mode)
+{
+    (void)src;
+    (void)sw;
+    (void)sh;
+    (void)fmt;
+    (void)dst;
+    (void)dw;
+    (void)dh;
+    (void)mode;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ScaleEx(const void *src, size_t src_cap, uint16_t sw,
+                        uint16_t sh, FM_PixelFormat fmt, void *dst,
+                        size_t dst_cap, uint16_t dw, uint16_t dh,
+                        FM_ScaleMode mode)
+{
+    (void)src;
+    (void)src_cap;
+    (void)sw;
+    (void)sh;
+    (void)fmt;
+    (void)dst;
+    (void)dst_cap;
+    (void)dw;
+    (void)dh;
+    (void)mode;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_ResizeFile(const char *src_path, const char *dst_path,
+                           uint16_t dw, uint16_t dh, FM_ScaleMode mode)
+{
+    (void)src_path;
+    (void)dst_path;
+    (void)dw;
+    (void)dh;
+    (void)mode;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_Flip(FM_Image *img, FM_ImageFlip axis)
+{
+    (void)img;
+    (void)axis;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_Rotate(const FM_Image *src, FM_Image *dst, int degrees)
+{
+    (void)src;
+    (void)dst;
+    (void)degrees;
+    return FM_ERR_UNSUPPORTED;
 }
 
 #endif /* FM_USE_IMAGE */

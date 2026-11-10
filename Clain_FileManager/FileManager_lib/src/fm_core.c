@@ -34,6 +34,52 @@ static FM_Mutex g_core_lock;
 static uint8_t  g_core_lock_ready = 0;
 #endif
 
+#if FM_USE_IMAGE || FM_USE_MJPEG
+#if FM_USE_THREADS
+static FM_Mutex g_codec_lock;
+static uint8_t  g_codec_lock_ready = 0;
+#else
+static uint8_t  g_codec_busy = 0;
+#endif
+
+FM_Result FM_CodecScratch_Enter(void)
+{
+#if FM_USE_THREADS
+    uint8_t ready;
+
+    FM_Lock();
+    if (!g_codec_lock_ready && FM_Mutex_Create(&g_codec_lock) == FM_OK)
+    {
+        g_codec_lock_ready = 1;
+    }
+    ready = g_codec_lock_ready;
+    FM_Unlock();
+    if (!ready)
+    {
+        return FM_ERR_INTERNAL;
+    }
+    FM_Mutex_Lock(&g_codec_lock);
+    return FM_OK;
+#else
+    if (g_codec_busy != 0u)
+    {
+        return FM_ERR_BUSY;
+    }
+    g_codec_busy = 1u;
+    return FM_OK;
+#endif
+}
+
+void FM_CodecScratch_Leave(void)
+{
+#if FM_USE_THREADS
+    FM_Mutex_Unlock(&g_codec_lock);
+#else
+    g_codec_busy = 0u;
+#endif
+}
+#endif /* FM_USE_IMAGE || FM_USE_MJPEG */
+
 uint32_t FileManager_GetVersion(void)
 {
     return (uint32_t)((FM_VERSION_MAJOR << 16) |
@@ -54,6 +100,13 @@ void FileManager_Deinit(void)
         FM_Mutex_Destroy(&g_core_lock);
         g_core_lock_ready = 0;
     }
+#if FM_USE_IMAGE || FM_USE_MJPEG
+    if (g_codec_lock_ready)
+    {
+        FM_Mutex_Destroy(&g_codec_lock);
+        g_codec_lock_ready = 0;
+    }
+#endif
 #else
     /* nothing to do */
 #endif

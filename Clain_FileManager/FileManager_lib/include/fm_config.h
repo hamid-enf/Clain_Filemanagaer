@@ -163,6 +163,22 @@
 #ifndef FM_IMAGE_LINE_MAX
 #define FM_IMAGE_LINE_MAX 16384u      /* BMP scale-to-fit row scratch   */
 #endif
+/* Largest pixel buffer (bytes) the image code will size, index or
+ * allocate.  Every width*height*bpp product is computed in 64 bits and
+ * compared against this BEFORE it is narrowed to size_t, so a forged
+ * 65535x65535 header cannot wrap to a tiny allocation on a 32-bit MCU.
+ * Default: whatever size_t can hold.  Lower it to cap image memory. */
+#ifndef FM_IMAGE_MAX_BYTES
+#define FM_IMAGE_MAX_BYTES SIZE_MAX
+#endif
+/* Work budget of the JPEG header probe (Image_GetInfo / Image_Load on a
+ * .jpg): one unit per padding byte examined, 16 per marker segment.  A
+ * file made of 0xFF fill or of endless tiny segments is rejected as
+ * FM_ERR_INVALID_FORMAT once the budget is spent instead of being
+ * scanned to its end one byte at a time.  65536 allows 4096 segments. */
+#ifndef FM_JPEG_PROBE_BUDGET
+#define FM_JPEG_PROBE_BUDGET 65536u
+#endif
 #if FM_USE_VIDEO == 0
 /* The H.264 / MJPEG decoders are video codec plugins. */
 #undef FM_USE_H264
