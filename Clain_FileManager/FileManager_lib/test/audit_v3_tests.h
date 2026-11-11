@@ -668,7 +668,10 @@ static void test_video_adpcm_track(void)
 /* ------------------------------------------------------------------ */
 #if FM_USE_AUDIO && FM_USE_VORBIS
 
-#define AV3_VORBIS_BYTES   89600u       /* 22400 stereo frames */
+/* 22050 stereo frames: the half second the file was made from.  (The
+ * decoder gives 22400; the last 350 are the encoder's padding, marked
+ * with DiscardPadding in the last block.) */
+#define AV3_VORBIS_BYTES   88200u
 
 static void test_video_vorbis_track(void)
 {
@@ -870,6 +873,156 @@ static void test_video_vorbis_track(void)
     }
 }
 #endif /* FM_USE_AUDIO && FM_USE_VORBIS */
+
+/* ------------------------------------------------------------------ */
+/* Encoder delay and padding                                            */
+/* ------------------------------------------------------------------ */
+/* The delay vectors are 0.2 s of silence, then a tone, 0.6 s in all,
+ * mono.  An encoder puts its own delay in front and pads the end; the
+ * container says how much (MP4 edit list, MKV CodecDelay and
+ * DiscardPadding).  With that applied the tone starts where ffmpeg has
+ * it and the track has the length of the sound it was made from
+ * (tools/gen_video_audio_vectors.py prints both). */
+static long av3_onset(size_t bytes)
+{
+    size_t k;
+
+    for (k = 0; k + 1u < bytes && k + 1u < sizeof(g_av3_pcm); k += 2u)
+    {
+        int sample = (int16_t)((uint16_t)g_av3_pcm[k] |
+                               ((uint16_t)g_av3_pcm[k + 1u] << 8));
+
+        if (sample >= 1000 || sample <= -1000)
+        {
+            return (long)(k / 2u);
+        }
+    }
+    return -1;
+}
+
+static void av3_delay_case(const char *what, const char *path, size_t cap,
+                           size_t frames, long onset)
+{
+    Av3Run run;
+    char m[160];
+    FM_Result r;
+    long at;
+
+    TEST(what);
+    r = av3_decode(path, cap, &run);
+    at = av3_onset(run.bytes);
+    if (r == FM_OK && run.bad == 0u && run.ended &&
+        run.bytes == frames * 2u && at >= onset - 2 && at <= onset + 2)
+    {
+        PASS();
+    }
+    else
+    {
+        (void)snprintf(m, sizeof(m),
+                       "open %d, errors %u, end %d, %lu frames (want %lu), "
+                       "tone at %ld (want %ld)", (int)r, run.bad, run.ended,
+                       (unsigned long)(run.bytes / 2u), (unsigned long)frames,
+                       at, onset);
+        FAIL(m);
+    }
+}
+
+static void test_video_audio_delay(void)
+{
+#if FM_USE_MP3
+    av3_delay_case("MP3 in MP4: the edit list removes the encoder delay and the padding",
+                   "/test/vectors/mp4_mp3_delay.mp4", 4608u, 26460u, 8823);
+    av3_delay_case("MP3 in MKV: CodecDelay and DiscardPadding do the same",
+                   "/test/vectors/mkv_mp3_delay.mkv", 4608u, 26460u, 8823);
+
+    TEST("MP3 in MP4: after Video_SeekAudio(0) the track is trimmed again");
+    {
+        static FM_Video v;
+        Av3Run first;
+        Av3Run again;
+        uint32_t crc = 0u;
+        FM_Result r;
+
+        memset(&v, 0, sizeof(v));
+        memset(&first, 0, sizeof(first));
+        memset(&again, 0, sizeof(again));
+        r = Video_Open("/test/vectors/mp4_mp3_delay.mp4", &v);
+        if (r == FM_OK)
+        {
+            av3_drain(&v, 4608u, 500u, &first);
+            crc = av3_crc32(g_av3_pcm, first.bytes);
+            r = Video_SeekAudio(&v, 0u);
+            av3_drain(&v, 4608u, 500u, &again);
+            (void)Video_Close(&v);
+        }
+        if (r == FM_OK && first.bytes == 26460u * 2u &&
+            again.bytes == first.bytes && again.ended &&
+            av3_crc32(g_av3_pcm, again.bytes) == crc)
+        {
+            PASS();
+        }
+        else
+        {
+            char m[120];
+
+            (void)snprintf(m, sizeof(m), "seek %d, %lu then %lu bytes", (int)r,
+                           (unsigned long)first.bytes,
+                           (unsigned long)again.bytes);
+            FAIL(m);
+        }
+    }
+#endif
+#if FM_USE_AUDIO && FM_USE_VORBIS
+    /* ffmpeg writes a CodecDelay for Vorbis too; the decoder's silent
+     * first packet is that delay, so it must not be removed twice */
+    av3_delay_case("Vorbis in MKV: the padding goes, the CodecDelay is not applied twice",
+                   "/test/vectors/mkv_vorbis_delay.mkv", 8192u, 13230u, 4411);
+    av3_delay_case("Vorbis in MKV: the same through a 64-byte buffer",
+                   "/test/vectors/mkv_vorbis_delay.mkv", 64u, 13230u, 4411);
+#endif
+#if defined(FM_OPUS_USE_LIBOPUS) && FM_OPUS_USE_LIBOPUS
+    av3_delay_case("Opus in MKV: pre-skip (CodecDelay) and padding removed",
+                   "/test/vectors/mkv_opus_delay.mkv", 8192u, 28800u, 9603);
+    av3_delay_case("Opus in MP4: pre-skip and padding removed (edit list)",
+                   "/test/vectors/mp4_opus_delay.mp4", 8192u, 28800u, 9603);
+#else
+    TEST("A track with no decoder: every read says unsupported, and the track ends");
+    {
+        static FM_Video v;
+        FM_AudioTrackInfo ti;
+        Av3Run run;
+        FM_Result r;
+
+        memset(&v, 0, sizeof(v));
+        memset(&ti, 0, sizeof(ti));
+        memset(&run, 0, sizeof(run));
+        r = Video_Open("/test/vectors/mkv_opus_delay.mkv", &v);
+        if (r == FM_OK)
+        {
+            (void)Video_GetAudioInfo(&v, &ti);
+            av3_drain(&v, 8192u, 500u, &run);
+            (void)Video_Close(&v);
+        }
+        if (r == FM_OK && ti.decodable)
+        {
+            PASS();                      /* a decoder is registered here */
+        }
+        else if (r == FM_OK && ti.codec == FM_VIDEO_AUDIO_OPUS &&
+                 run.ok == 0u && run.bad == 31u &&
+                 run.first_bad == FM_ERR_UNSUPPORTED && run.ended)
+        {
+            PASS();
+        }
+        else
+        {
+            char m[120];
+
+            av3_report(&run, m, sizeof(m));
+            FAIL(m);
+        }
+    }
+#endif
+}
 
 /* ------------------------------------------------------------------ */
 /* Sizes from a damaged index; a read that fails for lack of memory     */

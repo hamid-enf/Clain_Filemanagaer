@@ -144,6 +144,20 @@ typedef struct
     uint8_t       audio_private[FM_VIDEO_AUDIO_PRIVATE_MAX]; /* MKV CodecPrivate / MP4 dfLa */
     uint8_t      *audio_private_big; /* ...when it does not fit there
                                       * (FM_Alloc, freed on close)    */
+    /* Trimming of a decoded track (Video_ReadAudioFrame): frames an
+     * encoder put in front of the sound and behind it, as the container
+     * records them. */
+    uint32_t      audio_skip;        /* frames dropped at the start
+                                      * (MP4 edit list, MKV CodecDelay) */
+    uint32_t      audio_skip_left;   /* ...still to drop              */
+    uint64_t      audio_limit;       /* frames the track has after the
+                                      * skip (MP4 edit list); 0 = not
+                                      * recorded                      */
+    uint64_t      audio_out;         /* frames handed out so far      */
+    FM_Bool       audio_limit_off;   /* after a seek into the track the
+                                      * count is not known            */
+    uint32_t      audio_pad_packet;  /* MKV DiscardPadding: the packet */
+    uint32_t      audio_pad_frames;  /* ...and frames cut off its end */
     uint32_t      audio_count;
     /* PCM chunk larger than the caller's buffer: bytes of the chunk
      * at audio_frame_index-1 already handed out.  The next call
@@ -2464,6 +2478,103 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                            &priv->atail.total);
 }
 
+/*
+ * The edit list of an audio track: where the sound starts in the decoded
+ * stream and how long it is.  An MP3, AAC or Opus encoder puts a fixed
+ * number of frames in front (1105 for LAME, 312 for libopus, ...) and
+ * rounds the end up to a whole packet; the muxer records the part that
+ * is sound as one edit.
+ *
+ * Used when the track has exactly one edit that starts within the first
+ * second (anything else is an edited programme, not an encoder delay,
+ * and the track is then played from its first packet as before).
+ */
+static void mp4_audio_edit(FM_Video *v, const Mp4Box *moov,
+                           const Mp4Box *trak, FM_VideoPriv *priv)
+{
+    Mp4Box box;
+    uint8_t b[32];
+    uint32_t movie_scale = 0u;
+    uint32_t media_scale = 0u;
+    uint32_t count;
+    uint32_t i;
+    uint32_t edits = 0u;
+    uint64_t duration = 0u;
+    uint64_t start = 0u;
+    uint64_t skip;
+
+    if (priv->audio_rate == 0u)
+    {
+        return;
+    }
+    /* mvhd / mdhd: version + flags, two times (4 or 8 bytes each), scale */
+    if (mp4_find_deep(v, moov->data, moov->start + moov->size, "mvhd",
+                      &box) == FM_OK &&
+        video_read_at(&v->file, box.data, b, 24) == FM_OK)
+    {
+        movie_scale = video_be32(b + ((b[0] == 1u) ? 20u : 12u));
+    }
+    if (mp4_find_deep(v, trak->data, trak->start + trak->size, "mdhd",
+                      &box) == FM_OK &&
+        video_read_at(&v->file, box.data, b, 24) == FM_OK)
+    {
+        media_scale = video_be32(b + ((b[0] == 1u) ? 20u : 12u));
+    }
+    if (movie_scale == 0u || media_scale == 0u ||
+        mp4_find_deep(v, trak->data, trak->start + trak->size, "elst",
+                      &box) != FM_OK ||
+        box.start + box.size < box.data + 8u ||
+        video_read_at(&v->file, box.data, b, 8) != FM_OK)
+    {
+        return;
+    }
+    count = video_be32(b + 4);
+    for (i = 0u; i < count && i < 8u; i++)
+    {
+        uint32_t entry = (b[0] == 1u) ? 20u : 12u;
+        uint8_t e[20];
+        uint64_t dur;
+        uint64_t time;
+
+        if (box.start + box.size < box.data + 8u + (uint64_t)(i + 1u) * entry ||
+            video_read_at(&v->file, box.data + 8u + (uint64_t)i * entry, e,
+                          entry) != FM_OK)
+        {
+            return;
+        }
+        if (b[0] == 1u)
+        {
+            dur = ((uint64_t)video_be32(e) << 32) | video_be32(e + 4);
+            time = ((uint64_t)video_be32(e + 8) << 32) | video_be32(e + 12);
+        }
+        else
+        {
+            dur = video_be32(e);
+            time = video_be32(e + 4);
+            if (time == 0xFFFFFFFFu)
+            {
+                time = UINT64_MAX;
+            }
+        }
+        if (time == UINT64_MAX)
+        {
+            continue;                    /* an empty edit: a pause */
+        }
+        edits++;
+        duration = dur;
+        start = time;
+    }
+    if (edits != 1u || count > 8u || start > media_scale ||
+        duration > (uint64_t)0xFFFFFFFFu * 16u)
+    {
+        return;
+    }
+    skip = (start * priv->audio_rate + media_scale / 2u) / media_scale;
+    priv->audio_skip = (uint32_t)skip;
+    priv->audio_limit = (duration * priv->audio_rate + movie_scale / 2u) /
+                        movie_scale;
+}
+
 static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
 {
     uint64_t file_size = 0;
@@ -2507,7 +2618,12 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
         }
         else if (mp4_trak_has_handler(v, &trak, "soun") == FM_OK)
         {
-            (void)mp4_parse_audio_trak(v, &trak, priv);
+            priv->audio_skip = 0u;
+            priv->audio_limit = 0u;
+            if (mp4_parse_audio_trak(v, &trak, priv) == FM_OK)
+            {
+                mp4_audio_edit(v, &moov, &trak, priv);
+            }
         }
         tpos = trak.start + trak.size;
         r = mp4_find_deep(v, tpos, moov.start + moov.size, "trak", &trak);
@@ -2858,6 +2974,8 @@ static int16_t ulaw_decode(uint8_t u)
 #define MKV_ID_SAMPLINGFREQ  0xB5u
 #define MKV_ID_CHANNELS      0x9Fu
 #define MKV_ID_BITDEPTH      0x6264u
+#define MKV_ID_CODECDELAY    0x56AAu     /* ns of encoder delay           */
+#define MKV_ID_DISCARDPAD    0x75A2u     /* ns to drop at a block's end   */
 #define MKV_ID_CLUSTER       0x1F43B675u
 #define MKV_ID_SIMPLEBLOCK   0xA3u
 #define MKV_ID_BLOCKGROUP    0xA0u
@@ -3040,6 +3158,7 @@ typedef struct
     uint64_t default_duration; /* ns per frame                      */
     uint64_t channels;
     uint64_t bit_depth;
+    uint64_t codec_delay;      /* ns                                */
     double   rate;
     uint64_t priv_off;         /* CodecPrivate location in the file */
     uint64_t priv_size;
@@ -3084,6 +3203,9 @@ static void mkv_parse_track(FM_Video *v, uint64_t pos, uint64_t end,
             break;
         case MKV_ID_BITDEPTH:
             (void)mkv_read_uint(v, &e, &t->bit_depth);
+            break;
+        case MKV_ID_CODECDELAY:
+            (void)mkv_read_uint(v, &e, &t->codec_delay);
             break;
         case MKV_ID_SAMPLINGFREQ:
             (void)mkv_read_float(v, &e, &t->rate);
@@ -3277,6 +3399,17 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
     priv->audio_codec = codec;
     priv->audio_rate = rate;
     priv->audio_channels = (uint16_t)channels;
+    /* CodecDelay: frames the encoder put in front of the sound (LAME
+     * 1105, libopus 312).  Not for Vorbis: its decoder gives nothing for
+     * the first packet, which is that delay already.  More than a second
+     * is not an encoder delay and is left alone. */
+    priv->audio_skip = 0u;
+    if (codec != FM_VIDEO_AUDIO_VORBIS && t->codec_delay != 0u &&
+        t->codec_delay <= 1000000000u)
+    {
+        priv->audio_skip = (uint32_t)((t->codec_delay * rate + 500000000u) /
+                                      1000000000u);
+    }
     priv->audio_bits = (codec == FM_VIDEO_AUDIO_MP3 ||
                         codec == FM_VIDEO_AUDIO_AAC ||
                         codec == FM_VIDEO_AUDIO_VORBIS)
@@ -3549,6 +3682,44 @@ static FM_Result mkv_block_parse(FM_Video *v, uint64_t bdata, uint64_t bsz,
     return FM_OK;
 }
 
+/* DiscardPadding of a BlockGroup, in sample frames at `rate`; 0 = none
+ * (or negative: padding at the front, which CodecDelay covers). */
+static uint32_t mkv_group_discard(FM_Video *v, const EbmlElem *group,
+                                  uint32_t rate)
+{
+    uint64_t gpos = group->data;
+    uint64_t gend = group->data + group->size;
+    EbmlElem g;
+
+    while (gpos < gend && ebml_read(v, gpos, gend, &g) == FM_OK)
+    {
+        if (g.id == MKV_ID_DISCARDPAD && g.size >= 1u && g.size <= 8u &&
+            !g.truncated)
+        {
+            uint8_t b[8];
+            uint64_t ns = 0u;
+            uint32_t i;
+
+            if (video_read_at(&v->file, g.data, b, (uint32_t)g.size) != FM_OK ||
+                (b[0] & 0x80u) != 0u)
+            {
+                return 0u;               /* unreadable, or negative */
+            }
+            for (i = 0u; i < (uint32_t)g.size; i++)
+            {
+                ns = (ns << 8) | b[i];
+            }
+            if (ns > 1000000000u)
+            {
+                return 0u;               /* more than a second: not padding */
+            }
+            return (uint32_t)((ns * rate + 500000000u) / 1000000000u);
+        }
+        gpos = g.data + g.size;
+    }
+    return 0u;
+}
+
 /* If `e` carries frame data -- a SimpleBlock, or a BlockGroup whose
  * Block child is located here -- return the block payload. */
 static FM_Bool mkv_find_block(FM_Video *v, const EbmlElem *e,
@@ -3756,6 +3927,20 @@ static FM_Result mkv_parse(FM_Video *v, FM_VideoPriv *priv)
                                         pos, k, off, blk->size[k]);
                     }
                     off += blk->size[k];
+                }
+                if (is_audio && e.id == MKV_ID_BLOCKGROUP &&
+                    priv->atail.total != 0u)
+                {
+                    /* DiscardPadding: the encoder rounded the end of
+                     * the track up to a whole packet, and says here how
+                     * much of this (the last) packet is not sound. */
+                    uint32_t pad = mkv_group_discard(v, &e, priv->audio_rate);
+
+                    if (pad != 0u)
+                    {
+                        priv->audio_pad_packet = priv->atail.total - 1u;
+                        priv->audio_pad_frames = pad;
+                    }
                 }
             }
         }
@@ -4409,6 +4594,8 @@ FM_Result Video_Open(const char *path, FM_Video *v)
         if (v->priv != NULL)
         {
             ((FM_VideoPriv *)v->priv)->file_size = size;
+            ((FM_VideoPriv *)v->priv)->audio_skip_left =
+                ((FM_VideoPriv *)v->priv)->audio_skip;
         }
         FM_EVENT_LOG("opened %s (%ux%u, %lu fps, %lu frames)", path,
                      (unsigned)v->info.width, (unsigned)v->info.height,
@@ -6393,24 +6580,15 @@ static FM_Result video_pcm_read(FM_Video *v, FM_VideoPriv *priv,
     return FM_OK;
 }
 
-FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
-                               size_t *size)
+/* One packet (or part of one) of the track, as the codec gives it:
+ * Video_ReadAudioFrame without the trimming. */
+static FM_Result video_audio_read_raw(FM_Video *v, FM_VideoPriv *priv,
+                                      uint8_t *buf, size_t cap, size_t *size)
 {
-    FM_VideoPriv *priv;
     uint64_t offset;
     uint32_t fsize;
     FM_Result r;
 
-    if (v == NULL || buf == NULL || size == NULL || !File_IsOpen(&v->file))
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    priv = (FM_VideoPriv *)v->priv;
-    *size = 0;
-    if (priv == NULL || !priv->audio_present)
-    {
-        return FM_ERR_UNSUPPORTED;
-    }
 #if FM_USE_MP3
     if (priv->audio_codec == FM_VIDEO_AUDIO_MP3)
     {
@@ -6483,6 +6661,13 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                            "registered (Audio_RegisterDecoder)",
                            video_audio_tag(priv->audio_codec));
             }
+            if (r == FM_ERR_UNSUPPORTED)
+            {
+                /* the packet is passed over, so that the track ends
+                 * (the same answer for ever looked like a stalled
+                 * player, not like a track that cannot be played) */
+                v->audio_frame_index++;
+            }
             return r;
         }
         /* AAC without a decoder: documented pass-through, each sample
@@ -6551,6 +6736,137 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
     return FM_OK;
 }
 
+/* PCM bytes of the packet last read that the decoder still holds (the
+ * Vorbis decoder keeps what did not fit the caller's buffer). */
+static size_t video_audio_rest_bytes(const FM_VideoPriv *priv)
+{
+#if VIDEO_VORBIS_STREAM
+    if (priv->vorbis != NULL)
+    {
+        return FM_Vorbis_StreamPending(priv->vorbis);
+    }
+#endif
+    (void)priv;
+    return 0u;
+}
+
+/* Does this track get its encoder delay and padding removed?  Only one
+ * that comes out as PCM: AAC without a decoder is handed out as ADTS
+ * frames, which are not samples. */
+static FM_Bool video_audio_trims(const FM_VideoPriv *priv)
+{
+    if (priv->audio_channels == 0u ||
+        (priv->audio_skip == 0u && priv->audio_limit == 0u &&
+         priv->audio_pad_frames == 0u))
+    {
+        return FM_FALSE;
+    }
+    if (priv->audio_codec == FM_VIDEO_AUDIO_AAC &&
+        Audio_GetDecoder("AAC") == NULL)
+    {
+        return FM_FALSE;
+    }
+    return FM_TRUE;
+}
+
+/*
+ * The public read: the codec's output with the frames the container marks
+ * as not being sound removed.
+ *
+ *   start   audio_skip frames (MP4 edit list, MKV CodecDelay), from the
+ *           first packet on; after Video_SeekAudio(0) again
+ *   end     MP4: nothing past the length the edit list gives;
+ *           MKV: DiscardPadding off the end of the packet that carries it
+ *
+ * After a seek into the track the frame count is not known any more, and
+ * the MP4 end limit is not applied (the MKV one still is: it belongs to
+ * a packet).  A call whose frames are all removed reads on, so FM_OK
+ * always comes with data.
+ */
+FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
+                               size_t *size)
+{
+    FM_VideoPriv *priv;
+    size_t frame_bytes;
+    uint32_t tries;
+
+    if (v == NULL || buf == NULL || size == NULL || !File_IsOpen(&v->file))
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    priv = (FM_VideoPriv *)v->priv;
+    *size = 0;
+    if (priv == NULL || !priv->audio_present)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    if (!video_audio_trims(priv))
+    {
+        return video_audio_read_raw(v, priv, buf, cap, size);
+    }
+    frame_bytes = (size_t)priv->audio_channels * 2u;
+    for (tries = 0u; tries < 4096u; tries++)
+    {
+        FM_Bool limited = (priv->audio_limit != 0u && !priv->audio_limit_off)
+                              ? FM_TRUE : FM_FALSE;
+        size_t frames;
+        FM_Result r;
+
+        if (limited && priv->audio_out >= priv->audio_limit)
+        {
+            return FM_ERR_EOF;
+        }
+        *size = 0;
+        r = video_audio_read_raw(v, priv, buf, cap, size);
+        if (r != FM_OK)
+        {
+            *size = 0;
+            return r;
+        }
+        frames = *size / frame_bytes;
+        if (priv->audio_pad_frames != 0u &&
+            v->audio_frame_index == priv->audio_pad_packet + 1u &&
+            priv->audio_part_left == 0u)
+        {
+            /* The padded packet: its last pad_frames frames go.  When
+             * the packet comes in parts (a small buffer), `rest` frames
+             * of it are still in the decoder. */
+            size_t rest = video_audio_rest_bytes(priv) / frame_bytes;
+
+            if (rest < priv->audio_pad_frames)
+            {
+                size_t cut = priv->audio_pad_frames - rest;
+
+                frames = (frames > cut) ? frames - cut : 0u;
+            }
+        }
+        if (priv->audio_skip_left != 0u)
+        {
+            size_t drop = (frames < priv->audio_skip_left)
+                              ? frames : priv->audio_skip_left;
+
+            frames -= drop;
+            priv->audio_skip_left -= (uint32_t)drop;
+            if (frames != 0u)
+            {
+                memmove(buf, buf + drop * frame_bytes, frames * frame_bytes);
+            }
+        }
+        if (limited && frames > priv->audio_limit - priv->audio_out)
+        {
+            frames = (size_t)(priv->audio_limit - priv->audio_out);
+        }
+        priv->audio_out += frames;
+        *size = frames * frame_bytes;
+        if (frames != 0u)
+        {
+            return FM_OK;
+        }
+    }
+    *size = 0;
+    return FM_ERR_EOF;
+}
+
 FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index)
 {
     FM_VideoPriv *priv;
@@ -6585,6 +6901,12 @@ FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index)
     /* A seek abandons any half-delivered oversized chunk. */
     priv->audio_part_left = 0u;
     v->audio_frame_index = sample_index;
+    /* Trimming (Video_ReadAudioFrame): from the start everything is as
+     * after the open; anywhere else there is no delay to drop and the
+     * number of frames before this point is not known. */
+    priv->audio_skip_left = (sample_index == 0u) ? priv->audio_skip : 0u;
+    priv->audio_out = 0u;
+    priv->audio_limit_off = (sample_index == 0u) ? FM_FALSE : FM_TRUE;
     return FM_OK;
 }
 

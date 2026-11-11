@@ -20430,6 +20430,7 @@ int main(void)
     RUN_SUITE(test_video_vorbis_track);
 #endif
 #if FM_USE_VIDEO
+    RUN_SUITE(test_video_audio_delay);
     RUN_SUITE(test_video_damaged_sizes);
     RUN_SUITE(test_video_pcm_track);
 #endif
