@@ -8,7 +8,7 @@ anything in the repository.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `2a45d9d` (audit exactly this commit; quote it in your report)
+- Commit: `a6cf829` (audit exactly this commit; quote it in your report)
 - Previous audit of this part: commit `8dd0f25`, report in `ReportV2.txt` at the
   repository root, lines 1583–2454
 - Library root: `Clain_FileManager/FileManager_lib/` (all paths below are relative to it)
@@ -51,7 +51,7 @@ one line in the "Outside my scope" section and move on.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite, about 478 tests, about 15 s
+make test                 # whole suite, about 513 tests, about 15 s
 make asan                 # same suite under ASan + UBSan
 make tsan                 # threaded suite under ThreadSanitizer
 make m32                  # suite built and run as a 32-bit program (clang);
@@ -95,8 +95,8 @@ This part was audited once before, at commit `8dd0f25`. That report is in the
 repository: `ReportV2.txt` at the repository root, lines 1583–2454 (the other
 line ranges are the other three parts). Read it first, including its sections
 "Examined and found sound" and "Not examined". Everything it found has been
-worked on since; `git log 8dd0f25..2a45d9d` and
-`git diff 8dd0f25..2a45d9d -- src/fm_image.c src/fm_png.c src/fm_jpeg.c src/fm_hw.c third_party/picojpeg include/fm_image.h` show how.
+worked on since; `git log 8dd0f25..a6cf829` and
+`git diff 8dd0f25..a6cf829 -- src/fm_image.c src/fm_png.c src/fm_jpeg.c src/fm_hw.c third_party/picojpeg include/fm_image.h` show how.
 
 **What the maintainers found themselves after `cf187af`, and what it tells
 you.** While measuring stack frames for the ARM target, one frame led to the
@@ -110,6 +110,12 @@ Vorbis tracks that never decoded; H.264 pictures 25 dB from the reference
 sanitizer, because the suite checked that a format is *recognised* and that
 nothing *crashes*, not that what comes out is *right*. These are fixed
 (commits `7d4d009`, `b3525f7`, `2a45d9d`; tests in `test/audit_v3_tests.h`).
+The same comparison was then widened (`git log 2a45d9d..a6cf829`) and closed what
+it had left open: JPEG and Motion JPEG in ffmpeg's 4:2:2 / 4:4:4 layouts,
+BT.709 for H.264, sizes taken from a damaged index, the FLAC sample width,
+Microsoft ADPCM in WAV files, PCM tracks of every width and byte order, and
+the encoder delay and padding of MP3 / Vorbis / Opus tracks. That is the
+newest code in the repository and nobody outside has read it.
 Draw the conclusion for your part: **wherever the library produces data,
 compare that data with a reference implementation**, on files a real tool
 wrote, before anything else.
@@ -142,11 +148,22 @@ every format against what a full decode reports, the result logging added
 to `Image_LoadEx`, and the **local patch to `third_party/picojpeg/picojpeg.c`**
 (search for "FileManager patch"): the green channel used to be computed in two
 clamped steps and is now computed in one, with the Cb term of each block kept
-in `gCbG[64]` until the Cr block arrives. Check every chroma layout picojpeg
-accepts (grey, H1V1, H2V1, H1V2, H2V2), restart markers, a file cut between
-the Cb and the Cr block, and compare whole pictures with libjpeg: it was 37 dB
-before the patch and 50 dB after on the files the maintainers tried, which
-were few.
+in `gCbG[64]` until the Cr block arrives. A **second patch** to the same file
+adds layouts picojpeg did not have: chroma sampled 1x2 with luma 1x2 or 2x2
+(what ffmpeg writes for 4:4:4 and 4:2:2; `gChromaV2`, `gMCUOrg` grown to 8
+entries, `gCbG` used in two halves) and one-component files with sampling
+factors other than 1x1. `third_party/README.md` lists every change made to
+the vendored sources. Check every layout that is accepted now (one component;
+luma 1x1, 2x1, 1x2, 2x2 with chroma 1x1; luma 1x2, 2x2 with chroma 1x2), odd
+widths and heights in each (the right and bottom edge of the last MCU),
+restart markers, a file cut between the Cb and the Cr block, and that every
+other layout is refused rather than decoded wrongly. Compare whole pictures
+with libjpeg. The maintainers' figures (`test_jpeg_layouts` in
+`test/audit_v3_tests.h`, vectors from `tools/gen_jpeg_vectors.py`): 37 dB
+before the green patch, 50 to 53 dB after; odd sizes 48.7 to 54 dB against
+ffmpeg's decoded planes. The reduced-size mode of picojpeg (`reduce = 1`) did
+not get the new branch; the library does not use it — check that it really
+cannot be reached.
 
 **Job 3 — go where nobody has been.** The previous auditor of this part could not build for
 32 bits, did not run the threaded configuration, and compared the JPEG
@@ -298,9 +315,9 @@ They are documented and accepted. Report them only if the real behaviour is
 worse than what is written here.
 
 - PNG output is RGB888 only.
-- JPEG chroma layouts with a sampling factor other than 1x1 on the chroma
-  components are refused (ffmpeg's 4:2:2 and 4:4:4 Motion JPEG is written that
-  way); the supported ones are listed in `README.md`.
+- JPEG layouts outside the list in `README.md` are refused: an MCU of more
+  than 8 blocks does not fit picojpeg (luma 4x1, chroma 2x1 and the like), and
+  so do four-component (CMYK) files.
 - JPEG decoding is baseline sequential only (limit of the vendored picojpeg),
   and picojpeg is not thread-safe — how the library guards it with
   `FM_USE_THREADS=1` is in scope.

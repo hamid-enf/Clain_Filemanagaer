@@ -10,7 +10,7 @@ file and nothing else; the prompts do not depend on each other.
 | `03_video.md` | containers, H.264, MJPEG, A/V timing, media cache | `AUDIT_VIDEO_V3.md` |
 | `04_audio.md` | audio decoders, writers, recorder, player, type detection | `AUDIT_AUDIO_V3.md` |
 
-All four pin the same commit (`2a45d9d` on `arena/ba6a87b3-clain-filemanagaer`)
+All four pin the same commit (`a6cf829` on `arena/ba6a87b3-clain-filemanagaer`)
 and forbid any change on GitHub.
 
 This is the second time the four parts are audited. The first round audited

@@ -8,7 +8,7 @@ anything in the repository.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `2a45d9d` (audit exactly this commit; quote it in your report)
+- Commit: `a6cf829` (audit exactly this commit; quote it in your report)
 - Previous audit of this part: commit `8dd0f25`, report in `ReportV2.txt` at the
   repository root, lines 1267–1582
 - Library root: `Clain_FileManager/FileManager_lib/` (all paths below are relative to it)
@@ -51,7 +51,7 @@ one line in the "Outside my scope" section and move on.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite, about 478 tests, about 15 s
+make test                 # whole suite, about 513 tests, about 15 s
 make asan                 # same suite under ASan + UBSan
 make tsan                 # threaded suite under ThreadSanitizer
 make m32                  # suite built and run as a 32-bit program (clang);
@@ -95,8 +95,8 @@ This part was audited once before, at commit `8dd0f25`. That report is in the
 repository: `ReportV2.txt` at the repository root, lines 1267–1582 (the other
 line ranges are the other three parts). Read it first, including its sections
 "Examined and found sound" and "Not examined". Everything it found has been
-worked on since; `git log 8dd0f25..2a45d9d` and
-`git diff 8dd0f25..2a45d9d -- src/fm_audio.c src/fm_flac.c src/fm_vorbis.c src/fm_opus.c src/fm_player.c src/fm_media.c third_party/stb include/fm_audio.h examples/audio_dma_player.h` show how.
+worked on since; `git log 8dd0f25..a6cf829` and
+`git diff 8dd0f25..a6cf829 -- src/fm_audio.c src/fm_flac.c src/fm_vorbis.c src/fm_opus.c src/fm_player.c src/fm_media.c third_party/stb include/fm_audio.h examples/audio_dma_player.h` show how.
 
 **What the maintainers found themselves after `cf187af`, and what it tells
 you.** While measuring stack frames for the ARM target, one frame led to the
@@ -110,6 +110,12 @@ Vorbis tracks that never decoded; H.264 pictures 25 dB from the reference
 sanitizer, because the suite checked that a format is *recognised* and that
 nothing *crashes*, not that what comes out is *right*. These are fixed
 (commits `7d4d009`, `b3525f7`, `2a45d9d`; tests in `test/audit_v3_tests.h`).
+The same comparison was then widened (`git log 2a45d9d..a6cf829`) and closed what
+it had left open: JPEG and Motion JPEG in ffmpeg's 4:2:2 / 4:4:4 layouts,
+BT.709 for H.264, sizes taken from a damaged index, the FLAC sample width,
+Microsoft ADPCM in WAV files, PCM tracks of every width and byte order, and
+the encoder delay and padding of MP3 / Vorbis / Opus tracks. That is the
+newest code in the repository and nobody outside has read it.
 Draw the conclusion for your part: **wherever the library produces data,
 compare that data with a reference implementation**, on files a real tool
 wrote, before anything else.
@@ -127,7 +133,7 @@ were removed; if you can, remove the fix locally and see.
 |---|---|---|
 | F1 | crafted Vorbis comment header corrupted memory in `Audio_Open` | refused with `FM_ERR_CORRUPTED`; `third_party/stb/stb_vorbis.c` is **patched locally** — diff it against upstream 1.22 and audit the patch |
 | F2 | MP3 resync advanced one byte at a time | a damaged frame costs about 0.1 s instead of 0.6 s; 2 MiB of non-MP3 data is rejected in milliseconds |
-| F3 | unsupported ADPCM variants decoded to noise | stereo IMA ADPCM is bit-identical to ffmpeg; MS ADPCM is refused |
+| F3 | unsupported ADPCM variants decoded to noise | stereo IMA ADPCM is bit-identical to ffmpeg. Microsoft ADPCM was refused by that fix and **is decoded since** (`src/fm_adpcm.h`, `wav_adpcm_ms_decode` in `src/fm_audio.c`; two files byte-identical with ffmpeg in `test_wav_adpcm_ms`) |
 | F4 | shared WAV buffer used without a lock (`FM_USE_THREADS=1`) | locked |
 | F5, F6, F16, F17 | AAC path: sample count not clamped, errors reported as end of track, header zeroed, context leak | all four fixed |
 | F7, F19 | Opus 5.1 decoded as stereo noise; header gain ignored | multistream refused; gain applied (both testable only with `FM_USE_OPUS_LIB=1`) |
@@ -167,6 +173,14 @@ that stb_vorbis accepts but that declares more than two channels; and whether
 all of stb_vorbis's memory really goes through `FM_Alloc`. A second local
 patch to `stb_vorbis.c` (two shifts into the sign bit in the push-data
 resync) belongs to it.
+And the newest (`git log 2a45d9d..a6cf829`): **Microsoft ADPCM in WAV files**
+(`src/fm_adpcm.h`, shared with the video layer: block header, the seven
+standard coefficient pairs and a coefficient table from the file, `nBlockAlign`
+too small for one block, a last block cut short, seek by blocks), and the
+**FLAC wrapper** `src/fm_flac.c` (`FM_Flac_*`): dr_flac is now compiled into
+that one file with `DRFLAC_API static` and nothing else may call `drflac_*`;
+a stream wider than 24 bits is refused with `FM_ERR_UNSUPPORTED` before the
+decode, in a `.flac` file and in a video track.
 
 **Job 3 — go where nobody has been.** The previous auditor of this part was thorough, and
 left a list of leads that were **not confirmed and that nobody has examined
@@ -211,7 +225,7 @@ clang, with and without UBSan. Methods most likely to pay off now:
 
 | File | What it is |
 |---|---|
-| `src/fm_audio.c`, `include/fm_audio.h` | about 3 000 lines: audio API, WAV (PCM, IMA ADPCM, A-law, mu-law), MP3 and AAC front ends, read-ahead buffering, seek, decoder and encoder registries, writers, recorder. AAC is ADTS framing only: the decoder is a plugin the application registers |
+| `src/fm_audio.c`, `include/fm_audio.h` | about 3 000 lines: audio API, WAV (PCM, IMA and Microsoft ADPCM, A-law, mu-law), MP3 and AAC front ends, read-ahead buffering, seek, decoder and encoder registries, writers, recorder. AAC is ADTS framing only: the decoder is a plugin the application registers |
 | `src/fm_flac.c`, `src/fm_vorbis.c`, `src/fm_opus.c` | glue to `third_party/dr_flac`, `third_party/stb`, `third_party/opus` |
 | `third_party/minimp3/` | MP3 decoder (vendored) |
 | `src/fm_player.c`, `include/fm_player.h` | playlist player: scan folder, play, next, previous, seek, position |
@@ -384,15 +398,14 @@ worse than what is written here.
 - VBR MP3 without a Xing / Info header: duration and seek positions are
   estimates. With a Xing header: a seek may start up to about 0.15 s late and
   the reported position is within about 50 ms.
-- MS ADPCM is refused, not decoded.
+- WAV: 24-bit and float PCM and more than two channels are refused
+  (`FM_ERR_UNSUPPORTED`); the video layer does read 24 / 32-bit and float PCM
+  tracks. FLAC above 24 bits a sample is refused (limit of dr_flac v0.13.4).
 - Stack use of the decoders is large. Single frames on Cortex-M7 (clang
   `-Os`): `mp3dec_decode_frame` 17.4 KB, `drflac_open_with_metadata_private`
   4.9 KB, everything else below 2.3 KB; `README.md` "Stack" advises 32 KB for a
   task that plays MP3 or Opus. Whole call paths have not been summed —
   **doing that is wanted**, repeating that the frames are large is not.
-- The WAV reader refuses Microsoft ADPCM (see the line above) while the video
-  layer decodes it in AVI / MKV tracks (`adpcm_ms_block` in `src/fm_video.c`).
-  The inconsistency is known.
 - dr_flac has signed-overflow undefined behaviour on damaged files; building
   with `-fwrapv` is the documented advice. A crash or out-of-bounds access
   that follows from it is still a finding.

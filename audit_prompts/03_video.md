@@ -8,7 +8,7 @@ anything in the repository.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `2a45d9d` (audit exactly this commit; quote it in your report)
+- Commit: `a6cf829` (audit exactly this commit; quote it in your report)
 - Previous audit of this part: commit `8dd0f25`, report in `ReportV2.txt` at the
   repository root, lines 1089–1265
 - Library root: `Clain_FileManager/FileManager_lib/` (all paths below are relative to it)
@@ -51,7 +51,7 @@ one line in the "Outside my scope" section and move on.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite, about 478 tests, about 15 s
+make test                 # whole suite, about 513 tests, about 15 s
 make asan                 # same suite under ASan + UBSan
 make tsan                 # threaded suite under ThreadSanitizer
 make m32                  # suite built and run as a 32-bit program (clang);
@@ -95,8 +95,8 @@ This part was audited once before, at commit `8dd0f25`. That report is in the
 repository: `ReportV2.txt` at the repository root, lines 1089–1265 (the other
 line ranges are the other three parts). Read it first, including its sections
 "Examined and found sound" and "Not examined". Everything it found has been
-worked on since; `git log 8dd0f25..2a45d9d` and
-`git diff 8dd0f25..2a45d9d -- src/fm_video.c src/fm_h264.c src/fm_mjpeg.c src/fm_mediacache.c src/fm_player.c third_party/picojpeg include/fm_video.h` show how.
+worked on since; `git log 8dd0f25..a6cf829` and
+`git diff 8dd0f25..a6cf829 -- src/fm_video.c src/fm_h264.c src/fm_mjpeg.c src/fm_mediacache.c src/fm_player.c third_party/picojpeg include/fm_video.h` show how.
 
 **What the maintainers found themselves after `cf187af`, and what it tells
 you.** While measuring stack frames for the ARM target, one frame led to the
@@ -110,6 +110,12 @@ Vorbis tracks that never decoded; H.264 pictures 25 dB from the reference
 sanitizer, because the suite checked that a format is *recognised* and that
 nothing *crashes*, not that what comes out is *right*. These are fixed
 (commits `7d4d009`, `b3525f7`, `2a45d9d`; tests in `test/audit_v3_tests.h`).
+The same comparison was then widened (`git log 2a45d9d..a6cf829`) and closed what
+it had left open: JPEG and Motion JPEG in ffmpeg's 4:2:2 / 4:4:4 layouts,
+BT.709 for H.264, sizes taken from a damaged index, the FLAC sample width,
+Microsoft ADPCM in WAV files, PCM tracks of every width and byte order, and
+the encoder delay and padding of MP3 / Vorbis / Opus tracks. That is the
+newest code in the repository and nobody outside has read it.
 Draw the conclusion for your part: **wherever the library produces data,
 compare that data with a reference implementation**, on files a real tool
 wrote, before anything else.
@@ -153,10 +159,40 @@ part is three days old:
   loop written from that comment alone always ends.
 - `mp4_parse_esds` (object types: 0xDD is Vorbis, unknown types give no track)
   and the new `mp4_visual_object_type` (0x6C is Motion JPEG).
-- `src/fm_h264.c`, `yuv420_to_rgb888`: the colour range now comes from the VUI.
-  Check the other VUI fields it ignores (matrix coefficients: BT.709 streams
-  are converted with the BT.601 matrix), and streams whose range flag changes
-  with a new SPS.
+- `src/fm_h264.c`, `yuv420_to_rgb888`: the colour range and the matrix now
+  come from the VUI (`k_yuv_matrix[4]`: BT.601 / BT.709, video / full range;
+  only `matrix_coefficients == 1` selects BT.709, a VUI that says nothing is
+  BT.601 video range). There is a test vector for three of the four rows, none
+  for BT.709 full range. Check the values it treats as BT.601 (BT.2020 = 9,
+  SMPTE 240M = 7, RGB = 0), and streams whose VUI changes with a new SPS.
+- **The newest code, a few days old** (`git log 2a45d9d..a6cf829`):
+  - `video_pcm_read` and `mp4_pcm_entry`: PCM tracks of 8, 16, 24, 32 bits and
+    32-bit float, both byte orders, in AVI / MKV / MP4 / MOV / FLV, converted
+    to 16-bit **in the caller's buffer**; adjacent small packets are read
+    together (`VIDEO_PCM_GATHER`). Check the in-place conversion at every
+    width with buffers around one sample frame, packets that are not a whole
+    number of frames, and the gathering at the end of the index.
+  - the trimming wrapper: `Video_ReadAudioFrame` is now a layer over
+    `video_audio_read_raw` that removes encoder delay and padding
+    (`mp4_audio_edit`, MKV `CodecDelay` / `DiscardPadding` in
+    `mkv_group_discard`, `video_audio_trims`, `video_audio_rest_bytes`). The
+    rules are written above `Video_ReadAudioFrame` in `include/fm_video.h`.
+    Check: edit lists with several edits, empty edits, a `media_time` beyond
+    the track, a duration of 0 or longer than the track; `DiscardPadding`
+    negative, larger than the packet, on a block that is not the last;
+    `CodecDelay` near its one-second cap; every buffer size (a packet
+    delivered in parts must lose the same frames); the frame count after
+    `Video_SeekAudio(0)` and after a seek elsewhere; and the frame totals
+    against ffmpeg for every codec and container.
+  - `video_in_file` and the range check in `video_audio_locate`: a size or
+    offset from a damaged index used to become an allocation of that size.
+    Look for the places that still trust one.
+  - `video_flac_too_wide` and `src/fm_flac.c`: a FLAC track wider than 24 bits
+    is announced with `decodable == FM_FALSE`.
+  - `src/fm_adpcm.h`: the two ADPCM block decoders moved out of `fm_video.c`
+    and are shared with the WAV reader.
+  - A read that returns `FM_ERR_UNSUPPORTED` now passes the packet over, so
+    that the track ends; `FM_ERR_TOO_LARGE` consumes nothing for every codec.
 - The audio-track changes that came from the audio audit and touch your demux
   (AAC frame hand-over, Opus header gain and multistream refusal, `.m4a` no
   longer picked up by the player scan), and the log lines of `src/fm_video.c`
@@ -164,15 +200,18 @@ part is three days old:
 
 The maintainers ran the new audio code on 90 000 mutated copies of the test
 vectors under ASan + UBSan (which found one undefined shift in stb_vorbis's
-resync, now patched) and compared 37 ffmpeg-written files with ffmpeg's decode.
-That is a start, not coverage: go further on both.
+resync, now patched) and compared ffmpeg-written files with ffmpeg's decode:
+37 at first, then a sweep of every audio codec in every container that can
+carry it (3 s each; PCM, G.711, ADPCM and FLAC identical, MP3 / Vorbis / Opus
+within one LSB and of the same length). The newest code above has **not** been
+fuzzed. That is a start, not coverage: go further on both.
 
 **Job 3 — go where nobody has been.** Be aware that the previous audit of this part was
 thin: one finding, found by reading; no fuzzing, no differential comparison,
 no truncation or fault-injection campaign, no seek or timing checks. Its "Not
 examined" section lists almost the whole scope. **Treat section 6 below as
 never done and work through all of it**; this part has had the least outside
-scrutiny of the four and `src/fm_video.c` is 6 000 hand-written lines that
+scrutiny of the four and `src/fm_video.c` is 7 200 hand-written lines that
 take every size and offset from the file.
 
 What is already established (running it again will find nothing): the suite
@@ -204,7 +243,7 @@ clang, with and without UBSan. Methods most likely to pay off now:
 
 | File | What it is |
 |---|---|
-| `src/fm_video.c`, `include/fm_video.h` | about 6 000 lines: container parsers (FMRV, AVI, MP4/MOV, MKV/WebM, FLV), frame index, seek, audio-track demux, FMRV writer |
+| `src/fm_video.c`, `include/fm_video.h` | about 7 200 lines: container parsers (FMRV, AVI, MP4/MOV, MKV/WebM, FLV), frame index, seek, audio-track demux, FMRV writer |
 | `src/fm_h264.c`, `include/fm_h264.h`, `third_party/h264bsd/` | H.264 decoder plugin |
 | `src/fm_mjpeg.c`, `include/fm_mjpeg.h` | MJPEG decoder plugin |
 | `src/fm_mediacache.c`, `include/fm_mediacache.h` | media cache (copy to fast storage and play from there) |
@@ -357,19 +396,28 @@ worse than what is written here.
   missing decoder is not a defect; a crash or hang while identifying one is.
 - H.264 is Baseline profile only (limit of the vendored decoder): Main and
   High profile streams open and every frame is refused.
-- H.264 is converted with the BT.601 matrix whatever the stream declares.
-- Motion JPEG frames in ffmpeg's 4:2:2 / 4:4:4 layout are refused by picojpeg
-  (`README.md`, video notes).
-- The encoder delay of an MP3 track in MP4 / MKV (1105 samples) and the
-  pre-skip of an Opus track are not removed: the sound starts that much late
-  against ffmpeg's decode.
+- H.264 colour: BT.601 and BT.709 only; every other matrix a stream declares
+  (BT.2020, SMPTE 240M, RGB) is converted as BT.601.
+- Motion JPEG frames in a layout picojpeg cannot hold (an MCU of more than 8
+  blocks) are refused (`README.md`, video notes).
+- Encoder delay and padding are removed only where the container records
+  them (MP4 / MOV edit list, MKV `CodecDelay` / `DiscardPadding`). AVI and FLV
+  record neither: an MP3 track there starts 1105 frames late, as in ffmpeg.
+  An MP4 edit list of more than one edit, or one that starts later than one
+  second, is ignored.
+- After `Video_SeekAudio` to a packet other than 0 the MP4 length limit is not
+  applied (the padding of the last packet is played) and the first frames of
+  an MP3 track are silence; documented at `Video_ReadAudioFrame`.
 - A track without a decoder (`decodable == FM_FALSE`) returns
-  `FM_ERR_UNSUPPORTED` on every read and never `FM_ERR_EOF`; documented at
-  `Video_ReadAudioFrame`.
-- 24-bit PCM written as `WAVE_FORMAT_EXTENSIBLE` in an AVI, AC-3, DTS and ALAC
-  are not recognised: the clip opens without an audio track.
-- PCM in a QuickTime `.mov` is handed out one sample frame per call (slow, not
-  wrong).
+  `FM_ERR_UNSUPPORTED` once for every packet and then `FM_ERR_EOF`. AAC
+  without a decoder is handed out as ADTS frames, not PCM.
+- FLAC tracks above 24 bits a sample and PCM tracks of 12, 20 or 64 bits are
+  not decoded (`decodable == FM_FALSE`). AC-3, DTS and ALAC are not
+  recognised: the clip opens without an audio track.
+- PCM is always handed out as 16-bit: wider samples lose their low bits.
+- The open video handles are static: `g_video[FM_MAX_VIDEO]` is about 547 KB
+  of `.bss` with the default `FM_MAX_VIDEO` 4 and `FM_VIDEO_MAX_FRAMES` 4096
+  (`README.md` says how to shrink it).
 - FLV without `onMetaData` is reported as 320 × 240.
 - Audio tracks not supported inside video: ALAC in MP4; Flash ADPCM, Nellymoser and
   Speex in FLV.

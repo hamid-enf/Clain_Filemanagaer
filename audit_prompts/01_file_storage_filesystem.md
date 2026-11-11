@@ -8,7 +8,7 @@ anything in the repository.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `2a45d9d` (audit exactly this commit; quote it in your report)
+- Commit: `a6cf829` (audit exactly this commit; quote it in your report)
 - Previous audit of this part: commit `8dd0f25`, report in `ReportV2.txt` at the
   repository root, lines 1–1087
 - Library root: `Clain_FileManager/FileManager_lib/` (all paths below are relative to it)
@@ -51,7 +51,7 @@ one line in the "Outside my scope" section and move on.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite, about 478 tests, about 15 s
+make test                 # whole suite, about 513 tests, about 15 s
 make asan                 # same suite under ASan + UBSan
 make tsan                 # threaded suite under ThreadSanitizer
 make m32                  # suite built and run as a 32-bit program (clang);
@@ -95,8 +95,8 @@ This part was audited once before, at commit `8dd0f25`. That report is in the
 repository: `ReportV2.txt` at the repository root, lines 1–1087 (the other
 line ranges are the other three parts). Read it first, including its sections
 "Examined and found sound" and "Not examined". Everything it found has been
-worked on since; `git log 8dd0f25..2a45d9d` and
-`git diff 8dd0f25..2a45d9d -- src/fm_file.c src/fm_directory.c src/fm_text.c src/fm_stream.c src/fm_safe.c src/fm_logger.c src/fm_log.c src/fm_alloc.c src/fm_filesystem.c backends include` show how.
+worked on since; `git log 8dd0f25..a6cf829` and
+`git diff 8dd0f25..a6cf829 -- src/fm_file.c src/fm_directory.c src/fm_text.c src/fm_stream.c src/fm_safe.c src/fm_logger.c src/fm_log.c src/fm_alloc.c src/fm_filesystem.c backends include` show how.
 
 **What the maintainers found themselves after `cf187af`, and what it tells
 you.** While measuring stack frames for the ARM target, one frame led to the
@@ -110,6 +110,12 @@ Vorbis tracks that never decoded; H.264 pictures 25 dB from the reference
 sanitizer, because the suite checked that a format is *recognised* and that
 nothing *crashes*, not that what comes out is *right*. These are fixed
 (commits `7d4d009`, `b3525f7`, `2a45d9d`; tests in `test/audit_v3_tests.h`).
+The same comparison was then widened (`git log 2a45d9d..a6cf829`) and closed what
+it had left open: JPEG and Motion JPEG in ffmpeg's 4:2:2 / 4:4:4 layouts,
+BT.709 for H.264, sizes taken from a damaged index, the FLAC sample width,
+Microsoft ADPCM in WAV files, PCM tracks of every width and byte order, and
+the encoder delay and padding of MP3 / Vorbis / Opus tracks. That is the
+newest code in the repository and nobody outside has read it.
 Draw the conclusion for your part: **wherever the library produces data,
 compare that data with a reference implementation**, on files a real tool
 wrote, before anything else.
