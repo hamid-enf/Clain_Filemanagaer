@@ -12,7 +12,7 @@
  *   - همه‌ی printfها با %lu/%d/%s هستند (سازگار با mini-printf).
  *
  * پیش‌نیاز:
- *   FM_USE_FATFS=1
+ *   FM_USE_FATFS برابر 1 (fm_board_config.h در بیلد فریمور خودش می‌گذارد)
  *   sd_diskio.c کیوب در بیلد می‌ماند (Exclude لازم نیست)
  *
  * استفاده در main:

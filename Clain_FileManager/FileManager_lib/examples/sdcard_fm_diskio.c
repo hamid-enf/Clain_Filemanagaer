@@ -10,6 +10,9 @@
  * FileManager_lib, so this copy stays empty unless the project defines
  * FM_EXAMPLES_DIR_BUILD (do that only after excluding the top_api copy).
  * The rule is checked by tools/check_cubeide.sh. */
+#if defined(FM_EXAMPLES_DIR_BUILD)
+#include "fm_config.h"   /* FM_USE_FATFS may come from fm_board_config.h */
+#endif
 #if defined(FM_EXAMPLES_DIR_BUILD) && \
     defined(FM_USE_FATFS) && FM_USE_FATFS && \
     defined(FM_SD_DISKIO) && (FM_SD_DISKIO == FILEMANAGER) && \

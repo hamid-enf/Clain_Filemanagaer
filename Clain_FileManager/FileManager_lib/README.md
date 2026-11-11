@@ -260,10 +260,13 @@ project does not define anything twice.
 
 Project settings (Properties > C/C++ Build > Settings > MCU GCC Compiler):
 
-- **Preprocessor:** `FM_USE_FATFS=1` when the SD card goes through the
-  CubeMX FatFs middleware (the default is 0).  The media switches
-  (`FM_USE_AUDIO`, `FM_USE_VIDEO`, `FM_USE_IMAGE`, `FM_USE_MP3`, ...) are
-  already 1 on an STM32H7; define them only to turn something off.
+- **Preprocessor:** no `FM_...` symbol is needed; the symbols CubeMX
+  generates (`USE_HAL_DRIVER`, `STM32H743xx`, ...) are enough.
+  `include/fm_board_config.h` turns the FatFS adapter on in a firmware
+  build (`FM_USE_FATFS` 1 when `USE_HAL_DRIVER` is defined; a host build
+  keeps the default 0), and the media switches (`FM_USE_AUDIO`,
+  `FM_USE_VIDEO`, `FM_USE_IMAGE`, `FM_USE_MP3`, ...) are already 1 on an
+  STM32H7.
   Switching features off, buffer sizes and what each one saves:
   [`docs/OPTIONS_FA.md`](docs/OPTIONS_FA.md) (Persian); the switches
   themselves are the commented `//#define FM_USE_... 0` lines at the top

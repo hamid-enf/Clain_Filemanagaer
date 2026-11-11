@@ -53,10 +53,10 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 /* Project symbols (Properties > C/C++ Build > Settings > MCU GCC Compiler >
- * Preprocessor). They are not defined in a header:
- *
- *   FM_USE_FATFS=1  FM_USE_AUDIO=1  FM_USE_MP3=1  FM_USE_VIDEO=1
- *   FM_USE_IMAGE=1  FM_USE_USB_MSC=1  FM_USE_DEVICE_ADAPTERS=1
+ * Preprocessor): only the ones CubeMX generates (DEBUG, USE_PWR_LDO_SUPPLY,
+ * USE_HAL_DRIVER, STM32H743xx). No FM_... symbol is needed: every library
+ * switch, FM_USE_FATFS included, is set in
+ * FileManager_lib/include/fm_board_config.h.
  */
 /* USER CODE END PTD */
 

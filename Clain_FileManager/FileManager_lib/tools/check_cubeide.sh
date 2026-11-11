@@ -26,10 +26,33 @@ trap 'rm -rf "$TMP"' EXIT
 rc=0
 n=0
 
-# همان نمادهایی که پروژهٔ برد تعریف می‌کند (Core/Src/main.c، بخش PTD)
-DEFS="-DUSE_HAL_DRIVER -DSTM32H743xx -DFM_USE_FATFS=1 -DFM_USE_AUDIO=1 \
--DFM_USE_MP3=1 -DFM_USE_VIDEO=1 -DFM_USE_IMAGE=1 -DFM_USE_USB_MSC=1 \
--DFM_USE_DEVICE_ADAPTERS=1"
+# همان نمادهایی که پروژهٔ برد تعریف می‌کند (Core/Src/main.c، بخش PTD):
+# فقط نمادهای خود CubeMX، بدون هیچ FM_...
+DEFS="-DDEBUG -DUSE_PWR_LDO_SUPPLY -DUSE_HAL_DRIVER -DSTM32H743xx"
+
+# پروژه نباید به هیچ Symbol با نام FM_... نیاز داشته باشد. اگر
+# FM_USE_FATFS در بیلد فریمور 0 بماند، backends/fm_fatfs.c خالی کامپایل
+# می‌شود و لینک با «undefined reference to FatFS_Init» می‌افتد.
+cat > "$TMP/nosym.c" <<'NOSYM'
+#include "fm_config.h"
+#include "fm_fatfs.h"
+#if !FM_USE_FATFS
+#error "FM_USE_FATFS is 0 in a firmware build without FM_ project symbols"
+#endif
+#if FM_FATFS_PROVIDE_DISKIO
+#error "FM_FATFS_PROVIDE_DISKIO is 1 although FM_SD_DISKIO is CUBEMX"
+#endif
+#if !FM_USE_AUDIO || !FM_USE_MP3 || !FM_USE_VIDEO || !FM_USE_IMAGE
+#error "a media switch is 0 in a firmware build without FM_ project symbols"
+#endif
+NOSYM
+if $CC $DEFS -std=gnu11 -Iinclude -fsyntax-only "$TMP/nosym.c" 2>"$TMP/err"; then
+    echo "cubeide: a firmware build needs no FM_ project symbol"
+else
+    echo "FAIL firmware build without FM_ project symbols:"
+    grep -m3 'error' "$TMP/err" | sed 's/^/     /'
+    rc=1
+fi
 
 for f in $(find . -name '*.c' \
                ! -path './src/*' ! -path './backends/*' \

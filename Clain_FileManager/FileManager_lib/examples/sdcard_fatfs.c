@@ -11,7 +11,8 @@
  *      درست چاپ می‌شوند (نه %zu / %u).
  *
  *پیش‌نیاز پروژه CubeMX:
- *   Symbols:  FM_USE_FATFS=1  FM_FATFS_PROVIDE_DISKIO=0
+ *   FM_USE_FATFS برابر 1 و FM_SD_DISKIO برابر CUBEMX؛ هر دو را
+ *   fm_board_config.h در بیلد فریمور خودش می‌گذارد، Symbol لازم نیست.
  *   (diskio خود CubeMX — sd_diskio.c — به درایو 0 وصل است)
  *
  * این فایل روی هاست (FM_HOST_BUILD=1) به هیچی ترجمه نمی‌شود.
@@ -22,6 +23,9 @@
  * FileManager_lib, so this copy stays empty unless the project defines
  * FM_EXAMPLES_DIR_BUILD (do that only after excluding the top_api copy).
  * The rule is checked by tools/check_cubeide.sh. */
+#if defined(FM_EXAMPLES_DIR_BUILD)
+#include "fm_config.h"   /* FM_USE_FATFS may come from fm_board_config.h */
+#endif
 #if defined(FM_EXAMPLES_DIR_BUILD) && \
     defined(FM_USE_FATFS) && FM_USE_FATFS && \
     !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)

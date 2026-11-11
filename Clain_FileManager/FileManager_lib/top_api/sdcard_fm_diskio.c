@@ -5,6 +5,7 @@
  * Cube: FATFS/Target/sd_diskio.c را Exclude from Build کنید.
  *       خود فایل کیوب را کپی/پچ نکنید.
  */
+#include "fm_config.h"   /* FM_USE_FATFS may come from fm_board_config.h */
 #if defined(FM_USE_FATFS) && FM_USE_FATFS && \
     defined(FM_SD_DISKIO) && (FM_SD_DISKIO == FILEMANAGER) && \
     !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)

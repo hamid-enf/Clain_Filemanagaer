@@ -13,11 +13,13 @@ FileManager (File_WriteText/…)
 
 ## ۱) تنظیم‌های لازم پروژه CubeMX
 
-- Paths and Symbols → Symbols (GNU C، برای *همه‌ی* سورس‌ها):
-  - `FM_USE_FATFS=1`
-  - `FM_FATFS_PROVIDE_DISKIO=0`  ← چون `sd_diskio.c` خود Cube را دارید
-- `backends/fm_fatfs.c` باید در build باشد (بدون `FM_USE_FATFS=1` کل فایل
-  خالی کامپایل می‌شود و لینک خطا می‌دهد).
+- Symbol لازم نیست. `include/fm_board_config.h` در بیلد فریمور
+  (`USE_HAL_DRIVER`) خودش `FM_USE_FATFS` را ۱ می‌کند، و
+  `FM_FATFS_PROVIDE_DISKIO` از `FM_SD_DISKIO` همان فایل نتیجه می‌شود
+  (`CUBEMX` یعنی ۰، چون `sd_diskio.c` خود Cube را دارید).
+- `backends/fm_fatfs.c` باید در build باشد (با `FM_USE_FATFS` برابر ۰ کل
+  فایل خالی کامپایل می‌شود و لینک خطای `undefined reference to
+  FatFS_Init` می‌دهد).
 - `ffconf.h` پیشنهادی برای bare-metal: `FF_FS_REENTRANT=0`،
   `FF_FS_LOCK=0`، `FF_USE_LFN=1` (هر مدی؛ به بخش stack دقت کنید).
 
