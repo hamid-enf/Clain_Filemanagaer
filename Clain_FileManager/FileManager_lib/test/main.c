@@ -11411,6 +11411,12 @@ static void vr_idx_bytes(uint8_t *b, uint32_t i)
     b[2] = (uint8_t)(i >> 16); b[3] = (uint8_t)(0xA5u ^ (uint8_t)i);
 }
 
+/* The audio packets of these files are 4 bytes of 16-bit PCM.  Packets
+ * that follow each other in the file are read together when the buffer
+ * has room (video_pcm_read); a buffer of one packet reads them one by
+ * one, which is what the tests that check packet N need. */
+#define VR_ONE_PACKET 4u
+
 static FM_Result vr_expect_idx(const uint8_t *b, size_t got, uint32_t i)
 {
     uint8_t want[4];
@@ -12976,20 +12982,20 @@ static void test_video_report(void)
             if (r == FM_OK) r = Video_SeekAudio(&vid, aedge - 4u);
             for (i = aedge - 4u; i < aedge + 9u && r == FM_OK; i++)
             {
-                r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                 if (r == FM_OK) r = vr_expect_idx(fb, got, i);
             }
             if (r == FM_OK) r = Video_SeekAudio(&vid, na - 1u);
-            if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+            if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
             if (r == FM_OK) r = vr_expect_idx(fb, got, na - 1u);
             if (r == FM_OK &&
-                Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got) != FM_ERR_EOF)
+                Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got) != FM_ERR_EOF)
             {
                 r = FM_ERR_INVALID_FORMAT;
             }
             /* rewind into the streamed part */
             if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 1u);
-            if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+            if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
             if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 1u);
             (void)Video_Close(&vid);
         }
@@ -13080,18 +13086,18 @@ static void test_video_report(void)
                     if (r == FM_OK) r = Video_SeekAudio(&vid, 0u);
                     for (i = 0; i < na && r == FM_OK; i++)
                     {
-                        r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                        r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                         if (r == FM_OK) r = vr_expect_idx(fb, got, i);
                         if (r != FM_OK) printf("[packet %u] ", (unsigned)i);
                     }
                     if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 7u);
-                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                     if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 7u);
                     if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 1u);
-                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                     if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 1u);
                     if (r == FM_OK) r = Video_SeekAudio(&vid, na - 1u);
-                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                     if (r == FM_OK) r = vr_expect_idx(fb, got, na - 1u);
                     (void)Video_Close(&vid);
                 }
@@ -13415,7 +13421,7 @@ static void test_video_report(void)
                 }
                 for (k = 0; k < 6u && r == FM_OK; k++)
                 {
-                    r = Video_ReadAudioFrame(&vid, ab, sizeof(ab), &ag);
+                    r = Video_ReadAudioFrame(&vid, ab, VR_ONE_PACKET, &ag);
                     vr_idx_bytes(want, k);
                     if (r == FM_OK &&
                         (ag != 4u || ab[0] != want[1] || ab[1] != want[0] ||
@@ -13630,12 +13636,12 @@ static void test_video_report(void)
                 if (r == FM_OK) r = Video_SeekAudio(&vid, 0u);
                 for (i = 0; i < na && r == FM_OK; i++)
                 {
-                    r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                    r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                     if (r == FM_OK) r = vr_expect_idx(fb, got, i);
                     if (r != FM_OK) printf("[packet %u] ", (unsigned)i);
                 }
                 if (r == FM_OK) r = Video_SeekAudio(&vid, aedge + 1u);
-                if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, sizeof(fb), &got);
+                if (r == FM_OK) r = Video_ReadAudioFrame(&vid, fb, VR_ONE_PACKET, &got);
                 if (r == FM_OK) r = vr_expect_idx(fb, got, aedge + 1u);
                 (void)Video_Close(&vid);
             }
@@ -20425,6 +20431,7 @@ int main(void)
 #endif
 #if FM_USE_VIDEO
     RUN_SUITE(test_video_damaged_sizes);
+    RUN_SUITE(test_video_pcm_track);
 #endif
 #if FM_USE_VIDEO && FM_USE_AUDIO && FM_USE_FLAC
     RUN_SUITE(test_video_flac_track);

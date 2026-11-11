@@ -1165,6 +1165,131 @@ static void test_video_flac_track(void)
 #endif /* FM_USE_AUDIO && FM_USE_FLAC */
 
 /* ------------------------------------------------------------------ */
+/* Uncompressed tracks: every width and byte order comes out as the     */
+/* same 16-bit PCM                                                      */
+/* ------------------------------------------------------------------ */
+static void test_video_pcm_track(void)
+{
+    static const struct
+    {
+        const char *what;
+        const char *path;
+        unsigned bits;
+    } c[10] = {
+        { "PCM 24-bit in AVI (WAVE_FORMAT_EXTENSIBLE)", "/test/vectors/avi_pcm24.avi", 24u },
+        { "PCM 32-bit float in AVI", "/test/vectors/avi_pcm_f32.avi", 32u },
+        { "PCM 16-bit in MOV (sowt, one sample frame a packet)", "/test/vectors/mov_pcm_s16.mov", 16u },
+        { "PCM 24-bit big-endian in MOV (in24)", "/test/vectors/mov_pcm24be.mov", 24u },
+        { "PCM 24-bit little-endian in MOV (in24 + enda)", "/test/vectors/mov_pcm24le.mov", 24u },
+        { "PCM 32-bit float big-endian in MOV (fl32)", "/test/vectors/mov_pcm_f32be.mov", 32u },
+        { "PCM 24-bit in MP4 (ipcm + pcmC)", "/test/vectors/mp4_ipcm24.mp4", 24u },
+        { "PCM 32-bit in MKV (A_PCM/INT/LIT)", "/test/vectors/mkv_pcm32.mkv", 32u },
+        { "PCM 16-bit big-endian in MKV (A_PCM/INT/BIG)", "/test/vectors/mkv_pcm_s16be.mkv", 16u },
+        { "PCM 32-bit float in MKV (A_PCM/FLOAT/IEEE)", "/test/vectors/mkv_pcm_f32.mkv", 32u }
+    };
+    static FM_Video v;
+    FM_AudioTrackInfo ti;
+    Av3Run run;
+    char m[160];
+    FM_Result r;
+    unsigned i;
+
+    for (i = 0u; i < 10u; i++)
+    {
+        TEST(c[i].what);
+        memset(&v, 0, sizeof(v));
+        memset(&ti, 0, sizeof(ti));
+        memset(&run, 0, sizeof(run));
+        r = Video_Open(c[i].path, &v);
+        if (r == FM_OK)
+        {
+            (void)Video_GetAudioInfo(&v, &ti);
+            av3_drain(&v, 4096u, 2000u, &run);
+            (void)Video_Close(&v);
+        }
+        if (r == FM_OK && ti.codec == FM_VIDEO_AUDIO_PCM && ti.decodable &&
+            ti.bits_per_sample == c[i].bits && ti.channels == 2u &&
+            ti.sample_rate == 8000u && run.bad == 0u && run.ended &&
+            run.bytes == AV3_PCM_BYTES &&
+            av3_crc32(g_av3_pcm, run.bytes) == AV3_PCM_CRC)
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m),
+                           "open %d, codec %d, %u bits, decodable %d; ok %u, "
+                           "errors %u (first %d), %lu bytes, end %d", (int)r,
+                           (int)ti.codec, (unsigned)ti.bits_per_sample,
+                           (int)ti.decodable, run.ok, run.bad,
+                           (int)run.first_bad, (unsigned long)run.bytes,
+                           run.ended);
+            FAIL(m);
+        }
+    }
+
+    TEST("PCM 8-bit signed in MOV (sowt with 8 bits)");
+    r = av3_decode("/test/vectors/mov_pcm_s8.mov", 4096u, &run);
+    if (r == FM_OK && run.bad == 0u && run.ended && run.bytes == 3200u &&
+        av3_crc32(g_av3_pcm, run.bytes) == 0x1172072Cu)
+    {
+        PASS();
+    }
+    else
+    {
+        av3_report(&run, m, sizeof(m));
+        FAIL(m);
+    }
+
+    TEST("PCM 32-bit: a buffer of one sample frame reads the whole track");
+    memset(&v, 0, sizeof(v));
+    memset(&run, 0, sizeof(run));
+    r = Video_Open("/test/vectors/mkv_pcm32.mkv", &v);
+    if (r == FM_OK)
+    {
+        av3_drain(&v, 8u, 2000u, &run);
+        (void)Video_Close(&v);
+    }
+    if (r == FM_OK && run.bad == 0u && run.ended && run.max_chunk == 4u &&
+        run.bytes == AV3_PCM_BYTES &&
+        av3_crc32(g_av3_pcm, run.bytes) == AV3_PCM_CRC)
+    {
+        PASS();
+    }
+    else
+    {
+        av3_report(&run, m, sizeof(m));
+        FAIL(m);
+    }
+
+    TEST("PCM 24-bit: a buffer below one sample frame is FM_ERR_TOO_LARGE");
+    memset(&v, 0, sizeof(v));
+    r = Video_Open("/test/vectors/avi_pcm24.avi", &v);
+    if (r == FM_OK)
+    {
+        uint8_t small[8];
+        size_t n = 77u;
+        FM_Result rr = Video_ReadAudioFrame(&v, small, 5u, &n);
+
+        (void)Video_Close(&v);
+        if (rr == FM_ERR_TOO_LARGE && n == 0u)
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m), "read -> %d, %lu bytes", (int)rr,
+                           (unsigned long)n);
+            FAIL(m);
+        }
+    }
+    else
+    {
+        FAIL("cannot open the vector");
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* The picture: colours                                                */
 /* ------------------------------------------------------------------ */
 #if FM_USE_H264 || FM_USE_MJPEG

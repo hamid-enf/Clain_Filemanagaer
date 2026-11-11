@@ -131,12 +131,15 @@ typedef struct
     uint32_t      audio_codec;       /* FM_VideoAudioCodec            */
     uint32_t      audio_rate;
     uint16_t      audio_channels;
-    uint16_t      audio_bits;        /* PCM only                      */
+    uint16_t      audio_bits;        /* PCM: bits a sample in the file */
     uint16_t      audio_wav_tag;     /* ADPCM: 0x0011 IMA, 0x0002 MS  */
     uint16_t      audio_block_align; /* ADPCM: bytes per block        */
     uint8_t       audio_aot;         /* AAC audio object type (0 = not
                                       * known: treated as AAC-LC)     */
-    FM_Bool       audio_pcm_be;      /* 16-bit PCM stored big-endian  */
+    FM_Bool       audio_pcm_be;      /* PCM stored big-endian         */
+    FM_Bool       audio_pcm_float;   /* PCM: 32-bit IEEE float        */
+    FM_Bool       audio_pcm_s8;      /* PCM: 8-bit samples are signed
+                                      * (QuickTime; unsigned elsewhere) */
     uint32_t      audio_private_size;
     uint8_t       audio_private[FM_VIDEO_AUDIO_PRIVATE_MAX]; /* MKV CodecPrivate / MP4 dfLa */
     uint8_t      *audio_private_big; /* ...when it does not fit there
@@ -1015,7 +1018,32 @@ static FM_Result avi_parse_header(FM_Video *v, const AviLayout *lay,
                          * Expanded for MP3(0x0055), aLaw(6), muLaw(7), ADPCM (0x11/2). */
                         uint16_t tag = video_rd16(strf);
 
-                        if (tag == 1u) /* PCM */
+                        if (tag == 0xFFFEu && take >= 26u)
+                        {
+                            /* WAVE_FORMAT_EXTENSIBLE (what is written
+                             * for more than 16 bits): the real tag is
+                             * the first field of the SubFormat GUID. */
+                            tag = video_rd16(strf + 24);
+                            if (tag != 1u && tag != 3u)
+                            {
+                                tag = 0xFFFEu;
+                            }
+                        }
+                        if (tag == 3u) /* IEEE float */
+                        {
+                            /* 32-bit only; a 64-bit float track is not
+                             * announced at all */
+                            if (video_rd16(strf + 14) == 32u)
+                            {
+                                priv->audio_codec = FM_VIDEO_AUDIO_PCM;
+                                priv->audio_channels = video_rd16(strf + 2);
+                                priv->audio_rate = video_rd32(strf + 4);
+                                priv->audio_bits = 32u;
+                                priv->audio_pcm_float = FM_TRUE;
+                                priv->audio_present = FM_TRUE;
+                            }
+                        }
+                        else if (tag == 1u) /* PCM */
                         {
                             priv->audio_codec = FM_VIDEO_AUDIO_PCM;
                             priv->audio_channels = video_rd16(strf + 2);
@@ -2088,6 +2116,119 @@ static FM_Result mp4_build_index(FM_Video *v, Mp4Track *t,
     return FM_OK;
 }
 
+/*
+ * Uncompressed audio in MP4 / QuickTime.  FM_TRUE when `entry` (its first
+ * 28 bytes in `a`) is a layout that is played; the format goes to priv,
+ * the bits a sample to *bits.
+ *
+ *   sowt / twos   16-bit little / big endian; with 8 bits: signed
+ *   raw           8-bit unsigned
+ *   in24 / in32   24 / 32-bit, big endian unless an "enda" box says little
+ *   fl32          32-bit float, the same rule
+ *   lpcm          QuickTime version-2 entry: width and flags in the entry
+ *   ipcm / fpcm   ISO 23003-5: width and byte order in a "pcmC" box
+ *
+ * 64-bit samples (fl64, lpcm / fpcm with 64 bits) are not played and give
+ * no track.  ("alac" was once mapped to PCM here: Apple Lossless is a
+ * compressed codec, and playing its packets as PCM is noise.)
+ */
+static FM_Bool mp4_pcm_entry(FM_Video *v, FM_VideoPriv *priv,
+                             const Mp4Box *entry, const uint8_t *a,
+                             uint32_t *bits)
+{
+    uint32_t version = video_be16(a + 8);
+    uint64_t kids = entry->data + 28u +
+                    ((version == 1u) ? 16u : (version == 2u) ? 36u : 0u);
+    uint64_t end = entry->start + entry->size;
+    uint32_t width = video_be16(a + 18);
+    FM_Bool be = FM_TRUE;
+    FM_Bool is_float = FM_FALSE;
+    FM_Bool s8 = FM_FALSE;
+    Mp4Box box;
+    uint8_t b[36];
+
+    if (memcmp(entry->type, "sowt", 4) == 0 ||
+        memcmp(entry->type, "twos", 4) == 0)
+    {
+        if (width != 8u && width != 16u)
+        {
+            return FM_FALSE;
+        }
+        be = (entry->type[0] == 't') ? FM_TRUE : FM_FALSE;
+        s8 = FM_TRUE;
+    }
+    else if (memcmp(entry->type, "raw ", 4) == 0)
+    {
+        if (width != 8u)
+        {
+            return FM_FALSE;
+        }
+    }
+    else if (memcmp(entry->type, "in24", 4) == 0 ||
+             memcmp(entry->type, "in32", 4) == 0 ||
+             memcmp(entry->type, "fl32", 4) == 0)
+    {
+        width = (entry->type[3] == '4') ? 24u : 32u;
+        is_float = (entry->type[0] == 'f') ? FM_TRUE : FM_FALSE;
+        /* wave { frma, enda }: enda 1 = little endian */
+        if (kids < end && mp4_find_deep(v, kids, end, "wave", &box) == FM_OK &&
+            mp4_find_deep(v, box.data, box.start + box.size, "enda",
+                          &box) == FM_OK &&
+            box.start + box.size >= box.data + 2u &&
+            video_read_at(&v->file, box.data, b, 2) == FM_OK &&
+            video_be16(b) == 1u)
+        {
+            be = FM_FALSE;
+        }
+    }
+    else if (memcmp(entry->type, "lpcm", 4) == 0 && version == 2u)
+    {
+        /* after the 28 bytes: struct size, rate (f64), channels,
+         * 0x7F000000, bits a channel, flags (1 float, 2 big endian,
+         * 4 signed), ... */
+        if (end < entry->data + 64u ||
+            video_read_at(&v->file, entry->data + 28u, b, 36) != FM_OK)
+        {
+            return FM_FALSE;
+        }
+        width = video_be32(b + 20);
+        is_float = ((video_be32(b + 24) & 1u) != 0u) ? FM_TRUE : FM_FALSE;
+        be = ((video_be32(b + 24) & 2u) != 0u) ? FM_TRUE : FM_FALSE;
+        s8 = ((video_be32(b + 24) & 4u) != 0u) ? FM_TRUE : FM_FALSE;
+    }
+    else if (memcmp(entry->type, "ipcm", 4) == 0 ||
+             memcmp(entry->type, "fpcm", 4) == 0)
+    {
+        /* pcmC: version + flags (4), format flags (bit 0 = little
+         * endian), sample size */
+        if (kids >= end || mp4_find_deep(v, kids, end, "pcmC", &box) != FM_OK ||
+            box.start + box.size < box.data + 6u ||
+            video_read_at(&v->file, box.data, b, 6) != FM_OK)
+        {
+            return FM_FALSE;
+        }
+        is_float = (entry->type[0] == 'f') ? FM_TRUE : FM_FALSE;
+        be = ((b[4] & 1u) != 0u) ? FM_FALSE : FM_TRUE;
+        width = b[5];
+        s8 = FM_TRUE;
+    }
+    else
+    {
+        return FM_FALSE;
+    }
+    if (is_float ? (width != 32u)
+                 : (width != 8u && width != 16u && width != 24u &&
+                    width != 32u))
+    {
+        return FM_FALSE;
+    }
+    priv->audio_pcm_be = (width > 8u) ? be : FM_FALSE;
+    priv->audio_pcm_float = is_float;
+    priv->audio_pcm_s8 = (width == 8u) ? s8 : FM_FALSE;
+    *bits = width;
+    return FM_TRUE;
+}
+
 /* Parse the audio properties of an MP4 'soun' track. */
 static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                                       FM_VideoPriv *priv)
@@ -2110,8 +2251,12 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
     uint64_t stsc_off = 0;
     uint32_t rate = 0;
     uint16_t channels = 0;
+    uint32_t pcm_bits = 16u;
     FM_Bool have_mp4a = FM_FALSE;
 
+    priv->audio_pcm_be = FM_FALSE;
+    priv->audio_pcm_float = FM_FALSE;
+    priv->audio_pcm_s8 = FM_FALSE;
     if (mp4_find_deep(v, trak->data, trak->start + trak->size, "stbl",
                       &stbl) != FM_OK)
     {
@@ -2237,14 +2382,8 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                                             : FM_VIDEO_AUDIO_ALAW;
                     have_mp4a = FM_TRUE;
                 }
-                else if ((memcmp(entry.type, "sowt", 4) == 0 ||
-                          memcmp(entry.type, "twos", 4) == 0) &&
-                         video_be16(a + 18) == 16u)
+                else if (mp4_pcm_entry(v, priv, &entry, a, &pcm_bits))
                 {
-                    /* "twos" is the same thing stored big-endian: the
-                     * bytes of every sample are swapped while reading. */
-                    priv->audio_pcm_be = (entry.type[0] == 't') ? FM_TRUE
-                                                                 : FM_FALSE;
                     /* QuickTime little-endian 16-bit PCM: what the PCM
                      * path hands out as it is.  ("alac" used to be
                      * mapped here: Apple Lossless is a compressed
@@ -2294,8 +2433,16 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
     /* priv->audio_codec already set in the stsd switch above */
     priv->audio_rate = rate;
     priv->audio_channels = channels;
-    priv->audio_bits = (priv->audio_codec == FM_VIDEO_AUDIO_PCM ||
-                        priv->audio_codec == FM_VIDEO_AUDIO_ALAW ||
+    if (priv->audio_codec == FM_VIDEO_AUDIO_PCM && sample_size == 1u &&
+        (uint32_t)channels * (pcm_bits / 8u) > 1u)
+    {
+        /* Classic QuickTime: the sample size of an uncompressed track
+         * counts samples, not bytes. */
+        sample_size = (uint32_t)channels * (pcm_bits / 8u);
+    }
+    priv->audio_bits = (priv->audio_codec == FM_VIDEO_AUDIO_PCM)
+                           ? (uint16_t)pcm_bits
+                     : (priv->audio_codec == FM_VIDEO_AUDIO_ALAW ||
                         priv->audio_codec == FM_VIDEO_AUDIO_ULAW ||
                         priv->audio_codec == FM_VIDEO_AUDIO_ADPCM)
                            ? 16u
@@ -3043,11 +3190,24 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
         rate = 8000u;
     }
 
-    if (mkv_codec_is(t, "A_PCM/INT/LIT"))
+    priv->audio_pcm_be = FM_FALSE;
+    priv->audio_pcm_float = FM_FALSE;
+    if (mkv_codec_is(t, "A_PCM/INT/LIT") || mkv_codec_is(t, "A_PCM/INT/BIG"))
     {
         codec = FM_VIDEO_AUDIO_PCM;
         bits = (t->bit_depth >= 8u && t->bit_depth <= 32u)
                    ? (uint32_t)t->bit_depth : 16u;
+        priv->audio_pcm_be = mkv_codec_is(t, "A_PCM/INT/BIG");
+    }
+    else if (mkv_codec_is(t, "A_PCM/FLOAT/IEEE"))
+    {
+        /* little-endian; 32-bit only (64-bit: no track) */
+        if (t->bit_depth == 32u)
+        {
+            codec = FM_VIDEO_AUDIO_PCM;
+            bits = 32u;
+            priv->audio_pcm_float = FM_TRUE;
+        }
     }
     else if (mkv_codec_is(t, "A_MPEG/L3"))  { codec = FM_VIDEO_AUDIO_MP3; }
     else if (mkv_codec_is(t, "A_FLAC"))     { codec = FM_VIDEO_AUDIO_FLAC; }
@@ -3057,8 +3217,8 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
     else if (mkv_codec_is(t, "A_MS/ACM") && t->priv_size >= 14u)
     {
         /* CodecPrivate is a WAVEFORMATEX: wFormatTag names the codec. */
-        uint8_t wf[16];
-        uint32_t take = (t->priv_size < 16u) ? (uint32_t)t->priv_size : 16u;
+        uint8_t wf[26];
+        uint32_t take = (t->priv_size < 26u) ? (uint32_t)t->priv_size : 26u;
 
         memset(wf, 0, sizeof(wf));
         if (video_read_at(&v->file, t->priv_off, wf, take) == FM_OK)
@@ -3074,11 +3234,25 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
             {
                 rate = video_rd32(wf + 4);
             }
+            if (tag == 0xFFFEu && take >= 26u &&
+                (video_rd16(wf + 24) == 1u || video_rd16(wf + 24) == 3u))
+            {
+                tag = video_rd16(wf + 24);       /* EXTENSIBLE: SubFormat */
+            }
             if (tag == 1u)
             {
                 codec = FM_VIDEO_AUDIO_PCM;
                 bits = (video_rd16(wf + 14) != 0u) ? video_rd16(wf + 14)
                                                    : 16u;
+            }
+            else if (tag == 3u)
+            {
+                if (video_rd16(wf + 14) == 32u)
+                {
+                    codec = FM_VIDEO_AUDIO_PCM;
+                    bits = 32u;
+                    priv->audio_pcm_float = FM_TRUE;
+                }
             }
             else if (tag == 0x0055u) { codec = FM_VIDEO_AUDIO_MP3; }
             else if (tag == 6u)      { codec = FM_VIDEO_AUDIO_ALAW; }
@@ -5221,24 +5395,42 @@ FM_Result Video_Seek(FM_Video *v, uint32_t frame_index)
 /* ------------------------------------------------------------------ */
 /* Embedded audio track (demux)                                        */
 /* ------------------------------------------------------------------ */
-/* 16-bit PCM that the container stores big-endian (MP4 "twos") is handed
- * out little-endian like every other PCM track. */
-static void video_pcm_native(const FM_VideoPriv *priv, uint8_t *buf,
-                             uint32_t n)
+/* Bytes one sample of an uncompressed track takes in the file: 1, 2, 3
+ * or 4 (integer), 4 (float).  0 = a width that is not played. */
+static uint32_t video_pcm_in_bytes(const FM_VideoPriv *priv)
 {
-    uint32_t i;
+    uint32_t bits = priv->audio_bits;
 
-    if (!priv->audio_pcm_be || priv->audio_codec != FM_VIDEO_AUDIO_PCM)
+    if (priv->audio_pcm_float)
     {
-        return;
+        return (bits == 32u) ? 4u : 0u;
     }
-    for (i = 0u; i + 1u < n; i += 2u)
-    {
-        uint8_t t = buf[i];
+    return (bits == 8u || bits == 16u || bits == 24u || bits == 32u)
+               ? bits / 8u : 0u;
+}
 
-        buf[i] = buf[i + 1u];
-        buf[i + 1u] = t;
+/* One 32-bit float sample (its bits in `u`) as 16-bit: full scale is
+ * +-1.0, anything beyond is clipped, NaN is silence. */
+static int32_t video_f32_to_s16(uint32_t u)
+{
+    float f;
+    float d;
+
+    memcpy(&f, &u, sizeof(f));
+    d = f * 32768.0f;
+    if (d >= 32767.0f)
+    {
+        return 32767;
     }
+    if (d <= -32768.0f)
+    {
+        return -32768;
+    }
+    if (d > -32768.0f && d < 32767.0f)
+    {
+        return (int32_t)(d + ((d >= 0.0f) ? 0.5f : -0.5f));
+    }
+    return 0;
 }
 
 static uint8_t adts_freq_index(uint32_t rate)
@@ -5357,6 +5549,10 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info)
     switch (priv->audio_codec)
     {
     case FM_VIDEO_AUDIO_PCM:
+        /* 8, 16, 24, 32 bits and 32-bit float; see video_pcm_read() */
+        info->decodable = (video_pcm_in_bytes(priv) != 0u) ? FM_TRUE
+                                                           : FM_FALSE;
+        break;
     case FM_VIDEO_AUDIO_ALAW:
     case FM_VIDEO_AUDIO_ULAW:
         info->decodable = FM_TRUE;
@@ -6035,6 +6231,168 @@ static FM_Result video_adpcm_read(FM_Video *v, FM_VideoPriv *priv,
     return FM_OK;
 }
 
+/*
+ * Uncompressed track -> interleaved 16-bit little-endian PCM.
+ *
+ * In the file a sample is 8 bits (unsigned; signed in QuickTime), 16, 24
+ * or 32 bits, or a 32-bit float, in either byte order.  Whatever it is,
+ * the caller gets 16-bit samples: wider ones lose their low bits, floats
+ * are scaled and clipped.
+ *
+ * The packet is read into the caller's buffer and converted in place, so
+ * one call delivers as many sample frames as `cap` holds of the *file's*
+ * format (for 24-bit input two thirds of the buffer are filled).  A
+ * packet with more than that is continued by the next call.  Packets of
+ * less than 4 KB that follow each other in the file are read together:
+ * QuickTime writes one sample frame a packet, which was one file read
+ * for every four bytes.
+ *
+ * `cap` below one sample frame: FM_ERR_TOO_LARGE, the packet is passed
+ * over.  I/O errors take nothing.
+ */
+#define VIDEO_PCM_GATHER 4096u
+
+static FM_Result video_pcm_read(FM_Video *v, FM_VideoPriv *priv,
+                                uint8_t *buf, size_t cap, size_t *size)
+{
+    uint32_t in_bytes = video_pcm_in_bytes(priv);
+    uint32_t ch = (priv->audio_channels != 0u) ? priv->audio_channels : 1u;
+    uint32_t frame_in = in_bytes * ch;
+    FM_Bool fresh = (priv->audio_part_left == 0u) ? FM_TRUE : FM_FALSE;
+    uint32_t first = v->audio_frame_index;
+    uint32_t packets = 0u;
+    uint64_t offset = priv->audio_part_off;
+    uint32_t fsize = priv->audio_part_left;
+    uint32_t max_in;
+    uint32_t take;
+    uint32_t samples;
+    uint32_t i;
+    FM_Result r;
+
+    if (fresh)
+    {
+        r = video_audio_locate(v, priv, &offset, &fsize);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        packets = 1u;
+    }
+    if (in_bytes == 0u)
+    {
+        /* a width that is not played (12, 20, 64 bits): say so for every
+         * packet, and let the track end */
+        v->audio_frame_index = first + packets;
+        priv->audio_part_left = 0u;
+        return FM_ERR_UNSUPPORTED;
+    }
+    max_in = (cap > 0x40000000u) ? 0x40000000u : (uint32_t)cap;
+    if (in_bytes == 1u)
+    {
+        max_in /= 2u;                    /* one byte in, two out */
+    }
+    max_in -= max_in % frame_in;
+    if (max_in == 0u)
+    {
+        v->audio_frame_index = first + packets;
+        priv->audio_part_left = 0u;
+        return FM_ERR_TOO_LARGE;
+    }
+    if (fresh)
+    {
+        while (fsize < VIDEO_PCM_GATHER && fsize < max_in)
+        {
+            uint64_t next_off = 0;
+            uint32_t next_size = 0;
+
+            v->audio_frame_index = first + packets;
+            if (video_audio_locate(v, priv, &next_off, &next_size) != FM_OK ||
+                next_off != offset + fsize || next_size > max_in - fsize)
+            {
+                break;
+            }
+            fsize += next_size;
+            packets++;
+        }
+        v->audio_frame_index = first;
+    }
+    take = (fsize > max_in) ? max_in : fsize;
+    take -= take % frame_in;
+    if (take == 0u)
+    {
+        /* a packet shorter than one sample frame */
+        v->audio_frame_index = first + packets;
+        priv->audio_part_left = 0u;
+        return FM_ERR_CORRUPTED;
+    }
+    r = video_read_at(&v->file, offset, buf, take);
+    if (r != FM_OK)
+    {
+        return r;                        /* nothing taken: retry */
+    }
+    v->audio_frame_index = first + packets;
+    if (fsize - take >= frame_in)
+    {
+        priv->audio_part_off = offset + take;
+        priv->audio_part_left = fsize - take;
+    }
+    else
+    {
+        priv->audio_part_left = 0u;
+    }
+
+    samples = take / in_bytes;
+    if (in_bytes == 1u)
+    {
+        /* the output is twice the input: from the end */
+        for (i = samples; i > 0u; )
+        {
+            int32_t s;
+
+            i--;
+            s = priv->audio_pcm_s8 ? (int32_t)(int8_t)buf[i]
+                                   : (int32_t)buf[i] - 128;
+            s *= 256;
+            buf[2u * i] = (uint8_t)((uint32_t)s & 0xFFu);
+            buf[2u * i + 1u] = (uint8_t)(((uint32_t)s >> 8) & 0xFFu);
+        }
+    }
+    else
+    {
+        /* the output is not longer than the input: from the start */
+        for (i = 0u; i < samples; i++)
+        {
+            const uint8_t *q = buf + (size_t)i * in_bytes;
+            uint8_t lo;
+            uint8_t hi;
+
+            if (priv->audio_pcm_float)
+            {
+                int32_t s = video_f32_to_s16(priv->audio_pcm_be
+                                                 ? video_be32(q)
+                                                 : video_rd32(q));
+
+                lo = (uint8_t)((uint32_t)s & 0xFFu);
+                hi = (uint8_t)(((uint32_t)s >> 8) & 0xFFu);
+            }
+            else if (priv->audio_pcm_be)
+            {
+                hi = q[0];
+                lo = q[1];
+            }
+            else
+            {
+                hi = q[in_bytes - 1u];
+                lo = q[in_bytes - 2u];
+            }
+            buf[2u * (size_t)i] = lo;
+            buf[2u * (size_t)i + 1u] = hi;
+        }
+    }
+    *size = (size_t)samples * 2u;
+    return FM_OK;
+}
+
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size)
 {
@@ -6074,94 +6432,9 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
         return video_vorbis_read(v, priv, buf, cap, size);
     }
 #endif
-    if (priv->audio_part_left != 0u &&
-        priv->audio_codec == FM_VIDEO_AUDIO_PCM)
+    if (priv->audio_codec == FM_VIDEO_AUDIO_PCM)
     {
-        /* Continue an oversized PCM chunk from where the previous call
-         * stopped.  Dropping that remainder (the old behaviour) cut a
-         * slice out of the waveform on every chunk larger than the
-         * caller's buffer — e.g. 44.1 kHz stereo muxed at 1 chunk/frame
-         * is ~11.7 KB against SimpleVideo's 8 KB buffer, so ~30% of the
-         * audio went missing: heard as continuous "chopped" sound. */
-        if (priv->audio_bits == 8u)
-        {
-            /* 8-bit unsigned PCM -> 16-bit signed: output is 2x input */
-            uint32_t frame_bytes = (uint32_t)priv->audio_channels; /* 8-bit frame */
-            uint32_t max_in = (uint32_t)(cap / 2u);
-            uint32_t take_in;
-
-            if (frame_bytes == 0u) frame_bytes = 1u;
-            if (max_in == 0u)
-            {
-                priv->audio_part_left = 0u;
-                return FM_ERR_TOO_LARGE;
-            }
-            take_in = (max_in < priv->audio_part_left) ? max_in : priv->audio_part_left;
-            take_in -= take_in % frame_bytes;
-            if (take_in == 0u)
-            {
-                priv->audio_part_left = 0u;
-                return FM_ERR_TOO_LARGE;
-            }
-            {
-                uint8_t *tmp = (uint8_t *)FM_Alloc(take_in);
-                uint32_t i;
-                if (tmp == NULL) return FM_ERR_NO_MEMORY;
-                r = video_read_at(&v->file, priv->audio_part_off, tmp, take_in);
-                if (r != FM_OK) { FM_Free(tmp); return r; }
-                /* convert in-place from end to avoid overlap */
-                for (i = take_in; i > 0u; )
-                {
-                    i--;
-                    int16_t s = (int16_t)(((int16_t)tmp[i] - 128) << 8);
-                    buf[i * 2u] = (uint8_t)(s & 0xFFu);
-                    buf[i * 2u + 1u] = (uint8_t)((s >> 8) & 0xFFu);
-                }
-                FM_Free(tmp);
-                priv->audio_part_off += take_in;
-                priv->audio_part_left -= take_in;
-                if (priv->audio_part_left < frame_bytes)
-                {
-                    priv->audio_part_left = 0u;
-                }
-                *size = take_in * 2u;
-                return FM_OK;
-            }
-        }
-        else
-        {
-            uint32_t align = (uint32_t)priv->audio_channels *
-                             ((uint32_t)priv->audio_bits / 8u);
-            uint32_t take;
-
-            if (align == 0u)
-            {
-                align = 1u;
-            }
-            take = (cap < priv->audio_part_left) ? (uint32_t)cap
-                                                 : priv->audio_part_left;
-            take -= take % align;
-            if (take == 0u)
-            {
-                /* Caller's buffer cannot hold even one sample frame. */
-                priv->audio_part_left = 0u;
-                return FM_ERR_TOO_LARGE;
-            }
-            r = video_read_at(&v->file, priv->audio_part_off, buf, take);
-            if (r != FM_OK)
-            {
-                return r;
-            }
-            video_pcm_native(priv, buf, take);
-            priv->audio_part_off += take;
-            priv->audio_part_left -= take;
-            if (priv->audio_part_left < align)
-            {
-                priv->audio_part_left = 0u;
-            }
-            *size = take;
-            return FM_OK;
-        }
+        return video_pcm_read(v, priv, buf, cap, size);
     }
     /* From the index, or past its end straight out of the container
      * (AVI movi list / MKV clusters / MP4 sample tables). */
@@ -6270,88 +6543,9 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
         FM_Free(tmp);
         *size = need;
     }
-    else if (priv->audio_codec == FM_VIDEO_AUDIO_PCM && priv->audio_bits == 8u)
-    {
-        /* 8-bit unsigned PCM -> 16-bit signed for I2S */
-        uint32_t frame_in = (uint32_t)priv->audio_channels; /* bytes per frame in */
-        size_t need = (size_t)fsize * 2u;
-        uint32_t take_in = fsize;
-
-        if (frame_in == 0u) frame_in = 1u;
-        if (need > cap)
-        {
-            uint32_t max_in = (uint32_t)(cap / 2u);
-            max_in -= max_in % frame_in;
-            if (max_in == 0u)
-            {
-                v->audio_frame_index++;
-                return FM_ERR_TOO_LARGE;
-            }
-            take_in = max_in;
-        }
-        {
-            uint8_t *tmp = (uint8_t *)FM_Alloc(take_in);
-            uint32_t i;
-            if (tmp == NULL) return FM_ERR_NO_MEMORY;
-            r = video_read_at(&v->file, offset, tmp, take_in);
-            if (r != FM_OK) { FM_Free(tmp); return r; }
-            for (i = 0u; i < take_in; i++)
-            {
-                int16_t s = (int16_t)(((int16_t)tmp[i] - 128) << 8);
-                buf[i * 2u] = (uint8_t)(s & 0xFFu);
-                buf[i * 2u + 1u] = (uint8_t)((s >> 8) & 0xFFu);
-            }
-            FM_Free(tmp);
-            *size = take_in * 2u;
-            if (take_in < fsize)
-            {
-                priv->audio_part_off = offset + take_in;
-                priv->audio_part_left = fsize - take_in;
-            }
-        }
-    }
     else
     {
-        uint32_t take = fsize;
-
-        if (cap < fsize)
-        {
-            /* Chunk bigger than the caller's buffer.  Returning
-             * TOO_LARGE without moving the cursor made the next refill
-             * retry the very same chunk, so one oversized chunk muted
-             * the rest of the file (and spammed the log).  Deliver as
-             * much as fits — truncated to a whole sample frame so the
-             * L/R phase is preserved — and remember the remainder so
-             * the next call continues the same chunk (nothing is
-             * dropped). */
-            uint32_t align = (uint32_t)priv->audio_channels *
-                             ((uint32_t)priv->audio_bits / 8u);
-
-            if (align == 0u)
-            {
-                align = 1u;
-            }
-            take = (uint32_t)(cap - (cap % align));
-            if (take == 0u)
-            {
-                v->audio_frame_index++;
-                return FM_ERR_TOO_LARGE;
-            }
-        }
-        r = video_read_at(&v->file, offset, buf, take);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        video_pcm_native(priv, buf, take);
-        *size = take;
-        if (take < fsize && (fsize - take) >=
-            ((uint32_t)priv->audio_channels *
-             ((uint32_t)priv->audio_bits / 8u)))
-        {
-            priv->audio_part_off = offset + take;
-            priv->audio_part_left = fsize - take;
-        }
+        return FM_ERR_UNSUPPORTED;
     }
     v->audio_frame_index++;
     return FM_OK;
