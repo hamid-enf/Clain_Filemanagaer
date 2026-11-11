@@ -1,0 +1,517 @@
+# Regression tests for the six findings, added to the library's own suite
+# (test/audit_v3_tests.h + one RUN_SUITE line in test/main.c) so they cannot
+# come back unnoticed.  Kept separate from the fixes so a reviewer can take
+# the code fixes without the tests, or the tests without the fixes.
+import io
+
+# ------------------------------------------------------------------ #
+# 1. test/audit_v3_tests.h -- the tests                              #
+# ------------------------------------------------------------------ #
+p = 'test/audit_v3_tests.h'
+s = io.open(p, 'r', encoding='utf-8', newline='').read()
+
+
+def crlf(t):
+    return t.replace('\n', '\r\n')
+
+
+BLOCK = r'''
+/* ================================================================ */
+/* External audit v3: files, storage, filesystems                     */
+/*                                                                    */
+/* One test per finding of AUDIT_FILE_V3.md.  FILE3-01, FILE3-05 and   */
+/* FILE3-06 returned FM_OK with the wrong result, so these compare     */
+/* bytes; FILE3-02/03/04 compare a code or a count.  Each of them      */
+/* fails on the library before its fix.                               */
+/* ================================================================ */
+
+/* The three backends a host build has (0 FMFS, 1 LittleFS, 2 POSIX).
+ * audit_v2_tests.h provides av2_mount / av2_unmount / av2_path and
+ * av2_each_backend, which this reuses. */
+#if FM_USE_TEXT
+/* FILE3-06: a line edit must give back every line it did not change,
+ * including its ending.  `edit` is one of the three helpers with its
+ * arguments already bound. */
+typedef struct
+{
+    const char *path;
+    FM_Result (*fn)(void);
+} Av3Edit;
+
+static FM_Result av3_edit_keeps_bytes(const Av3Edit *e, const char *before,
+                                      size_t before_len, const char *want,
+                                      size_t want_len)
+{
+    char back[128];
+    size_t rd = 0;
+    FM_Result r;
+
+    (void)File_Delete(e->path);
+    r = File_WriteAll(e->path, before, before_len);
+    if (r == FM_OK)
+    {
+        r = e->fn();
+    }
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    memset(back, 0, sizeof(back));
+    r = File_ReadAll(e->path, back, sizeof(back) - 1u, &rd);
+    if (r == FM_OK && (rd != want_len || memcmp(back, want, want_len) != 0))
+    {
+        size_t i;
+
+        printf("[%u bytes:", (unsigned)rd);
+        for (i = 0; i < rd && i < 20u; i++)
+        {
+            if (back[i] == '\r') printf(" \\r");
+            else if (back[i] == '\n') printf(" \\n");
+            else printf(" %c", back[i]);
+        }
+        printf(", want %u] ", (unsigned)want_len);
+        r = FM_ERR_CRC;
+    }
+    (void)File_Delete(e->path);
+    return r;
+}
+
+/* the three helpers with their arguments bound to one path */
+static Av3Edit g_av3_edit;
+
+static FM_Result av3_ed_replace(void)
+{
+    return Text_Replace(g_av3_edit.path, "b", "B");
+}
+
+static FM_Result av3_ed_delete(void)
+{
+    return Text_DeleteLine(g_av3_edit.path, 1);
+}
+
+static FM_Result av3_ed_insert(void)
+{
+    return Text_InsertLine(g_av3_edit.path, 1, "N");
+}
+#endif /* FM_USE_TEXT */
+
+/* ---------------------------------------------------------------- */
+/* FILE3-01: File_Delete() on a directory, Directory_Delete() on a   */
+/* file.  Both must be refused and must leave the entry in place.    */
+/* ---------------------------------------------------------------- */
+static FM_Result av3_delete_wrong_kind(int kind)
+{
+    const char *root = "";
+    char dir[64];
+    char file[64];
+    FM_Bool exists = FM_TRUE;
+    FM_Result r;
+
+    r = av2_mount(kind, &root);
+    av2_path(dir, sizeof(dir), root, "av3_dir");
+    av2_path(file, sizeof(file), root, "av3_file.txt");
+    if (r == FM_OK) r = Directory_Create(dir);
+    if (r == FM_OK) r = File_WriteAll(file, "abc", 3);
+    if (r == FM_OK)
+    {
+        r = File_Delete(dir);
+        if (r != FM_ERR_IS_DIRECTORY)
+        {
+            printf("[File_Delete(dir) -> %s] ", FM_ResultString(r));
+            r = FM_ERR_INTERNAL;
+        }
+        else
+        {
+            r = FM_OK;              /* the expected refusal is not a failure */
+        }
+    }
+    if (r == FM_OK)
+    {
+        (void)Directory_Exists(dir, &exists);
+        if (!exists)
+        {
+            printf("[the directory is gone] ");
+            r = FM_ERR_CRC;
+        }
+    }
+    if (r == FM_OK)
+    {
+        r = Directory_Delete(file);
+        if (r != FM_ERR_NOT_DIRECTORY)
+        {
+            printf("[Directory_Delete(file) -> %s] ", FM_ResultString(r));
+            r = FM_ERR_INTERNAL;
+        }
+        else
+        {
+            r = FM_OK;
+        }
+    }
+    if (r == FM_OK)
+    {
+        exists = FM_FALSE;
+        (void)File_Exists(file, &exists);
+        if (!exists)
+        {
+            printf("[the file is gone] ");
+            r = FM_ERR_CRC;
+        }
+    }
+    (void)File_Delete(file);
+    (void)Directory_Delete(dir);
+    av2_unmount(kind);
+    return r;
+}
+
+/* ---------------------------------------------------------------- */
+/* FILE3-02: File_Move() of a file onto an existing directory says   */
+/* "is a directory" on every backend, and moves nothing.             */
+/* ---------------------------------------------------------------- */
+static FM_Result av3_move_onto_dir(int kind)
+{
+    const char *root = "";
+    char dir[64];
+    char file[64];
+    FM_Bool exists = FM_FALSE;
+    FM_Result r;
+
+    r = av2_mount(kind, &root);
+    av2_path(dir, sizeof(dir), root, "av3_mdir");
+    av2_path(file, sizeof(file), root, "av3_mfile.txt");
+    if (r == FM_OK) r = Directory_Create(dir);
+    if (r == FM_OK) r = File_WriteAll(file, "abc", 3);
+    if (r == FM_OK)
+    {
+        FM_Result m = File_Move(file, dir, NULL, NULL);
+
+        if (m != FM_ERR_IS_DIRECTORY)
+        {
+            printf("[File_Move(file, dir) -> %s] ", FM_ResultString(m));
+            r = FM_ERR_INTERNAL;
+        }
+        else
+        {
+            r = FM_OK;
+        }
+    }
+    if (r == FM_OK)
+    {
+        (void)File_Exists(file, &exists);
+        if (!exists)
+        {
+            printf("[the source is gone] ");
+            r = FM_ERR_CRC;
+        }
+    }
+    if (r == FM_OK)
+    {
+        (void)Directory_Exists(dir, &exists);
+        if (!exists)
+        {
+            printf("[the destination is gone] ");
+            r = FM_ERR_CRC;
+        }
+    }
+    (void)File_Delete(file);
+    (void)Directory_Delete(dir);
+    av2_unmount(kind);
+    return r;
+}
+
+/* ---------------------------------------------------------------- */
+/* FILE3-04: one long line must not stop the whole call.             */
+/* ---------------------------------------------------------------- */
+static FM_Result av3_long_line_count(int kind)
+{
+    const char *root = "";
+    char path[64];
+    char line[401];
+    char text[520];
+    size_t lines = 0;
+    size_t found = 0;
+    FM_Result r;
+
+    r = av2_mount(kind, &root);
+    av2_path(path, sizeof(path), root, "av3_long.txt");
+    memset(line, 'a', sizeof(line) - 1u);
+    line[sizeof(line) - 1u] = '\0';
+    (void)snprintf(text, sizeof(text), "%s\nsecond\nthird\n", line);
+    if (r == FM_OK) r = File_WriteAll(path, text, strlen(text));
+    if (r == FM_OK)
+    {
+        r = Text_CountLines(path, &lines);
+        if (r == FM_OK && lines != 3u)
+        {
+            printf("[%u lines, the file has 3] ", (unsigned)lines);
+            r = FM_ERR_CRC;
+        }
+    }
+    if (r == FM_OK)
+    {
+        r = Text_Find(path, "third", &found);
+        if (r == FM_OK && found != 3u)
+        {
+            printf("[third found on line %u] ", (unsigned)found);
+            r = FM_ERR_CRC;
+        }
+    }
+    (void)File_Delete(path);
+    av2_unmount(kind);
+    return r;
+}
+
+/* ---------------------------------------------------------------- */
+/* FILE3-05: FS_Mount() of an adapter that was never initialised.    */
+/* ---------------------------------------------------------------- */
+static void av3_uninitialised_mount(void)
+{
+    static uint8_t mem[32 * 1024];
+    static FM_Storage st;
+    static FM_FS zero;
+    static FM_FS good;
+    FM_Result r;
+
+    TEST("FILE3-05: FS_Mount refuses an FM_FS that was never initialised");
+    memset(mem, 0, sizeof(mem));
+    r = RamDisk_Init(&st, "a3z", mem, sizeof(mem), 512u);
+    if (r == FM_OK) r = Storage_Register(&st);
+    if (r == FM_OK) r = Storage_Mount("a3z");
+    if (r != FM_OK)
+    {
+        printf("[set-up: %s] ", FM_ResultString(r));
+        FAIL("could not prepare a storage");
+        return;
+    }
+    memset(&zero, 0, sizeof(zero));
+    r = FS_Mount("/a3z", &zero);
+    if (r != FM_ERR_INVALID_ARGUMENT)
+    {
+        /* Mounting it used to succeed and the next File_Open() then
+         * called a NULL function pointer. */
+        if (r == FM_OK)
+        {
+            (void)FS_Unmount("/a3z");
+        }
+        printf("[FS_Mount(all-zero FM_FS) -> %s] ", FM_ResultString(r));
+        FAIL("an FM_FS with no operations was mounted");
+        goto out;
+    }
+    /* and a real adapter still mounts on the same path */
+    r = FMFS_Init(&good);
+    if (r == FM_OK) r = FS_Mount("/a3z", &good);
+    if (r != FM_OK)
+    {
+        printf("[a real adapter no longer mounts: %s] ", FM_ResultString(r));
+        FAIL("the check is too strict");
+    }
+    else
+    {
+        (void)FS_Unmount("/a3z");
+        PASS();
+    }
+out:
+    (void)Storage_Unmount("a3z");
+    (void)Storage_Unregister("a3z");
+}
+
+/* ---------------------------------------------------------------- */
+/* FILE3-03: FM_Log_SetSink() replaced while another task logs must  */
+/* not mix the function with the other sink's context.               */
+/* ---------------------------------------------------------------- */
+#if FM_USE_THREADS && FM_HOST_BUILD
+#include <pthread.h>
+
+static int g_av3_log_stop;               /* atomic, not volatile */
+static unsigned long g_av3_log_mixed;   /* also the context of sink one */
+static unsigned long g_av3_log_count;
+
+/* Each sink owns its context.  Both sinks are legal for the *message*
+ * (one writer logs "1" and "2" alternately), so the only thing that may
+ * be wrong is the pairing: a sink called with the other sink's context
+ * is a message handed to the wrong owner.  Before the fix that happened
+ * on ~5 % of the messages. */
+static void av3_sink_one(void *ctx, const char *data, size_t len)
+{
+    (void)data;
+    (void)len;
+    if (ctx != (void *)&g_av3_log_mixed)
+    {
+        __atomic_fetch_add(&g_av3_log_mixed, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+static void av3_sink_two(void *ctx, const char *data, size_t len)
+{
+    (void)data;
+    (void)len;
+    if (ctx != (void *)&g_av3_log_count)
+    {
+        __atomic_fetch_add(&g_av3_log_mixed, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+/* The window that matters is between the reader taking the function and
+ * the reader taking the context, so the two threads are held on a
+ * barrier and the writer starts its swaps immediately.  4000 swaps take
+ * tens of milliseconds; a fixed number of rounds with a fixed seed keeps
+ * the test reproducible run to run. */
+static void *av3_log_writer(void *arg)
+{
+    (void)arg;
+    while (!__atomic_load_n(&g_av3_log_stop, __ATOMIC_ACQUIRE))
+    {
+        (void)FM_Log("1");
+        (void)FM_Log("2");
+        __atomic_fetch_add(&g_av3_log_count, 1u, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static void av3_log_sink_race(void)
+{
+    pthread_t th;
+    int i;
+
+    TEST("FILE3-03: swapping the log sink while another task logs");
+    __atomic_store_n(&g_av3_log_stop, 0, __ATOMIC_RELEASE);
+    g_av3_log_mixed = 0;
+    g_av3_log_count = 0;
+    FM_Log_SetSink(av3_sink_one, (void *)&g_av3_log_mixed);
+    if (pthread_create(&th, NULL, av3_log_writer, NULL) != 0)
+    {
+        FM_Log_SetSink(NULL, NULL);
+        FAIL("pthread_create");
+        return;
+    }
+    /* Keep swapping for a while, not for a fixed number of rounds: with
+     * 20 000 rounds the reader can finish its 320 messages first and the
+     * test passes by luck (measured: 1 run in 3).  The loop ends on the
+     * message count, so both threads are busy for the whole window. */
+    for (i = 0; i < 200000 &&
+                __atomic_load_n(&g_av3_log_count, __ATOMIC_RELAXED) < 20000u;
+         i++)
+    {
+        FM_Log_SetSink(av3_sink_two, (void *)&g_av3_log_count);
+        FM_Log_SetSink(av3_sink_one, (void *)&g_av3_log_mixed);
+    }
+    __atomic_store_n(&g_av3_log_stop, 1, __ATOMIC_RELEASE);
+    (void)pthread_join(th, NULL);
+    FM_Log_SetSink(NULL, NULL);
+    if (g_av3_log_mixed != 0)
+    {
+        printf("[%lu of %lu messages reached the wrong sink] ",
+               g_av3_log_mixed, g_av3_log_count);
+        FAIL("a message was delivered with a mismatched (sink, ctx) pair");
+        return;
+    }
+    PASS();
+}
+#endif /* FM_USE_THREADS && FM_HOST_BUILD */
+
+static void test_audit_v3_file(void)
+{
+    printf("\n[External audit v3: files, storage, filesystems]\n");
+    restore_posix_root();
+
+    av2_each_backend("FILE3-01: File_Delete on a directory", av3_delete_wrong_kind);
+    av2_each_backend("FILE3-02: File_Move onto a directory", av3_move_onto_dir);
+    av2_each_backend("FILE3-04: a long line does not stop the call",
+                     av3_long_line_count);
+    av3_uninitialised_mount();
+
+#if FM_USE_TEXT
+    {
+        static const char *const paths[3] = { "/fca/av3e.txt", "/fca/av3e.txt",
+                                              "/av3e.txt" };
+        FM_Result r = FM_OK;
+        int kind;
+
+        for (kind = 0; kind < 3; kind++)
+        {
+            const char *root = "";
+
+            if (!av2_kind_built(kind)) continue;
+            r = av2_mount(kind, &root);
+            if (r != FM_OK) break;
+            g_av3_edit.path = paths[kind];
+            g_av3_edit.fn = av3_ed_replace;
+
+            g_av3_edit.fn = av3_ed_replace;
+            TEST("FILE3-06: a replacement keeps the CRLF line endings");
+            {
+                static const char before[] = "a\r\nb\r\nc\r\n";
+                static const char want[] = "a\r\nB\r\nc\r\n";
+
+                r = av3_edit_keeps_bytes(&g_av3_edit, before, sizeof(before) - 1u, want,
+                                         sizeof(want) - 1u);
+            }
+            CHECK_RESULT(r, "see above");
+
+            g_av3_edit.fn = av3_ed_delete;
+            TEST("FILE3-06: a deleted line keeps the endings of the others");
+            {
+                static const char before[] = "a\r\nb\r\n";
+                static const char want[] = "b\r\n";
+
+                r = av3_edit_keeps_bytes(&g_av3_edit, before, sizeof(before) - 1u, want,
+                                         sizeof(want) - 1u);
+            }
+            CHECK_RESULT(r, "see above");
+
+            g_av3_edit.fn = av3_ed_insert;
+            TEST("FILE3-06: an inserted line takes the file's ending");
+            {
+                static const char before[] = "a\r\nb\r\n";
+                static const char want[] = "N\r\na\r\nb\r\n";
+
+                r = av3_edit_keeps_bytes(&g_av3_edit, before, sizeof(before) - 1u, want,
+                                         sizeof(want) - 1u);
+            }
+            CHECK_RESULT(r, "see above");
+
+            TEST("FILE3-06: a last line without a newline keeps having none");
+            {
+                static const char before[] = "a\nb";
+                static const char want[] = "a\nB";
+
+                g_av3_edit.fn = av3_ed_replace;
+                r = av3_edit_keeps_bytes(&g_av3_edit, before, sizeof(before) - 1u, want,
+                                         sizeof(want) - 1u);
+            }
+            CHECK_RESULT(r, "see above");
+
+            av2_unmount(kind);
+        }
+    }
+#endif /* FM_USE_TEXT */
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+    av3_log_sink_race();
+#endif
+}
+
+#endif /* AUDIT_V3_TESTS_H */
+'''
+
+MARKER = '#endif /* AUDIT_V3_TESTS_H */'
+BLOCK = BLOCK.lstrip('\n')
+new = crlf(BLOCK)
+
+if s.count(crlf(MARKER)) != 1:
+    raise SystemExit('f3_tests: end marker count %d' % s.count(crlf(MARKER)))
+s = s.replace(crlf(MARKER), new, 1)
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+print('f3_tests: patched %s' % p)
+
+# ------------------------------------------------------------------ #
+# 2. test/main.c -- run the suite                                    #
+# ------------------------------------------------------------------ #
+p = 'test/main.c'
+s = io.open(p, 'r', encoding='utf-8', newline='').read()
+old = crlf("    RUN_SUITE(test_audit_v2_file);\n")
+new = crlf("    RUN_SUITE(test_audit_v2_file);\n    RUN_SUITE(test_audit_v3_file);\n")
+if s.count(old) != 1:
+    raise SystemExit('f3_tests: RUN_SUITE count %d' % s.count(old))
+s = s.replace(old, new, 1)
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+print('f3_tests: patched %s' % p)

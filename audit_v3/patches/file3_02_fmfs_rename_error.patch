@@ -1,0 +1,14 @@
+--- a/src/fm_fmfs.c
++++ b/src/fm_fmfs.c
+@@ -2770,7 +2770,10 @@
+             }
+             if (ctx->entries[old_index].type != FM_ITEM_DIR)
+             {
+-                return FM_ERR_NOT_DIRECTORY;
++                /* the DESTINATION is a directory and the source is not:
++                 * that is "is a directory", not "not a directory" (the
++                 * two other backends say FM_ERR_IS_DIRECTORY here) */
++                return FM_ERR_IS_DIRECTORY;
+             }
+         }
+         else

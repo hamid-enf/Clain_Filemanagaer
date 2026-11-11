@@ -1,0 +1,243 @@
+--- a/src/fm_text.c
++++ b/src/fm_text.c
+@@ -132,6 +132,103 @@
+     return r;
+ }
+ 
++/* Read one line without interpreting its ending.  *crlf says the line
++ * ended with CRLF (that CR is not in the buffer), *eol says it ended with
++ * a newline at all -- the last line of a file need not.  Used by the
++ * three rewrite helpers, which must give back the lines they did not
++ * change: Text_ReadLine's documented CR removal turned every CRLF file
++ * into an LF file on any edit. */
++static FM_Result text_read_raw(FM_File *f, char *buf, size_t size,
++                               size_t *len_out, FM_Bool *crlf_out,
++                               FM_Bool *eol_out)
++{
++    size_t n = 0;
++    FM_Bool any = FM_FALSE;
++    FM_Bool crlf = FM_FALSE;
++    FM_Bool eol = FM_FALSE;
++    FM_Bool overflow = FM_FALSE;
++
++    for (;;)
++    {
++        uint32_t rd = 0;
++        char c = 0;
++        FM_Result r = File_Read(f, &c, 1, &rd);
++
++        if (r == FM_ERR_EOF || (r == FM_OK && rd == 0))
++        {
++            if (!any)
++            {
++                return FM_ERR_EOF;
++            }
++            break;
++        }
++        if (r != FM_OK)
++        {
++            return r;
++        }
++        any = FM_TRUE;
++        if (c == '\n')
++        {
++            eol = FM_TRUE;
++            break;
++        }
++        if (n + 1 < size)
++        {
++            buf[n++] = c;
++        }
++        else
++        {
++            overflow = FM_TRUE;
++        }
++    }
++    /* the CR of a CRLF belongs to the ending, not to the text -- but only
++     * when there really is a '\n' after it: a CR that ends the file is
++     * data (Text_ReadLine has the same rule) */
++    if (eol && n > 0 && buf[n - 1] == '\r')
++    {
++        n--;
++        crlf = FM_TRUE;
++    }
++    buf[n] = '\0';
++    if (len_out != NULL)
++    {
++        *len_out = n;
++    }
++    if (crlf_out != NULL)
++    {
++        *crlf_out = crlf;
++    }
++    if (eol_out != NULL)
++    {
++        *eol_out = eol;
++    }
++    return overflow ? FM_ERR_TOO_LARGE : FM_OK;
++}
++
++/* The matching writer: the text as it came out of text_read_raw(), then
++ * the same ending (nothing at all for the last line of a file that had
++ * none). */
++static FM_Result text_write_raw(FM_File *f, const char *buf, size_t len,
++                                FM_Bool crlf, FM_Bool eol)
++{
++    uint32_t wr = 0;
++    FM_Result r;
++
++    if (len > 0)
++    {
++        r = File_Write(f, buf, (uint32_t)len, &wr);
++        if (r != FM_OK)
++        {
++            return r;
++        }
++    }
++    if (!eol)
++    {
++        return FM_OK;
++    }
++    return File_Write(f, crlf ? "\r\n" : "\n", crlf ? 2u : 1u, &wr);
++}
++
+ /* ------------------------------------------------------------------ */
+ /* Whole-file operations                                               */
+ /* ------------------------------------------------------------------ */
+@@ -185,14 +282,21 @@
+     }
+     for (;;)
+     {
+-        char line[FM_NAME_MAX * 2];
++        /* Lines are counted, not kept, so the buffer only has to hold a
++         * line far enough to notice where it ends -- and Text_ReadLine()
++         * consumes a line that does not fit anyway (it returns
++         * FM_ERR_TOO_LARGE with the part that fits).  It used to be
++         * FM_NAME_MAX * 2 = 128 bytes and the whole call failed as soon
++         * as ONE line was longer than 127 characters: a log file, a CSV
++         * row or a JSON line made the count 0. */
++        char line[FM_INTERNAL_BUFFER_SIZE];
+ 
+         r = Text_ReadLine(f, line, sizeof(line), NULL);
+         if (r == FM_ERR_EOF)
+         {
+             break;
+         }
+-        if (r != FM_OK)
++        if (r != FM_OK && r != FM_ERR_TOO_LARGE)
+         {
+             (void)File_Close(f);
+             return r;
+@@ -228,12 +332,16 @@
+         {
+             break;
+         }
+-        if (r != FM_OK)
++        if (r != FM_OK && r != FM_ERR_TOO_LARGE)
+         {
+             (void)File_Close(f);
+             return r;
+         }
+         n++;
++        /* FM_ERR_TOO_LARGE means the line was longer than the buffer:
++         * the last (FM_INTERNAL_BUFFER_SIZE - 1) bytes of it were not
++         * examined.  The line is still searched and the count still moves
++         * on, instead of the whole search stopping at that line. */
+         if (strstr(line, needle) != NULL)
+         {
+             (void)File_Close(f);
+@@ -289,8 +397,11 @@
+     {
+         size_t line_len = 0;
+         size_t pos = 0;
++        FM_Bool line_crlf = FM_FALSE;
++        FM_Bool line_eol = FM_FALSE;
+ 
+-        r = Text_ReadLine(src, line, sizeof(line), &line_len);
++        r = text_read_raw(src, line, sizeof(line), &line_len, &line_crlf,
++                          &line_eol);
+         if (r == FM_ERR_EOF)
+         {
+             break;
+@@ -326,7 +437,7 @@
+             }
+         }
+ 
+-        r = Text_WriteLine(dst, line);
++        r = text_write_raw(dst, line, line_len, line_crlf, line_eol);
+         if (r != FM_OK)
+         {
+             goto fail;
+@@ -377,6 +488,7 @@
+     FM_File *src = NULL;
+     FM_File *dst = NULL;
+     size_t n = 0;
++    FM_Bool last_crlf = FM_FALSE;
+     FM_Result r;
+ 
+     if (path == NULL || line == NULL || at_line == 0)
+@@ -404,8 +516,11 @@
+     for (;;)
+     {
+         size_t line_len = 0;
++        FM_Bool line_crlf = FM_FALSE;
++        FM_Bool line_eol = FM_FALSE;
+ 
+-        r = Text_ReadLine(src, buf, sizeof(buf), &line_len);
++        r = text_read_raw(src, buf, sizeof(buf), &line_len, &line_crlf,
++                          &line_eol);
+         if (r == FM_ERR_EOF)
+         {
+             break;
+@@ -417,13 +532,16 @@
+         n++;
+         if (n == at_line)
+         {
+-            r = Text_WriteLine(dst, line);
++            /* the new line takes the ending of the line it goes in front
++             * of, so a CRLF file stays a CRLF file */
++            r = text_write_raw(dst, line, strlen(line), line_crlf, FM_TRUE);
+             if (r != FM_OK)
+             {
+                 goto fail;
+             }
+         }
+-        r = Text_WriteLine(dst, buf);
++        last_crlf = line_crlf;
++        r = text_write_raw(dst, buf, line_len, line_crlf, line_eol);
+         if (r != FM_OK)
+         {
+             goto fail;
+@@ -431,8 +549,8 @@
+     }
+     if (n < at_line)
+     {
+-        /* append at end */
+-        r = Text_WriteLine(dst, line);
++        /* append at end; an empty file has no style to follow, so LF */
++        r = text_write_raw(dst, line, strlen(line), last_crlf, FM_TRUE);
+         if (r != FM_OK)
+         {
+             goto fail;
+@@ -507,8 +625,11 @@
+     for (;;)
+     {
+         size_t line_len = 0;
++        FM_Bool line_crlf = FM_FALSE;
++        FM_Bool line_eol = FM_FALSE;
+ 
+-        r = Text_ReadLine(src, buf, sizeof(buf), &line_len);
++        r = text_read_raw(src, buf, sizeof(buf), &line_len, &line_crlf,
++                          &line_eol);
+         if (r == FM_ERR_EOF)
+         {
+             break;
+@@ -522,7 +643,7 @@
+         {
+             continue; /* skip */
+         }
+-        r = Text_WriteLine(dst, buf);
++        r = text_write_raw(dst, buf, line_len, line_crlf, line_eol);
+         if (r != FM_OK)
+         {
+             goto fail;

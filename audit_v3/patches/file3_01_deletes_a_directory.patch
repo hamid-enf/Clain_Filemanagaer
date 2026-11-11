@@ -1,0 +1,90 @@
+--- a/backends/fm_littlefs.c
++++ b/backends/fm_littlefs.c
+@@ -783,6 +783,24 @@
+         return FM_ERR_INVALID_ARGUMENT;
+     }
+     lfs_path(path, lpath, sizeof(lpath));
++    /* lfs_remove() removes an empty directory as happily as a file, so
++     * "delete file" used to delete a directory -- silently, and with
++     * FM_OK.  The adapter contract is files only (fm_filesystem.h:
++     * "delete_file: files only"); a directory is refused here, and the
++     * directory API (lfs_fs_rmdir) does the rest. */
++    {
++        struct lfs_info info;
++        int stat_err = lfs_stat(&ctx->lfs, lpath, &info);
++
++        if (stat_err != LFS_ERR_OK)
++        {
++            return lfs_map_err(stat_err);
++        }
++        if (info.type == LFS_TYPE_DIR)
++        {
++            return FM_ERR_IS_DIRECTORY;
++        }
++    }
+     return lfs_map_err(lfs_remove(&ctx->lfs, lpath));
+ }
+ 
+@@ -837,8 +855,27 @@
+ 
+ static FM_Result lfs_fs_rmdir(FM_FS *fs, const char *path)
+ {
+-    /* littlefs lfs_remove removes empty dirs and files alike. */
+-    return lfs_fs_delete(fs, path);
++    LittleFS_Ctx *ctx = lfs_ctx(fs);
++    char lpath[FM_PATH_MAX];
++    struct lfs_info info;
++    int err;
++
++    if (path == NULL)
++    {
++        return FM_ERR_INVALID_ARGUMENT;
++    }
++    lfs_path(path, lpath, sizeof(lpath));
++    /* the mirror image of the check above: a file is not a directory */
++    err = lfs_stat(&ctx->lfs, lpath, &info);
++    if (err != LFS_ERR_OK)
++    {
++        return lfs_map_err(err);
++    }
++    if (info.type != LFS_TYPE_DIR)
++    {
++        return FM_ERR_NOT_DIRECTORY;
++    }
++    return lfs_map_err(lfs_remove(&ctx->lfs, lpath));
+ }
+ 
+ /* ------------------------------------------------------------------ */
+--- a/backends/fm_posix_fs.c
++++ b/backends/fm_posix_fs.c
+@@ -257,7 +257,15 @@
+ 
+ static FM_Result posix_delete(FM_FS *fs, const char *path)
+ {
++    struct stat st;
++
+     path = strip_slash(path);
++    /* remove(2) unlinks a file and removes an empty directory alike, so
++     * File_Delete("/dir") used to succeed and take the directory with
++     * it.  The adapter contract is files only; a directory is refused
++     * here and posix_rmdir() handles it. */
++    if (stat(path, &st) < 0) { return sys2fm(errno); }
++    if (S_ISDIR(st.st_mode)) { return FM_ERR_IS_DIRECTORY; }
+     if (remove(path) < 0) { return sys2fm(errno); }
+     (void)fs;
+     return FM_OK;
+@@ -317,7 +325,14 @@
+ 
+ static FM_Result posix_rmdir(FM_FS *fs, const char *path)
+ {
++    struct stat st;
++
+     path = strip_slash(path);
++    /* rmdir(2) already refuses a file with ENOTDIR, but the error is
++     * mapped after the fact; check first so the answer does not depend
++     * on the platform's errno mapping. */
++    if (stat(path, &st) < 0) { return sys2fm(errno); }
++    if (!S_ISDIR(st.st_mode)) { return FM_ERR_NOT_DIRECTORY; }
+     if (rmdir(path) < 0) { return sys2fm(errno); }
+     (void)fs;
+     return FM_OK;

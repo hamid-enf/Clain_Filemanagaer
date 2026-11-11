@@ -1,0 +1,36 @@
+--- a/src/fm_filesystem.c
++++ b/src/fm_filesystem.c
+@@ -451,9 +451,31 @@
+     fs->storage = storage;
+     if (fs->ops.mount != NULL)
+     {
+-        return fs->ops.mount(fs, storage);
++        FM_Result r = fs->ops.mount(fs, storage);
++
++        if (r != FM_OK)
++        {
++            return r;               /* the adapter's own diagnosis wins */
++        }
++    }
++    else if (storage == NULL)
++    {
++        return FM_ERR_NOT_READY;
++    }
++
++    /* A table that got this far without a file-open, file-read and
++     * file-write hook is an FM_FS that was never handed to its adapter's
++     * *_Init() (all zeros behind no mount hook) or one that is only half
++     * filled in.  Publishing it makes the first File_Open() call a NULL
++     * function pointer -- a hard fault.  FS_Register() has always refused
++     * exactly these three ops; a mount does not go through the registry,
++     * so it checks them here. */
++    if (fs->ops.file_open == NULL || fs->ops.file_read == NULL ||
++        fs->ops.file_write == NULL)
++    {
++        return FM_ERR_INVALID_ARGUMENT;
+     }
+-    return (storage == NULL) ? FM_ERR_NOT_READY : FM_OK;
++    return FM_OK;
+ }
+ 
+ FM_Result FS_Mount(const char *mount_path, FM_FS *fs)
