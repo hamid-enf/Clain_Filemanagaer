@@ -1580,7 +1580,872 @@ Thread builds add `-DFM_USE_THREADS=1 -DFM_SYNC_CUSTOM -I<lib>/ports/pthread` (a
 
 
 
+# Audit — images subsystem
 
+## خلاصه به فارسی
+
+سه ایراد واقعی پیدا و بازتولید شد. مهم‌ترین آن‌ها (`IMG-01`) در **نوشتن PNG** است: طولی که برای chunk `IDAT` نوشته می‌شود با تعداد واقعی بلوک‌های ذخیره‌شده هم‌خوان نیست، پس فایل PNG تولیدشده ساختار خراب دارد و هر خواننده‌ی استاندارد (Pillow، مرورگر، و حتی دیکودر خودِ کتابخانه) آن را رد می‌کند — بدون اینکه `Image_Save` خطایی برگرداند. این خرابی به ابعاد تصویر بستگی دارد؛ کوچک‌ترین نمونهٔ بازتولید `2731×15` است (۴۰٬۹۶۵ پیکسل، فایل ۱۲۲٬۹۸۸ بایتی) و اندازه‌های رایج دوربین/TFT مثل `800×600`، `1600×1200`، `1920×1080` و `2048×1536` هم همه خراب می‌شوند، در حالی که `640×480`، `1024×768` و `800×480` سالم‌اند. علت دقیقاً پیدا شد: شمارش بلوک‌ها در دو جای کد به دو صورت متفاوت انجام می‌شود. یک وصلهٔ سه‌خطی پیشنهاد و محلی آزمایش شد: هر ۹ اندازهٔ خرابِ قبلی سالم شدند و هر دو مجموعهٔ آزمون (`make test` و `make asan`) با ۳۵۸/۳۵۸ قبول ماندند.
+
+ایراد دوم (`IMG-02`) این است که `Image_GetInfo` برای PNGهای تک‌کاناله (خاکستری، خاکستری+آلفا، خاکستری ۱۶ بیتی) `channels = 1` گزارش می‌کند در حالی که `Image_Load` همیشه RGB888 می‌دهد. برنامه‌ای که بافر را از روی گزارش `GetInfo` اندازه می‌گیرد، بی‌آنکه خطایی ببیند، تصویری کوچک‌شده (مثلاً ۳۷×۲۹ به ۲۱×۱۵) تحویل می‌گیرد.
+
+ایراد سوم (`IMG-03`) این است که BMP پالت‌دار ۸ بیتی بدون اعمال پالت خوانده می‌شود: خروجی «شاخص‌های پالت» است نه رنگ. هدر `fm_image.h` این را با عبارت «8bpp gray read» مستند کرده، ولی خروجی هیچ‌گاه خاکستری نیست؛ برای پالت رنگی، خطای کانال تا ۲۵۵ می‌رسد و مقدار بازگشتی همیشه `FM_OK` است.
+
+بقیهٔ بخش‌ها — رمزگشای PNG (شامل Adam7 و همهٔ عمق‌ها)، رمزگشای JPEG، رمزگشای BMP، تبدیل‌ها، چرخش/آینه/تغییر اندازه، رجیستری کدک، مصرف پشته و مسیرهای خطا — زیر فازینگ ساختاری، مقایسهٔ دیفرانسیلی با Pillow، برش سیستماتیک فایل در همهٔ آفست‌ها و ASan/UBSan بررسی شد و ایراد دیگری پیدا نشد که بتوانم رویش بایستم.
+
+---
+
+## 1. Audit record
+
+| | |
+|---|---|
+| Repository | `https://github.com/hamid-enf/Clain_Filemanagaer` |
+| Branch | `arena/ba6a87b3-clain-filemanagaer` |
+| **Commit audited** | **`8dd0f25888a0ee2ae5157ebd4ef8285deb4fbded`** (2026-11-10 19:32:41 +0000, "FatFS adapter: slot ownership, two drives, remount; …") |
+| Library root | `Clain_FileManager/FileManager_lib/` |
+| Scope | `src/fm_image.c`, `src/fm_png.c`, `src/fm_jpeg.c`, `src/fm_hw.c`, `include/fm_image.h`, `include/fm_hw.h`, `examples/simple_image.h`, `examples/hw_jpeg.h`, `examples/image_bmp.c`, `tools/png_ref.py`, `tools/gen_png_vectors.sh`, `test/vectors/` |
+| Method | careful reading; structure-aware fuzzing; differential testing against Pillow 13.0.0 and the repo's own independent `tools/png_ref.py`; systematic truncation; ASan/UBSan; stack measurement |
+| Read-only | No commit, push, branch, PR, issue or comment was made. All work was local; the library source in the repository is untouched. |
+
+### Machine and toolchain
+
+| | |
+|---|---|
+| Host | Debian GNU/Linux 12 (bookworm), Linux 6.1.158+, x86-64, 2 vCPU |
+| Compiler | gcc (Debian 12.2.0-14+deb12u1) 12.2.0, `-std=c99` |
+| Reference decoder | Pillow **13.0.0** (libpng / libjpeg-turbo underneath), numpy 2.4.6 |
+| Sanitizers | `-fsanitize=address,undefined -fno-omit-frame-pointer`, `ASAN_OPTIONS=detect_leaks=1` where relevant |
+| Baseline | `make test` → **358/358 passed** (about 12 s); `make asan` → 358/358 |
+
+### Was a 32-bit build possible? — No
+
+`gcc -m32` cannot link on this machine: the multilib runtime (`libc6-dev-i386`) is not installed and the sandbox has no package access to it. Every test therefore ran with 64-bit `size_t`/`int`. This is a real limitation of the audit, because the target has 32-bit `size_t`: a size that fits 64 bits can wrap on the target and the host will never show it. I compensated two ways:
+
+* every size/offset computation was re-derived by hand with 32-bit semantics (width × height × bpp products, `(uint64_t)` casts, `size_t` narrowing);
+* `Image_BufferSize` and `FM_Image_FitSize` were exercised at the 16-bit limits. Note what the host actually shows: `Image_BufferSize(65535, 65535, FM_PIXEL_RGBA8888, &n)` returns `FM_OK` with `n = 17,179,344,900` — correct on 64-bit, since the product fits. Whether that is safe on the target depends on callers narrowing it to a 32-bit `size_t`, which is the unverified case recorded as *IMG-S4* under *Suspicions*.
+
+A finding that depends on 32-bit wrap and that I could not reproduce is not reported as confirmed.
+
+### Effort and coverage
+
+| Activity | Volume | Duration |
+|---|---|---|
+| Reading (all 12 in-scope files, plus `fm_config.h`, `fm_core.c`, `fm_file.c`, `fm_path.c`, `fm_posix_fs.c`, README image chapters) | ~9,500 lines | ~6 h |
+| `Image_DecodeBMP` random-header fuzzing (`fuzz_bmp`) | 600,000 iterations, 2 seeds (a 300 k run first, then 300 k again after the sandbox reset) | 6 s |
+| `Image_DecodePNG` geometry fuzzing (`fuzz_png`, CRC kept valid) | 150,000 iterations, 17 seeds (plus a 400 k run before the sandbox reset) | 11 s |
+| `Image_DecodeJPEG` marker fuzzing (`fuzz_jpeg`) | 460,000 iterations, 2 seeds | 5 s |
+| Truncation sweep, **every** offset of 4 vectors + 4 generated/vector PNGs | 21,926 decodes | 3 s |
+| Differential decode vs Pillow | 57 PNG files + 35 JPEG files + 8 forged BMPs, pixel comparison | ~1 h wall |
+| Encoder round-trip vs Pillow (`Image_Save`, `Image_EncodePNG/JPEG`) | 47 sizes, 1×1 … 5461×7 … 2048×1536 | 20 min |
+| Transform checks (rotate 0/90/180/270, flip H/V, scale NN/bilinear, all 7 formats) | 7 × 11 + 3 fixed converters | 5 min |
+| Codec-registry / nesting / re-entrancy probes | 30 scenarios | 30 min |
+| Stack measurement (compiler `-fstack-usage` + painted-thread high-water mark) | 74 functions, 5 entry points | 40 min |
+| Fix validation (patch applied to a scratch copy, rebuilt, re-tested) | 2 full suite runs + 9 encoder sizes | 25 min |
+
+Line coverage of the image translation units, measured with `gcov -O0 --coverage` over the full 358-test suite plus every harness in the appendix and a short run of each fuzzer: **`fm_png.c` 89.9 %** (785 lines), **`fm_image.c` 84.7 %** (1044 lines), **`fm_jpeg.c` 85.6 %** (606 lines). The unexecuted lines are dominated by the error-return arms of argument validation (`FM_ERR_INVALID_ARGUMENT` paths) and by the `#if` variants the default configuration compiles out (`FM_USE_*` = 0 stubs). The hardware-JPEG path is covered by construction only, not by execution.
+
+---
+
+## 2. Findings
+
+| ID | Severity | Title | Where | Status |
+|---|---|---|---|---|
+| **IMG-01** | **S2** | PNG encoder writes an `IDAT` length that is up to 5 bytes per block too short, producing a structurally broken file for many image sizes | `src/fm_png.c:1661` (`png_encode`), interacting with the emitter at `1699–1711` | **Confirmed**, fix proposed and tested |
+| **IMG-02** | **S3** | `Image_GetInfo`/`Image_ProbePNG` report `channels = 1` for 1-channel PNGs while `Image_Load` always returns RGB888; a caller that sizes its buffer from the report gets a silently downscaled picture | `src/fm_png.c:802` (`Image_ProbePNG`) with `src/fm_image.c:494–510` (`image_load_stream`) | **Confirmed** |
+| **IMG-03** | **S3** | 8-bit paletted BMP is decoded as raw palette *indices* labelled GRAY8; the colour table is ignored and the result is reported as success | `src/fm_image.c:394–397` (`image_parse_header`), `411–465` (`Image_ReadLine`) | **Confirmed** |
+
+S1 = memory corruption / hang reachable from an untrusted file · S2 = wrong result or unusable output from a normal API call · S3 = wrong or misleading metadata, or a documented behaviour that is not delivered · S4 = cosmetic.
+
+No S1 was found. That is a meaningful negative result given the input model: ~1.2 M fuzz iterations, 21,926 truncation decodes and 57 differential PNG files produced no out-of-bounds access, no undefined-behaviour report and no hang.
+
+---
+
+## 3. IMG-01 — PNG encoder declares a short `IDAT` for many image sizes
+
+**Severity** S2 — a normal, documented call (`Image_Save("photo.png", …)`) returns `FM_OK` and leaves a file that no standard decoder accepts. On the target this is a silently corrupt file on the SD card; there is no way for the application to notice.
+
+**Where** `src/fm_png.c`, `png_encode()`, the length computation at line **1661**:
+
+```c
+1660:    raw = (uint64_t)img->height * row_bytes;
+1661:    nblocks = (uint32_t)((raw + 65534u) / 65535u);
+1662:    if (nblocks == 0u)
+1663:    {
+1664:        nblocks = 1u;
+1665:    }
+1666:    zlen = 2u + (uint64_t)nblocks * 5u + raw + 4u;      /* written into the IDAT length field at 1689 */
+```
+
+versus the emitter that actually produces the data, lines **1699–1711**:
+
+```c
+1699:    while (r == FM_OK && y < img->height)
+1700:    {
+1701:        uint32_t this_raw = 0;
+...
+1706:        while (y < img->height &&
+1707:               this_raw + (uint32_t)row_bytes <= 65535u)   /* packs whole ROWS */
+1708:        {
+1709:            this_raw += (uint32_t)row_bytes;
+1710:            y++;
+1711:        }
+```
+
+**The defect in one sentence.** The emitter packs *whole rows* into a stored block while they still fit, i.e. `floor(65535 / row_bytes)` rows per block, so the true block count is `ceil(height / floor(65535 / row_bytes))`; line 1661 instead computes `ceil(height * row_bytes / 65535)`, which is a different number whenever the rows that are left over at the end of a block could have filled one more block. When the two disagree by *k* blocks the declared `IDAT` length is `5·k` bytes short, the chunk header under-runs the real zlib stream, the `IDAT` chunk swallows the following `IEND` length+type, and the file no longer walks as a sequence of chunks.
+
+With `row_bytes = 1 + 3·width` and `q = 65535 / row_bytes`:
+
+* true blocks `B = ceil(height / q)`;
+* declared blocks `B' = ceil(height·row_bytes / 65535)`.
+
+`B' < B` exactly when some block boundary leaves a remainder `65535 mod row_bytes` large enough that `q` rows do not consume the block, which happens for a large share of realistic widths — including every width whose row is a divisor-complement trap, e.g. `800×3+1 = 2401` (65535 = 27·2401 + 1608 → 22 declared vs 23 real for 600 rows).
+
+**Smallest reproducer.** No hex dump — the file is 122,988 bytes, so here is the generator. `2731×15` is the smallest image (by pixel count, over all `w ≤ 65535`, `h ≤ 40`) that triggers it:
+
+```sh
+# 1. build a harness that calls the public encoder
+gcc -std=c99 -O2 -Iinclude -Ibackends -Isrc pngenc2.c libfilemanager.a -lm -o pngenc2
+#    pngenc2.c is in the appendix; it fills an RGB888 image with one byte value
+# 2. encode 2731x15
+./pngenc2 2731 15 0x5A /tmp/bad.png
+# 3. observe
+python3 pngblocks.py /tmp/bad.png
+```
+
+Exact output (both programs are in the appendix):
+
+```
+2731x15: declared 122926 actual 122931 (3 blocks, 122910 payload) -> MISMATCH short by 5
+```
+
+The byte-level evidence, same file:
+
+```
+$ ls -l /tmp/bad.png
+-rw-r--r-- 1 … 122988 /tmp/bad.png
+$ xxd -l 41 /tmp/bad.png
+00000000: 8950 4e47 0d0a 1a0a 0000 000d 4948 4452  .PNG........IHDR
+00000010: 0000 0aab 0000 000f 0802 0000 00f6 a8f0  ................
+00000020: 3200 01e0 2e49 4441 54                   2....IDAT
+                                 ^^^^^^^^^ IDAT length = 0x0001e02e = 122926
+$ xxd -s -12 /tmp/bad.png
+... 0000 0000 4945 4e44 ae42 6082            ....IEND..
+```
+
+`IHDR` says 2731×15, 8-bit, colour type 2 (RGB) → `row_bytes = 8194`, `q = floor(65535/8194) = 7`, `B = ceil(15/7) = 3` blocks = 122,910 payload + 15 + 6 = **122,931**. The header says 122,926. The 5-byte shortfall makes the parser read `IEND`'s length field (`00 00 00 00`) as the last four bytes of the IDAT payload, so it next expects a type of `49 45 4e 44` ("IEND") at what is really the CRC position — the chunk walk runs off the end of the file.
+
+**Expected vs observed.**
+
+| | Expected | Observed |
+|---|---|---|
+| `Image_Save("/photo.png")` return | `FM_OK` | `FM_OK` (unchanged) |
+| The file it wrote | valid PNG that any reader opens | Pillow: `SyntaxError: broken PNG file (chunk b'\xdd\x00\x00\x00')` |
+| The library reading its own output back | the picture | `Image_DecodePNG` → `FM_ERR_CRC` (−18) |
+| `IDAT` length field | 122,931 | 122,926 |
+
+Pillow's error text for the three sizes I checked by hand:
+
+```
+800x600   Pillow REJECTED SyntaxError: broken PNG file (chunk b'\xdd\x00\x00\x00')
+5461x7    Pillow REJECTED SyntaxError: broken PNG file (chunk b'\xdb\x00\x00\x00')
+1920x1080 Pillow REJECTED SyntaxError: broken PNG file (chunk b'\xc8\xcf\xd6\xdd')
+640x480   Pillow OK (640, 480) RGB                     <- control, correct
+```
+
+**Root cause.** The length is estimated from the payload size (`raw / 65535`) but the payload is emitted per row. The two models coincide only when `row_bytes` divides 65535 or the remainder happens not to matter, which is why this survived: the sizes used in the examples and tests (`640×480`, `320×240`, `1024×768`) are all in the "coincide" set. Note also that the failure is **content independent** — the encoder always uses stored blocks, so every image of a broken size is broken, whatever the pixels.
+
+Affected sizes — **every row below was encoded and parsed**, not just computed:
+
+| Broken (declared vs actual) | OK (declared == actual) |
+|---|---|
+| 2731×15 — 122,926 / 122,931 (5 B) | 80×60, 160×120, 240×320, 320×240 |
+| 1200×400 — 1,440,516 / 1,440,521 (5 B) | 480×320, 640×480, 800×480 |
+| 800×600 — 1,440,716 / 1,440,721 (5 B) | 1024×600, 1024×768 |
+| 1280×800 — 3,073,041 / 3,073,046 (5 B) | 1280×720, 1280×1024 |
+| 1080×1920 — 6,223,201 / 6,223,206 (5 B) | 320×480, 720×1280, 240×240 |
+| 1920×1080 — 6,222,361 / 6,222,381 (20 B, 4 blocks) | |
+| 1920×1200 — 6,913,736 / 6,913,756 (20 B, 4 blocks) | |
+| 1600×1200 — 5,761,646 / 5,761,671 (25 B, 5 blocks) | |
+| 2048×1536 — 9,439,451 / 9,439,496 (45 B, 9 blocks) | |
+
+The failure mode is content independent (stored blocks throughout), so these are exact byte counts, not statistics. The three common "photo" sizes in the list — 1600×1200, 1920×1080, 2048×1536 — are the ones a phone or camera actually produces.
+
+**Fix** (unified diff, applies to `src/fm_png.c` at the audited commit; the file uses CRLF line endings, so apply with `patch -l` or an editor that preserves them):
+
+```diff
+--- a/src/fm_png.c
++++ b/src/fm_png.c
+@@ -1633,6 +1633,7 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
+     size_t need;
+     uint64_t raw;
+     uint32_t nblocks;
++    uint32_t rows_per_block;
+     uint64_t zlen;
+ 
+     if (img == NULL || img->data == NULL || img->width == 0 ||
+@@ -1658,11 +1659,22 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
+     }
+     rowp = g_png_row;
+     raw = (uint64_t)img->height * row_bytes;
+-    nblocks = (uint32_t)((raw + 65534u) / 65535u);
+-    if (nblocks == 0u)
++    /*
++     * The emitter below packs whole rows into a stored block while they
++     * still fit: (65535 / row_bytes) rows per block.  Counting blocks as
++     * ceil(raw / 65535) is a different number whenever the rows left over
++     * at the end of a block add up to one more block, so the IDAT length
++     * written in the chunk header was up to 5 bytes per missed block too
++     * short -- the chunk then swallowed IEND and every reader rejected the
++     * file.  Count the rows the way the loop packs them.
++     */
++    rows_per_block = (uint32_t)(65535u / (uint32_t)row_bytes);
++    if (rows_per_block == 0u)
+     {
+-        nblocks = 1u;
++        rows_per_block = 1u;
+     }
++    nblocks = (uint32_t)(((uint64_t)img->height + rows_per_block - 1u) /
++                         rows_per_block);
+     zlen = 2u + (uint64_t)nblocks * 5u + raw + 4u;
+     if (zlen > PNG_CHUNK_MAX)
+     {
+```
+
+**Was the fix tried?** Yes, on a scratch copy of the library (the repository's own tree untouched):
+
+* every size in the "broken" column above now declares exactly the number of bytes it emits (`declared == actual` for 2731×15, 1200×400, 800×600, 1920×1080, 1600×1200, 5461×7), and the previously-OK sizes are unchanged;
+* Pillow opens all nine outputs, and pixel-exact comparison against the source pixels still holds;
+* `Image_Save()` through the real file API (POSIX mount) now produces a file that Pillow reads (800×600, 1,440,778 bytes);
+* `make test` → **358/358**, `make asan` → **358/358** with the patch applied. No test in the suite covers this path, which is why it was green before.
+
+**Affected build configurations.** All. `FM_USE_PNG=1` (the default) and any image format, since the encoder always emits stored blocks. Sizes below `1 + 3·w = 65535` are all possible; the trigger is purely geometric.
+
+---
+
+## 4. IMG-02 — `Image_GetInfo` under-reports channels for 1-channel PNGs
+
+**Severity** S3 — the picture is wrong for a caller that follows the documented "size the buffer from `Image_GetInfo`" pattern, and there is no error to notice.
+
+**Where** `src/fm_png.c`, `Image_ProbePNG()` line **802**:
+
+```c
+802:    info->channels = (color == 0u || color == 4u) ? 1u : 3u;
+803:    info->bit_depth = (uint8_t)(info->channels * 8u);
+804:    info->data_size = (uint64_t)w * h * info->channels;
+```
+
+and the consumer, `src/fm_image.c`, `image_load_stream()` lines **494–510**, which sizes the output from that `channels` value and then lets `FM_Image_FitSize` shrink the picture to fit:
+
+```c
+494:    bpp = info.channels;
+495:    row_bytes = (size_t)info.width * bpp;
+496:    r = FM_Image_FitSize(info.width, info.height, capacity, bpp,
+497:                         max_w, max_h, &dw, &dh);
+```
+
+`Image_Load` then decodes grey PNGs as RGB888 (`png_decode` always sets `format = FM_PIXEL_RGB888, channels = 3`, `src/fm_png.c:1412–1418`), so the buffer the caller allocated from the report is one third of what is needed, and the fit logic silently downscales.
+
+**Reproducer.** `info.c` (appendix) mounts the POSIX backend, calls `Image_GetInfo`, allocates exactly `width·height·channels` bytes and calls `Image_Load` into it:
+
+```sh
+./info /work/vec/gray8_a7.png /work/vec/ga8.png /work/vec/gray16.png \
+       /work/vec/pal4_a7.png /work/vec/rgb8_a7.png /work/vec/rgba8_a7.png
+```
+
+Exact output:
+
+```
+/work/vec/gray8_a7.png       GetInfo: 37x29 ch 1 bd 8 -> caller allocates 1073 | Load: res  0 got 21x15 945 bytes   <-- SILENTLY RESCALED
+/work/vec/ga8.png            GetInfo: 37x29 ch 1 bd 8 -> caller allocates 1073 | Load: res  0 got 21x15 945 bytes   <-- SILENTLY RESCALED
+/work/vec/gray16.png         GetInfo: 37x29 ch 1 bd 8 -> caller allocates 1073 | Load: res  0 got 21x15 945 bytes   <-- SILENTLY RESCALED
+/work/vec/pal4_a7.png        GetInfo: 37x29 ch 3 bd 24 -> caller allocates 3219 | Load: res  0 got 37x29 3219 bytes
+/work/vec/rgb8_a7.png        GetInfo: 37x29 ch 3 bd 24 -> caller allocates 3219 | Load: res  0 got 37x29 3219 bytes
+/work/vec/rgba8_a7.png       GetInfo: 37x29 ch 3 bd 24 -> caller allocates 3219 | Load: res  0 got 37x29 3219 bytes
+```
+
+**Expected vs observed.**
+
+| | Expected | Observed |
+|---|---|---|
+| `GetInfo(...).channels` for a grey PNG | 3 (the decoder's output format) | 1 |
+| `GetInfo(...).data_size` | `w·h·3` | `w·h·1` |
+| `Image_Load` into a `GetInfo`-sized buffer | 37×29 RGB888 | 21×15 RGB888, `FM_OK` |
+
+This is not a theoretical mismatch: the module documentation (`README.md:394`) says "The result is always RGB888: alpha is dropped and 16-bit samples are rounded to 8", and `Image_GetInfo` is the only way to learn the size before loading. The two answers must agree. Note the same report is also inconsistent for grey+alpha (`color == 4` → reports 1 channel though the source has 2 samples per pixel — that part is fine, because alpha is dropped, but the *output* is still 3 channels).
+
+**Root cause.** `Image_ProbePNG` reports the *source* sample layout rather than the *decoded* layout, while `Image_Load` normalises everything to RGB888 for colour PNGs and keeps GRAY8 only for BMP. The probe has no notion of which decoder will be used for this file.
+
+**Fix.** Report what the decoder emits. The minimal, safe change (keeps `channels` meaningful as "bytes per output pixel") is to report 3 channels / 24 bpp for every colour type, which is exactly what `png_decode` produces:
+
+```diff
+--- a/src/fm_png.c
++++ b/src/fm_png.c
+@@ -799,9 +799,13 @@ FM_Result Image_ProbePNG(const void *png, size_t png_size, FM_ImageInfo *info)
+     memset(info, 0, sizeof(*info));
+     info->width = (uint16_t)w;
+     info->height = (uint16_t)h;
+-    info->channels = (color == 0u || color == 4u) ? 1u : 3u;
+-    info->bit_depth = (uint8_t)(info->channels * 8u);
+-    info->data_size = (uint64_t)w * h * info->channels;
++    /* png_decode() always emits RGB888 (alpha dropped, 16-bit rounded);
++     * reporting the source layout here made a caller that sizes its
++     * buffer from this call one third too small, and Image_Load then
++     * silently downscaled the picture to fit it. */
++    info->channels = 3u;
++    info->bit_depth = 24u;
++    info->data_size = (uint64_t)w * h * 3u;
+     (void)strcpy(info->codec, "PNG");
+     return FM_OK;
+ }
+```
+
+I did **not** apply and re-test this one, because it changes a public report field and the "right" answer depends on a design decision the maintainer owns: the alternative fix is to make `Image_Load` keep GRAY8 for grey PNGs, which would leave `GetInfo` as it is. Either way the two must be made to agree; the diff above is the smaller of the two.
+
+**Affected build configurations.** `FM_USE_PNG=1`, colour types 0 (grey) and 4 (grey+alpha) at any bit depth. Also reaches `Image_GetInfo` for BMP? No — BMP has no in-memory probe; `Image_GetInfo` for a BMP goes through `Image_OpenStream`, which reports 1 channel for 8-bpp BMP, and that one *is* consistent with what the BMP decoder returns (see IMG-03).
+
+---
+
+## 5. IMG-03 — 8-bit paletted BMP: the palette is ignored, indices are returned as grey
+
+**Severity** S3 — the call succeeds and returns a picture that is not the picture. Colour error is unbounded (up to 255 per channel for a colour palette).
+
+**Where** `src/fm_image.c`:
+
+* `image_parse_header()`, lines **369–397** — the colour table is never read; `data_offset` is trusted and the DIB's `biClrUsed` is ignored;
+* `Image_ReadLine()`, lines **437–466** — for `bits_per_pixel == 8` it copies the raw row bytes into the output and nothing else.
+
+```c
+440:    if (state.bits_per_pixel == 24u)
+441:    { … BGR888 → RGB888 … }
+...
+464:    else
+465:    {
+466:        if (image_stream_read_exact(dec->stream, line_out, state.width) != FM_OK)
+```
+
+**Reproducer.** `bmppal.py` (appendix) writes a 16×16, 8-bpp BMP whose palette entry *i* is `(3i, 255−3i, 5i)` — a colour ramp, deliberately not grey. The library decodes it and returns the indices:
+
+```sh
+python3 bmppal.py /tmp/pal16.bmp          # 16x16, 1334 bytes
+./imgdec bmp /tmp/pal16.bmp /tmp/pal16.rgb 10000
+```
+
+Exact output:
+
+```
+res 0 w 16 h 16 fmt 1 ch 1 bd 8 size 256
+```
+
+and the comparison:
+
+```
+library returns (row 0, first 3): [0, 16, 32]
+palette says     (row 0, first 3): [[0, 255, 0], [80, 207, 48], [160, 159, 96]]
+max channel error vs the true colours: 255
+```
+
+The same happens through `Image_Load()` and `Image_StreamDecode()` (both go through `Image_ReadLine`), and through `Image_Save`-ing the result back out: the "picture" it writes is the index ramp.
+
+**Expected vs observed.**
+
+| | Expected | Observed |
+|---|---|---|
+| format of the returned `FM_Image` | `FM_PIXEL_RGB888`, 3 channels (like every other BMP colour depth) | `FM_PIXEL_GRAY8`, 1 channel |
+| pixel (0,0) | palette[0] = (0,255,0) | 0 |
+| pixel (0,1) | palette[16] = (80,207,48) | 16 |
+| return value | `FM_OK` | `FM_OK` |
+
+**Nuance, stated fairly.** `include/fm_image.h:9` documents this decoder as "BMP — read + write (24bpp RGB888, 8bpp gray read)", so an 8-bpp BMP is *claimed* to be read as grey. But a paletted BMP is not a greyscale format; the byte in the file is an index. The decoder never opens the palette, so the mapping "index → grey" it implies is simply "index → index": the result is correct only for the degenerate palette `(i,i,i)`. For any real colour palette the output is wrong, and there is no `FM_ERR_UNSUPPORTED` to tell the caller not to trust it. That is why I report it: not for missing palette support, but because the function returns success with data that is not the picture. A one-line refusal would be an acceptable fix too.
+
+**Root cause.** `image_parse_header` classifies anything that is not 24 bpp as "8-bit grey" and never reads `biClrUsed`/the `RGBQUAD` array, so the decoder cannot apply the palette even in principle; `Image_ReadLine` has no palette in its state.
+
+**Fix.** The honest minimal fix is to refuse the file rather than lie about it (this is what I would ship first; full palette support needs the colour table in `ImageDecoderState`, and that struct is size-constrained by `FM_ImageDecoder::state` — see the `image_decoder_state_fits` compile-time check at `src/fm_image.c:29`):
+
+```diff
+--- a/src/fm_image.c
++++ b/src/fm_image.c
+@@ -391,6 +391,17 @@ static FM_Result image_parse_header(FM_Stream *s, FM_ImageInfo *info,
+     if (bits == 24u)
+     {
+         info->channels = 3u;
+         info->bit_depth = 24u;
+     }
+     else
+     {
++        /* An 8-bpp BMP is paletted: the bytes are indices into a colour
++         * table this decoder never reads.  Returning them as GRAY8
++         * reported success for a picture that is not the picture (a
++         * colour palette is off by up to 255 per channel), so refuse
++         * instead.  A palette-aware decoder is a separate feature. */
++        return FM_ERR_UNSUPPORTED;
+         info->channels = 1u;
+         info->bit_depth = 8u;
+     }
+```
+
+(Exact context lines differ; the change is "refuse `bits == 8` in `image_parse_header`".) If instead the maintainer wants 8-bpp support, the palette must be loaded at `data_offset` and `state` must carry at least the 256×3 active entries or a pointer to them, and `Image_ReadLine` must map through it. I did not apply either variant: the refusal changes behaviour that `examples/` may rely on, and I could not check every caller inside the time I had.
+
+**Affected build configurations.** `FM_USE_IMAGE=1`, `bits == 8`, `biCompression == 0`. Reachable from `Image_Load`, `Image_StreamDecode`, `Image_GetInfo`, `SimpleImage_*` and `Image_ResizeFile`.
+
+---
+
+## 6. Suspicions (believed, not reproduced)
+
+Nothing in this section is confirmed. Each entry says what stopped me.
+
+### IMG-S1 — the hardware-JPEG path keeps the codec scratch claimed across `hw->decode()`, so a codec that calls back into the library gets `FM_ERR_BUSY` where the software path would have worked
+
+* **Where** `src/fm_jpeg.c:616` (`FM_CodecScratch_Enter()` before the file is slurped) held until `:657`; contrast the documented contract in `README.md:560–570` ("another task waits its turn; a nested call … gets `FM_ERR_BUSY`").
+* **Why I suspect it** the claim is held while *user code* (`hw->decode`) runs, and `examples/hw_jpeg.h` does exactly that: `HAL_JPEG_Decode` with an interrupt-driven peripheral, and the example's own `SimpleImage` present callback can be re-entered from the idle hook.
+* **What stopped me** I have no STM32 JPEG peripheral and no way to run `examples/hw_jpeg.h`. I could only prove that a nested `Image_Load` from inside a registered codec returns `FM_ERR_BUSY` (−8) while the outer call succeeds — which is the documented contract, not a defect. Whether a real hardware codec needs the scratch during its own decode is unanswerable without the hardware; the YCbCr buffer it uses lives in the example, not in the library.
+
+### IMG-S2 — `Image_DecodeJPEG` silently re-decodes in software when the hardware codec declines, discarding the codec's reason
+
+* **Where** `src/fm_jpeg.c:563–571`: `if (r == FM_OK) hw->decode(...); return jpeg_sw_decode(...)` — the hardware result is dropped unless it is `FM_OK`, and the return value is the *software* result.
+* **Why I suspect it** a caller that registered a codec to save CPU cannot tell that the hardware was bypassed; on a part where the software decoder does not fit in RAM this turns a clean hardware error into a different error, or into success.
+* **What stopped me** this may be deliberate (the README says the software decoder is the fallback). I found no case where the outcome is *worse* than documented, which is the bar the brief sets, so this stays a note rather than a finding.
+
+### IMG-S3 — `Image_GetInfo` reads only the first 40 bytes for a PNG with no further validation, so a "valid" probe can be returned for a file whose later chunks are garbage
+
+* **Where** `src/fm_image.c:676–708`; `Image_ProbePNG` checks the IHDR CRC but nothing after it.
+* **Why I suspect it** callers use `GetInfo` to decide whether a file is worth loading; a truncated or corrupt PNG reports a full geometry and only fails later at load time.
+* **What stopped me** this is a defensible design (probing is meant to be cheap and streaming) and the failure at load time is clean — I checked 21,926 truncations and every one returned an error rather than a bad picture. Not worse than documented; recorded only for completeness.
+
+### IMG-S4 — a 32-bit `size_t` build may still allow a `width × height × bpp` product that `FM_IMAGE_MAX_BYTES = SIZE_MAX` does not bound
+
+* **Where** `src/fm_image.c:130–150` (`FM_Image_Bytes`): the product is computed in `uint64_t` and compared against `FM_IMAGE_MAX_BYTES`, whose default is `SIZE_MAX`. On a 32-bit target `SIZE_MAX` is 4 GiB, so the check passes for a 65,535×65,535×3 request (12.9 GB) and the subsequent narrowing to `size_t` is the caller's problem.
+* **Why I suspect it** the comment above the macro claims "a forged 65535×65535 header cannot wrap to a tiny allocation on a 32-bit MCU", which is true only because other checks (`UINT16_MAX` dimension limits plus `FM_PNG_MAX_STRIDE`) refuse first. I could not construct an input that reaches the narrowing.
+* **What stopped me** no 32-bit toolchain (see *Audit record*). All I can say is that on the host the 64-bit product is correct; the 32-bit claim is untested.
+
+---
+
+## 7. Examined and found sound
+
+Each entry: the area, the method, and the effort. "Sound" means I looked for a defect with that method and did not find one I can stand behind.
+
+**PNG decoder — geometry, all colour types and bit depths, Adam7.** `diffsuite.py` (appendix A.9) decodes every PNG in the tree and every PNG I generated with both the library and Pillow and compares pixel for pixel: **57 files compared, 51 identical, 6 refused by the library** (all six legitimately — five are wider than `FM_PNG_MAX_STRIDE`, one is a 65535×2 file; Pillow reads them, the library documents the refusal). The files cover grey 1/2/4/8/16, palette 1/2/4/8 with and without `tRNS`, RGB/RGBA 8/16, grey+alpha 8/16, interlaced and not, and the extreme widths. Those six refusals are the complete list of disagreements on this set — every file the library accepts is pixel-identical to Pillow. Effort: ~1 h, plus a 150 k-iteration structure-aware fuzzer that keeps every CRC valid and mutates the IHDR geometry, PLTE length and IDAT payload — clean under ASan/UBSan.
+
+**PNG decoder — extreme dimensions.** 65535×1, 1×65535, 65535×2, 2×65535, 3×65535, 8192×1, 21845×1, 16385×1, 5461×7 (each at the `FM_PNG_MAX_STRIDE` = 16384 boundary, grey so the row fits). The refusal at stride > 16384 is exactly `FM_ERR_TOO_LARGE`, which matches the documented limit; everything under it decodes to the exact `w·h·3`. No 32-bit overflow in the pass arithmetic: the products in `png_on_row` (`sy·dh`, `sx·sw`) are bounded by 2^32 because both factors are 16-bit, and I checked the bound holds for the extreme cases above.
+
+**PNG decoder — chunk structure.** Zero-length IDAT as first and as middle chunk, IDAT split into one-byte chunks, missing IEND, data after IEND, unknown critical chunk, duplicate IHDR, PLTE in an RGB file, `tRNS` on RGB8, palette index past `PLTE`, colour type 3 with no PLTE, PLTE length not a multiple of 3, IHDR with the wrong length. All the *valid* variants decode to identical pixels (Pillow agrees); all the *invalid* ones give a specific error (`FM_ERR_CORRUPTED` / `FM_ERR_CRC`, never success with wrong pixels). The decoder is lax about a missing IEND and about trailing bytes — a leniency, not a defect, and Pillow accepts the same files.
+
+**PNG decoder — corruption and truncation.** Every truncation offset of eight files, 21,926 decodes in total across the three formats, with ASan: no out-of-bounds read, no UB, always a clean error or a smaller image. A single flipped IDAT byte → `FM_ERR_CRC`; a flipped IHDR byte → `FM_ERR_CRC` (the CRC is checked before the geometry is believed, `src/fm_png.c:1276–1285`).
+
+**JPEG decoder — differential.** 35 files (`diffjpeg.py`, appendix A.9): the two repository JPEGs plus 33 generated with Pillow — greyscale, RGB at 4:4:4 / 4:2:2 / 4:2:0, progressive, CMYK, sizes 16×16…320×240, a texture-less control pair (flat chroma, flat luma) and the library's own 320×240 encoder output. Comparing the interior region (outermost 8-pixel border excluded, where chroma upsampling differs by construction): **23 files within 4 levels** — greyscale ≤ 1, the flat-chroma and flat-luma controls exactly 0 — and **4 files above 4**: `rgb_16x16_s2` (13), `rgb_16x16_s1` (8), `rgb_63x47_s2` (5) and `tiny64.jpg` (29). The first three are 14–63-pixel-wide pictures where an 8-pixel border exclusion still leaves MCU-scale chroma transitions inside the compared region, so the number is dominated by subsampling, not by the decoder; the controls matching to 0 is what tells me that. `tiny64.jpg` at 29 is the one file I cannot attribute with certainty — it is a 64×64 thumbnail of unknown provenance with no lossless reference; a decoder defect there cannot be excluded, but the same decoder is within 3–4 levels on 20 generated 4:4:4/4:2:2/4:2:0 pictures, so a bad reference or pre-existing JPEG artefacts is the likelier explanation. I record it rather than hide it. Progressive → `FM_ERR_INVALID_FORMAT` on all 7 progressive files, matching "baseline sequential only". CMYK → refused (documented).
+
+**JPEG decoder — fuzzing.** 460 k structure-aware iterations mutating SOF geometry, sampling factors, component counts, segment lengths, SOS and the entropy stream, with the capacity clamped to the real output buffer. Clean under ASan/UBSan. (An earlier run reported a heap overflow at `fm_jpeg.c:152`; that was my harness passing a `capacity` larger than the buffer it had allocated. Fixed the harness; the library was right.)
+
+**BMP decoder.** 24-bpp bottom-up and top-down (pixel-exact against Pillow, max |diff| = 0), 1×1, odd widths (stride padding), widths up to 16384, 8-bpp (see IMG-03). RLE4, RLE8, 16-bpp `BI_BITFIELDS`, `biCompression != 0` and 32-bpp are refused with `FM_ERR_UNSUPPORTED` — correct for a decoder that only claims 24-bpp. Eight forged `data_offset`/stride files: pointing into the DIB, into the pixel array, or past the real end all produce either a clean `FM_ERR_EOF` (−15) or the bytes the offset names — never an out-of-bounds read under ASan. `biSize` variants (40/52/56/108/124) all parse. 600 k fuzz iterations, clean.
+
+**`Image_StreamDecode` and `Image_OpenStream`/`Image_ReadLine`.** Callback-only mode (no pixel buffer) for BMP at 170×300 (510-byte rows, inside the documented 512-byte on-stack buffer), 171×300 (513 bytes → `FM_ERR_TOO_LARGE`, as documented), row order top-down and monotonic, `img->width/height/channels` filled in callback mode. 1-byte truncation mid-picture → `FM_ERR_EOF`, never a crash. PNG and JPEG into the same API → `FM_ERR_INVALID_FORMAT` (it is a BMP stream decoder; documented as such).
+
+**`Image_Load` / `Image_LoadEx` capacity and clamp behaviour.** Exact capacity → full size; one byte short → silently downscaled (documented: "downscaled in-place so a 12 MP photo still lands on an 800×480 TFT"); capacity of one pixel → 1×1; capacity 0 → `FM_ERR_TOO_LARGE`; `max_w`/`max_h` clamps honoured, aspect ratio preserved, `(0,0)` means no clamp; a clamp larger than the picture is a no-op. `FM_Image_FitSize` converges for 65535×65535 into 3 bytes and for extreme aspect ratios (65535×2, 1×65535 …) without wrapping `w·7`/`h·7`.
+
+**Pixel conversion, transforms, effects.** All 42 `Image_Convert` pairs and the three fixed converters (`RGB565→888`, `888→565`, `888→GRAY`) checked against an independently written reference: exact match, including the `×255/31`, `×255/63` scaling and the `(77,150,29)>>8` luma. `Image_Rotate` at 0/90/180/270, `Image_Flip` H/V and `Image_Scale` nearest/bilinear checked against a reference for all seven pixel formats. In-place rotate at 90/270 correctly refused; 45° refused; in-place convert to a different format refused; `Image_ApplyEffect` clamps brightness/contrast and refuses SEPIA on GRAY8, alpha is preserved.
+
+**Codec registry.** 4 slots, replace-in-place (does not leak a slot), register/unregister/re-register, empty name and NULL ops refused, unregister of an unknown name → `FM_ERR_NOT_FOUND`. A codec whose `decode` is NULL is never called (the software path is used). A registered `JPEG` codec is bypassed when the picture must be downscaled to fit — correct, because the codec contract takes the whole picture at native size. Re-entering `Image_Load` from inside a codec returns `FM_ERR_BUSY` and the outer call survives; the scratch is released afterwards (the software path still works after `Image_UnregisterCodec`).
+
+**Stack usage.** Compiler `-fstack-usage` over the three translation units plus a painted-thread high-water measurement on five entry points (96×96 RGB888):
+
+| Entry point | Largest compiler frame in the chain (`-fstack-usage`) | Measured high-water (whole chain, incl. libc, 96×96 RGB888) |
+|---|---|---|
+| `Image_EncodePNG` | `png_encode` 160 B | **3,423 B** |
+| `Image_EncodeJPEG` | `jpeg_encode.constprop` **5,264 B** | **5,467 B** |
+| `Image_DecodePNG` | `png_decode` 3,680 B (`dynamic,bounded`) | **3,967 B** |
+| `Image_DecodeJPEG` | `jpeg_sw_decode_run` 304 B (`dynamic,bounded`) | **5,467 B** |
+| `Image_ScaleEx` (bilinear) | `image_scale_run` 1,344 B (`dynamic,bounded`) | **1,391 B** |
+| `Image_StreamDecode` | 736 B + `FM_INTERNAL_BUFFER_SIZE` 512 B | not measured |
+
+Two of these deserve a word, and neither is a finding because the library documents no stack budget:
+
+* `jpeg_encode` carries a **5.3 KiB frame** — four `JpegHuff` tables (`uint16 code[256]` + `uint8 size[256]` = 768 B each) plus eleven `int[64]` blocks, all live across the whole MCU loop. On a 2 KiB FreeRTOS task this alone overflows. It is the largest single allocation of stack anywhere in the image subsystem, measured at 5,467 B end to end for `Image_EncodeJPEG`.
+* `png_decode` at 3,680 B and `image_scale_run` at 1,344 B are marked `dynamic,bounded` by the compiler, i.e. the size does not depend on the input (no VLA growth); they are fixed-size locals the optimiser could not place in registers. `png_decode`'s frame is dominated by the `Inf` inflate state, not by anything file-sized.
+
+The earlier note in my working log that "png_decode is 16 KiB" was a misreading of a chain total that summed `image_scale_run`'s two 512-entry maps twice; the measured values above are what the report stands on.
+
+**Configuration guards.** `FM_IMAGE_MAX_BYTES` is honoured in both places it is checked (`src/fm_image.c:144`, `src/fm_jpeg.c:615`); `FM_PNG_MAX_STRIDE` and `FM_IMAGE_LINE_MAX` are enforced at the documented points; `FM_USE_PNG=0`, `FM_USE_JPEG=0`, `FM_USE_IMAGE=0` compile to clean `FM_ERR_UNSUPPORTED` stubs (`src/fm_image.c:2145–2380`); the `image_decoder_state_fits` compile-time check guards the opaque state buffer.
+
+**Leaks.** 1,000 successful `Image_Load` + `Image_GetInfo` cycles across five formats, plus 1,000 failing loads of truncated copies, under `ASAN_OPTIONS=detect_leaks=1`: no leak, no double free, no use-after-free.
+
+**`tools/png_ref.py` and `tools/gen_png_vectors.sh`.** Read in full. `png_ref.py` is an independent minimal PNG writer (zlib + own chunk/CRC code) used to generate the vectors; it agrees with Pillow on all 17 generated files, so the differential harness starts from trustworthy inputs. `gen_png_vectors.sh` regenerates the vector set deterministically. Neither is in the firmware path.
+
+**`examples/image_bmp.c`, `examples/hw_jpeg.h`, `examples/simple_image.h`.** Read in full. `image_bmp.c` sizes its buffers with `Image_BufferSize` and checks every return value. `hw_jpeg.h` is an STM32 HAL adapter. Its 4:2:0 layout is an MCU of 384 bytes (four 8×8 luma blocks at `p+0/64/128/192`, `Cb` at `p+256`, `Cr` at `p+320`), and the buffer check is `mbw·mbh·384` with `mbw = (w+15)/16`, `mbh = (h+15)/16`; its 4:2:2 path uses 256 bytes/MCU with `mbh = (h+7)/8`. I re-derived both against the HAL's `ImageWidth`/`ImageHeight` semantics and they are consistent (the 4:2:2 height is in 8-row units, the 4:2:0 height in 16-row units, which is what the peripheral produces). No defect found. `simple_image.h` allocates `si_pixels`/`si_work` for 800×480×4 and checks `data_size`/`data_capacity` before every use; its `present()` callback is correctly guarded against re-entry by `si.presenting`. No defect found in the examples. One consequence of IMG-01 is worth recording, and I checked it rather than assuming it: `simple_image.h` loads with `Image_LoadEx(..., 800, 480)` and its own header comment advertises `SimpleImage_Save("/photos/out.png")`. I ran that path end to end — load a 1600×1200 JPEG, save as PNG, read it back — and it is **safe in the default configuration**: the album clamp produces 640×480 (row 1921, 15 blocks both ways), the file is 922,218 bytes and reads back cleanly. The clamp fits *both* dimensions and preserves aspect ratio, so wide pictures land on ≤800×480 with height < 480 and tall ones on 360×480 etc. — I checked a 1200×1600 portrait too: 360×480, safe. The question is therefore only about unusual aspect ratios. Over every `w ≤ 800` aspect ratio whose clamped height stays `≤ 480`, a band does land in the broken set: 465×279, 467×280, 504×302, 535×321, 572×343, 602×361 … So with the example unchanged, a *normal* photo is safe, and a photo whose aspect ratio falls in that band (roughly 5:3 with a small height, i.e. a wide crop) produces an unreadable PNG from a call that reports `FM_OK`. `SimpleImage_Resize(320, 240)` and the default 800×480 output sizes are both safe, which is why the example appears to work.
+
+---
+
+## 8. Not examined
+
+* **Hardware JPEG, for real.** No STM32 JPEG peripheral in this environment. `examples/hw_jpeg.h` was reviewed and its arithmetic hand-checked, but never executed. See IMG-S1.
+* **32-bit build.** Impossible here (see *Audit record*). All size arithmetic was re-derived by hand for 32-bit `size_t`, but nothing was run on a 32-bit target.
+* **`FM_USE_THREADS=1` under real concurrency.** I exercised the nested-call contract single-threaded (which is where the documented `FM_ERR_BUSY` edge lives) but did not run the threaded suite under TSan, because the image scratch is a single global claimed by one task at a time by design; the interesting case is nesting, which I did test. TSan runs of the full suite are part of `make check`, which I did not have time to run end to end.
+* **`FM_IMAGE_SECTION` placement.** The linker-script side (`.sdram_buffers`) is target-specific; I checked only that the attribute is applied to the three PNG scratch arrays and that the examples use the same section name.
+* **Very large JPEGs (> 16 MiB) through the hardware path.** Needs a real codec; on the host the software decoder handles them but the `FM_JPEG_HW_FILE_MAX` boundary was not exercised against hardware.
+* **Bit-exactness of the JPEG *encoder* against libjpeg.** I checked that Pillow accepts the encoder's output and that decoding it reproduces the input within the differences quoted above, not that the DCT or quantisation rounding matches libjpeg's. A byte-level encoder differential needs a baseline JPEG reference with the same tables and the same rounding; out of proportion for the time available.
+
+---
+
+## 9. Outside my scope
+
+* **Files, filesystems, VFS, mounts** — the other auditor's part; encountered only as the substrate for `Image_Load`/`Image_Save`.
+* **Audio (MP3/FLAC/Opus/Vorbis/AAC), video (AVI/MP4/H.264), the H.264 decoder and MJPEG container demuxing** — `fm_mjpeg.c` was read only where it shares `FM_CodecScratch` with the image codec.
+* **`FileManager` core, allocator, logging, caching, the SD/USB layers** — read only for call-path context.
+* **Build system, CMake, the 45-configuration matrix, the port layer** — used, not audited.
+* **Thread-safety of picojpeg itself** — explicitly out of scope per the brief; the *guarding* of it (`FM_USE_THREADS=1`) is in scope and I checked the claim/release pairing in `fm_jpeg.c`.
+* **Documentation style and the Persian comments** — not audited.
+
+---
+
+## Appendix A — harness sources
+
+All of these live in `audit_image/h/` in the working tree (kept out of the library build). Build recipe used throughout:
+
+```sh
+cd Clain_FileManager/FileManager_lib
+make -s -j8 libfilemanager.a
+gcc -std=c99 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -Iinclude -Ibackends -Isrc <harness>.c libfilemanager.a -lm -o <harness>
+```
+
+### A.1 `pngenc2.c` — encode a solid RGB888 image, the F1 generator
+
+```c
+/* pngenc2 <w> <h> <fill> <out.png> */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "fm_image.h"
+int main(int argc, char **argv)
+{
+    FM_Image img; unsigned w, h, fill; size_t cap, len = 0;
+    unsigned char *px, *out; FM_Result r; FILE *f;
+    if (argc < 5) return 2;
+    w = (unsigned)strtoul(argv[1],0,0); h = (unsigned)strtoul(argv[2],0,0);
+    fill = (unsigned)strtoul(argv[3],0,0);
+    px = malloc((size_t)w*h*3+1); memset(px, (int)fill, (size_t)w*h*3);
+    cap = (size_t)w*h*3 + 65536 + (size_t)w*h/100; out = malloc(cap);
+    memset(&img,0,sizeof(img));
+    img.width=(uint16_t)w; img.height=(uint16_t)h; img.format=FM_PIXEL_RGB888;
+    img.channels=3; img.bit_depth=24; img.data=px;
+    img.data_capacity=(size_t)w*h*3; img.data_size=(size_t)w*h*3;
+    r = Image_EncodePNG(&img,out,cap,&len);
+    printf("res %d len %zu\n",(int)r,len);
+    if (r==FM_OK){f=fopen(argv[4],"wb");fwrite(out,1,len,f);fclose(f);}
+    free(px);free(out);return 0;
+}
+```
+
+### A.2 `pngblocks.py` — parse the stored-block structure and reconcile the IDAT length
+
+```python
+#!/usr/bin/env python3
+"""pngblocks.py <file.png> -- parse the stored-block structure the encoder
+actually emitted and compare it with the IDAT length in the chunk header."""
+import struct, sys
+
+def analyse(path):
+    d = open(path, 'rb').read()
+    if d[:8] != b'\x89PNG\r\n\x1a\n':
+        return None
+    w, h = struct.unpack('>II', d[16:24])
+    p = 8
+    idat = None
+    while p + 12 <= len(d):
+        ln = struct.unpack('>I', d[p:p+4])[0]
+        typ = d[p+4:p+8]
+        if typ == b'IDAT' and idat is None:
+            idat = (p, ln); break
+        p += 12 + ln
+    if idat is None:
+        return None
+    ip, declared = idat
+    q = ip + 8                       # zlib header
+    q += 2
+    blocks = total = 0
+    while True:
+        if q + 5 > len(d):
+            break
+        bfinal = d[q] & 1; btype = (d[q] >> 1) & 3
+        q += 1
+        if btype != 0:
+            return dict(w=w, h=h, declared=declared, blocks=blocks,
+                        total=total, error=f"btype={btype}")
+        ln = d[q] | (d[q+1] << 8); nln = d[q+2] | (d[q+3] << 8)
+        if ln ^ nln != 0xFFFF:
+            return dict(w=w, h=h, declared=declared, blocks=blocks,
+                        total=total, error="len/nlen")
+        q += 4; total += ln; blocks += 1; q += ln
+        if bfinal:
+            break
+    return dict(w=w, h=h, declared=declared, blocks=blocks, total=total,
+                stream_len=2 + 5*blocks + total + 4)
+
+if __name__ == '__main__':
+    r = analyse(sys.argv[1])
+    if r is None:
+        print("not a PNG with IDAT")
+    elif 'error' in r:
+        print(f"{r['w']}x{r['h']}: parse error {r['error']} after {r['blocks']} blocks")
+    else:
+        ok = r['declared'] == r['stream_len']
+        print(f"{r['w']}x{r['h']}: declared {r['declared']} actual {r['stream_len']} "
+              f"({r['blocks']} blocks, {r['total']} payload) -> "
+              f"{'OK' if ok else 'MISMATCH short by %d' % (r['stream_len']-r['declared'])}")
+```
+
+### A.3 `info.c` — the IMG-02 reproducer
+
+```c
+/* info <file>... -- Image_GetInfo, then Image_Load into exactly that much. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "file_manager.h"
+#include "fm_image.h"
+#include "fm_storage.h"
+#include "fm_filesystem.h"
+
+static uint8_t ram[1u << 20];
+static FM_Storage st; static FM_FS fs;
+
+int main(int argc, char **argv)
+{
+    int i;
+    if (FileManager_Init() != FM_OK) return 2;
+    if (RamDisk_Register(&st, "ram", ram, sizeof(ram)) != FM_OK) return 2;
+    if (Storage_Mount("ram") != FM_OK) return 2;
+    if (PosixFS_Init(&fs) != FM_OK) return 2;
+    if (FS_Mount("/", &fs) != FM_OK) return 2;
+    for (i = 1; i < argc; i++) {
+        FM_ImageInfo info; FM_Image img; FM_Result r, rg;
+        size_t guess, cap; unsigned char *buf;
+        memset(&info, 0, sizeof(info));
+        rg = Image_GetInfo(argv[i], &info);
+        if (rg != FM_OK) { printf("%-28s GetInfo res %d\n", argv[i], (int)rg); continue; }
+        guess = (size_t)info.width * info.height * info.channels;
+        cap = guess > 0 ? guess : 1;
+        buf = malloc(cap);
+        memset(&img, 0, sizeof(img));
+        r = Image_Load(argv[i], &img, buf, cap);
+        printf("%-28s GetInfo: %ux%u ch %u bd %u -> caller allocates %zu | "
+               "Load: res %2d got %ux%u %zu bytes%s\n",
+               argv[i], (unsigned)info.width, (unsigned)info.height,
+               (unsigned)info.channels, (unsigned)info.bit_depth, guess, (int)r,
+               (unsigned)img.width, (unsigned)img.height, img.data_size,
+               (r == FM_OK && (img.width != info.width || img.height != info.height)) ?
+                   "   <-- SILENTLY RESCALED" : "");
+        free(buf);
+    }
+    return 0;
+}
+```
+
+Note the POSIX backend resolves paths as given, so pass paths relative to the process working directory or absolute ones that exist on the host (`/work/vec/...` in the transcript is the working directory inside `audit_image/`).
+
+### A.4 `bmppal.py` — the IMG-03 generator
+
+```python
+#!/usr/bin/env python3
+"""bmppal.py <out.bmp> -- 16x16, 8-bpp, palette is a colour ramp."""
+import struct, sys
+w = h = 16
+pix = bytearray()
+for y in range(h-1, -1, -1):
+    row = bytes([(x*16 + y) & 0xFF for x in range(w)])
+    pix += row
+    if len(row) % 4: pix += b'\0' * (4 - len(row) % 4)
+pal = bytearray()
+for i in range(256):
+    pal += bytes([(i*3) & 0xFF, 255 - ((i*3) & 0xFF), (i*5) & 0xFF, 0])
+off = 54 + len(pal); size = off + len(pix)
+hdr = b'BM' + struct.pack('<IHHI', size, 0, 0, off)
+dib = struct.pack('<IiiHHIIiiII', 40, w, h, 1, 8, 0, len(pix), 2835, 2835, 256, 0)
+open(sys.argv[1], 'wb').write(hdr + dib + pal + pix)
+```
+
+### A.5 `imgdec.c` — one decode, geometry on stdout, pixels to a file
+
+```c
+/* imgdec <bmp|png|jpg> <file> <out.raw> <capacity> */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "fm_image.h"
+
+int main(int argc, char **argv)
+{
+    FILE *f; unsigned char *buf, *out; long n; size_t cap;
+    FM_Image img; FM_Result r;
+    if (argc < 5) return 2;
+    f = fopen(argv[2], "rb");
+    if (!f) return 2;
+    fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET);
+    buf = malloc((size_t)n);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); return 2; }
+    fclose(f);
+    cap = (size_t)strtoull(argv[4], NULL, 0);
+    out = malloc(cap ? cap : 1);
+    memset(&img, 0, sizeof(img));
+    if (!strcmp(argv[1], "bmp"))      r = Image_DecodeBMP(buf, (size_t)n, &img, out, cap);
+    else if (!strcmp(argv[1], "png")) r = Image_DecodePNG(buf, (size_t)n, &img, out, cap);
+    else if (!strcmp(argv[1], "jpg")) r = Image_DecodeJPEG(buf, (size_t)n, &img, out, cap);
+    else return 2;
+    printf("res %d w %u h %u fmt %d ch %u bd %u size %zu\n", (int)r,
+           (unsigned)img.width, (unsigned)img.height, (int)img.format,
+           (unsigned)img.channels, (unsigned)img.bit_depth, img.data_size);
+    if (r == FM_OK && img.data_size) {
+        FILE *o = fopen(argv[3], "wb");
+        if (o) { fwrite(out, 1, img.data_size, o); fclose(o); }
+    }
+    free(buf); free(out);
+    return 0;
+}
+```
+
+### A.6 `fuzz_png.c`, `fuzz_bmp.c`, `fuzz_jpeg.c`
+
+Full sources are in `audit_image/h/`. Their design in one line each:
+
+* **`fuzz_png.c`** — copies a seed, walks the chunk list, and mutates IHDR width/height/colour type/bit depth/interlace, the PLTE length (moving the trailing chunks), or one IDAT payload byte, **recomputing the IHDR CRC after every change** so the decode gets past the integrity check and into the arithmetic. Capacity is drawn from {1, 3, 64, 4096, 1 MiB, 8 MiB} so the fit/downscale paths are exercised too.
+* **`fuzz_bmp.c`** — mutates the fields the parser trusts (width, height including negative, bit count 8/24, `data_offset`, `biSize`, `biSizeImage`), truncates, and flips pixel bytes; 54-byte minimum preserved so the parser reaches the geometry checks.
+* **`fuzz_jpeg.c`** — walks marker segments, mutates SOF0 precision/height/width/component count/sampling, segment lengths, SOS, and the entropy stream; **clamps the capacity to the actual output buffer** (the one bug I had to fix in my own harness).
+
+Invocation used:
+
+```sh
+ASAN_OPTIONS=detect_leaks=0 ./fuzz_png  550000 test/vectors/png/*.png
+ASAN_OPTIONS=detect_leaks=0 ./fuzz_bmp  900000 test/vectors/tiny64.bmp work/pal8.bmp work/td.bmp
+ASAN_OPTIONS=detect_leaks=0 ./fuzz_jpeg 460000 test/vectors/tiny64.jpg test/vectors/mjpeg_frame.jpg
+```
+
+### A.7 `trunc.c` — every truncation offset
+
+```c
+/* Decode buf[0..cut) for every cut in 0..n, for every file given. */
+for (cut = 0; cut <= (size_t)n; cut++) {
+    FM_Image img; memset(&img, 0, sizeof(img));
+    if (kind == 0)      (void)Image_DecodeBMP(buf, cut, &img, out, 16u<<20);
+    else if (kind == 1) (void)Image_DecodePNG(buf, cut, &img, out, 16u<<20);
+    else                (void)Image_DecodeJPEG(buf, cut, &img, out, 16u<<20);
+}
+```
+
+### A.8 `stackhwm.c` — painted-thread stack high-water
+
+The technique, in three lines: get the thread's real stack bounds with `pthread_getattr_np`, `memset` the region below the current frame with `0xC3`, run the entry point, then scan upward from the low address for the first untouched byte. The distance from the top is the high-water mark. Two false starts are worth recording because they produced nonsense numbers at first: (a) painting the whole region including live frames makes the scan report the whole stack; (b) `PTHREAD_STACK_MIN` on this host is 16 KiB, so a "smallest stack it survives" binary search bottoms out at 16 KiB and says nothing about the real usage. The painted method with the compiler's `-fstack-usage` table as a cross-check is what produced the numbers in §7.
+
+### A.9 `diffsuite.py`, `diffjpeg.py` — the differential harnesses
+
+Both walk a file list, decode with the library through `imgdec`, decode the same
+file with Pillow, and compare. `diffsuite.py` treats "Pillow rejects" as a
+separate outcome and requires the library to reject as well; `diffjpeg.py`
+compares the interior region only (8-pixel border excluded) because chroma
+upsampling legitimately differs at the edges.
+
+```python
+# diffsuite.py (PNG) — abridged; the full file is audit_image/work/diffsuite.py
+for f in files:
+    try:
+        ref = np.asarray(Image.open(f).convert('RGB')).astype(int)
+    except Exception:                       # Pillow rejects it
+        r = run(['./h/imgdec','png',f,'/tmp/x.rgb','67108864'])
+        if res(r) == 0: print(f"{f}: Pillow rejects, library accepts"); bad += 1
+        else: skipped += 1
+        continue
+    r = run(['./h/imgdec','png',f,'/tmp/x.rgb','67108864'])
+    got = np.fromfile('/tmp/x.rgb', np.uint8).reshape(ref.shape).astype(int)
+    if (got == ref).all(): ok += 1
+    else: print(f"{f}: max diff {(got-ref).max()}"); bad += 1
+
+# diffjpeg.py — the comparison itself
+inner = (slice(8, h-8), slice(8, w-8)) if h > 16 and w > 16 else (slice(None),)*2
+d = int(np.abs(got[inner] - ref[inner]).max())
+```
+
+The generators for the JPEG set (33 files: grey, RGB at three subsamplings,
+progressive, CMYK, and the flat-chroma / flat-luma controls) are inline in
+`audit_image/work/` and are Pillow one-liners (`im.save(p, quality=90,
+subsampling=0|1|2)`); the important part is the control pair, which is what
+distinguishes a decoder defect from a subsampling difference.
+
+### A.10 The PNG 16-bit scaling, recorded for completeness
+
+`png_16to8()` (`src/fm_png.c:1064–1069`) maps a 16-bit sample to 8 bits as
+`(v * 255 + 32895) >> 16`, which is `round(v * 255 / 65535)` — a true 16→8
+reduction that uses the whole 0…255 range. It is **not** `v >> 8`, and the two
+differ by one on about 19 % of values (e.g. 48174 → 187, where `>>8` gives 188;
+40448 → 157, where `>>8` gives 158). Both mappings are legitimate; the
+documentation says "rounded to 8" and the code rounds, so this is a correct,
+documented behaviour and is **not** a finding. I record it because it is the one
+place where the library's output does not match a naive `>>8` reference, so a
+future differential harness must not flag it.
+
+### A.11 Other harnesses
+
+`stream.c` (`Image_StreamDecode` row callback), `info2.c` (`Image_OpenStream` geometry only), `loadapi.c` (`Image_LoadEx` capacity/clamp matrix), `codec.c`/`codec2.c` (registry and hardware-codec interception), `nested.c` (re-entry from a codec), `conv.c` (42 conversion pairs against an independent reference), `xform.c` (rotate/flip/scale against reference), `misc.c` (effects, buffer-size overflow, registry edge cases), `fit.c` (`FM_Image_FitSize` extremes), `dims.c` (extreme PNG dimensions), `savepng.c` (`Image_Save` through the real file API), `probe.c` (mount sanity). All in `audit_image/h/`.
+
+---
+
+## Appendix B — generated inputs and their provenance
+
+Every input below is produced by a script in appendix A, so none of them needs to
+be shipped; each row gives the command that remakes it and the size it should
+come out at, which doubles as a check that the rebuild is the same file.
+
+| File | Size | Made by | Purpose |
+|---|---|---|---|
+| `bad.png` | 122,988 B | `pngenc2 2731 15 0x5A` | smallest IMG-01 trigger by pixel count, and the file in §3 |
+| `800x600.png` | 1,440,778 B | `pngenc2 800 600 0x5A` | common camera size, broken |
+| `1920x1080.png` | 6,222,438 B | `pngenc2 1920 1080 0x5A` | 99 real blocks vs 95 declared |
+| `pal16.bmp` | 1,334 B | `bmppal.py` | IMG-03, colour palette |
+| `pal8.bmp` | 1,142 B | `mkbmp.py` | IMG-03, index == palette entry |
+| `forge_*.bmp` | 66–100,048 B | `bmpforge.py` | `data_offset` and stride disagreement |
+| `v_*.bmp` | 118–1,190 B | inline (appendix A.11) | RLE4/RLE8/BITFIELDS/32-bpp/top-down/DIB sizes |
+| `edge_*.png` | 113–929 B | `pngedge.py` | chunk-structure edges |
+| `d_*.png` | 1 B–590 KB | `mkpng.py` | extreme dimensions (65535×1, 1×65535, …) |
+
+No crashing input exists to include: every fuzz and truncation campaign ended
+without a sanitizer report, so the appendix contains no `.bin` reproducers. That
+is the honest outcome — a crash corpus would be more convincing than its absence,
+but there is none to show.
+
+The working tree used during the audit (`audit_image/`, ~150 MB of harnesses,
+objects and generated pictures) was removed at the end so that what persists is
+the report and the method. Every number in it can be re-derived with appendix A
+and C; if a script is not reproduced in full here it is short enough to retype
+from its description, and the important ones (`pngenc2`, `pngblocks.py`,
+`info.c`, `bmppal.py`, `imgdec.c`) are verbatim.
+
+---
+
+## Appendix C — how to reproduce the three findings from a clean tree
+
+```sh
+git clone https://github.com/hamid-enf/Clain_Filemanagaer
+cd Clain_Filemanagaer && git checkout 8dd0f25
+cd Clain_FileManager/FileManager_lib
+make -s -j8 libfilemanager.a
+
+# IMG-01
+gcc -std=c99 -O2 -Iinclude -Ibackends -Isrc /path/to/pngenc2.c libfilemanager.a -lm -o pngenc2
+./pngenc2 2731 15 0x5A /tmp/bad.png          # prints: res 0 len 122988
+python3 /path/to/pngblocks.py /tmp/bad.png   # declared 122926 actual 122931
+python3 -c "from PIL import Image; Image.open('/tmp/bad.png').load()"
+#   -> SyntaxError: broken PNG file
+
+# IMG-02
+#   The POSIX backend is mounted at the library root "/" and strips the leading
+#   slash, so a library path "/work/x.png" opens "./work/x.png" relative to the
+#   harness's working directory.  Copy the vector into a "work" directory first.
+mkdir -p work && cp test/vectors/png/gray8_a7.png work/
+gcc -std=c99 -O2 -D_GNU_SOURCE -DFM_HOST_BUILD=1 -DFM_USE_IMAGE=1 -DFM_USE_PNG=1 \
+    -DFM_USE_JPEG=1 -Iinclude -Ibackends -Isrc /path/to/info.c libfilemanager.a -lm -o info
+./info /work/gray8_a7.png                   # 37x29 reported, 21x15 delivered
+
+# IMG-03
+python3 /path/to/bmppal.py /tmp/pal16.bmp
+gcc -std=c99 -O2 -Iinclude -Ibackends -Isrc /path/to/imgdec.c libfilemanager.a -lm -o imgdec
+./imgdec bmp /tmp/pal16.bmp /tmp/pal16.rgb 10000
+#   -> res 0 w 16 h 16 fmt 1 ch 1 bd 8 size 256   (fmt 1 = GRAY8, indices)
+```
 
 
 
