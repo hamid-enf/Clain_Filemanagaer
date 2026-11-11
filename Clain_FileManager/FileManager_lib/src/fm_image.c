@@ -24,7 +24,10 @@ typedef struct
     uint32_t next_y;
     uint8_t  bits_per_pixel;
     uint8_t  top_down;
+    uint8_t  use_palette;   /* 8 bpp: rows go through dec->palette */
 } ImageDecoderState;
+
+#define BMP_PALETTE_MAX 256u
 
 typedef char image_decoder_state_fits[
     (sizeof(ImageDecoderState) <= sizeof(((FM_ImageDecoder *)0)->state)) ? 1 : -1];
@@ -326,8 +329,82 @@ static FM_Result image_stream_read_exact(FM_Stream *s, void *data,
     return FM_OK;
 }
 
+/* The colour table of an 8-bpp BMP.
+ *
+ * The bytes of such a picture are indices, not grey levels.  They are
+ * grey levels only when entry i of the table is (i, i, i) -- which is
+ * what a "greyscale BMP" is, and the one case that needs no table: the
+ * rows are then delivered as they are, GRAY8.  Every other table is
+ * loaded (as RGB, 3 bytes an entry) and the rows are delivered through
+ * it as RGB888.  Entries the file does not have stay black.
+ *
+ * A file with no table at all (pixel data right after the header) has
+ * no colours defined; it is read as grey, as it always was. */
+static FM_Result bmp_load_palette(FM_Stream *s, uint32_t dib_size,
+                                  uint32_t clr_used, uint64_t data_offset,
+                                  uint8_t *palette, uint8_t *use_palette)
+{
+    uint64_t table = 14u + (uint64_t)dib_size;
+    uint32_t count = (clr_used == 0u) ? BMP_PALETTE_MAX : clr_used;
+    uint32_t i = 0;
+    FM_Bool grey = FM_TRUE;
+
+    *use_palette = 0u;
+    if (count > BMP_PALETTE_MAX)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    if (data_offset <= table)
+    {
+        return FM_OK;                       /* no table */
+    }
+    if ((data_offset - table) / 4u < count)
+    {
+        count = (uint32_t)((data_offset - table) / 4u);
+    }
+    if (count == 0u)
+    {
+        return FM_OK;
+    }
+    if (Stream_Seek(s, (int64_t)table, FM_SEEK_SET) != FM_OK)
+    {
+        return FM_ERR_IO;
+    }
+    memset(palette, 0, BMP_PALETTE_MAX * 3u);
+    while (i < count)
+    {
+        uint8_t quad[16 * 4];
+        uint32_t n = count - i;
+        uint32_t k;
+
+        if (n > 16u)
+        {
+            n = 16u;
+        }
+        if (image_stream_read_exact(s, quad, (size_t)n * 4u) != FM_OK)
+        {
+            return FM_ERR_EOF;
+        }
+        for (k = 0; k < n; k++, i++)
+        {
+            const uint8_t *q = quad + k * 4u;       /* B, G, R, reserved */
+
+            palette[i * 3u] = q[2];
+            palette[i * 3u + 1u] = q[1];
+            palette[i * 3u + 2u] = q[0];
+            if (q[0] != (uint8_t)i || q[1] != (uint8_t)i || q[2] != (uint8_t)i)
+            {
+                grey = FM_FALSE;
+            }
+        }
+    }
+    *use_palette = (uint8_t)(grey ? 0 : 1);
+    return FM_OK;
+}
+
 static FM_Result image_parse_header(FM_Stream *s, FM_ImageInfo *info,
-                                    ImageDecoderState *state)
+                                    ImageDecoderState *state,
+                                    uint8_t *palette)
 {
     uint8_t h[54];
     int32_t width;
@@ -372,12 +449,25 @@ static FM_Result image_parse_header(FM_Stream *s, FM_ImageInfo *info,
     state->top_down = (uint8_t)((height < 0) ? 1 : 0);
     state->row_stride = (uint32_t)((((uint64_t)width * bits + 31u) / 32u) * 4u);
     state->next_y = 0;
+    state->use_palette = 0u;
+    if (bits == 8)
+    {
+        FM_Result r = bmp_load_palette(s, dib_size, image_rd32(h + 46),
+                                       state->data_offset, palette,
+                                       &state->use_palette);
 
+        if (r != FM_OK)
+        {
+            return r;
+        }
+    }
+
+    /* Reported as delivered: a paletted picture comes out as RGB888 */
     memset(info, 0, sizeof(*info));
     info->width = (uint16_t)state->width;
     info->height = (uint16_t)state->height;
-    info->bit_depth = (bits == 24) ? 24u : 8u;
-    info->channels = (bits == 24) ? 3u : 1u;
+    info->bit_depth = (bits == 24 || state->use_palette) ? 24u : 8u;
+    info->channels = (bits == 24 || state->use_palette) ? 3u : 1u;
     info->compression = compression;
     info->data_size = pixels * info->channels;
     (void)strcpy(info->codec, "BMP");
@@ -396,7 +486,7 @@ FM_Result Image_OpenStream(FM_Stream *s, FM_ImageDecoder *dec,
     }
     memset(dec, 0, sizeof(*dec));
     memset(&state, 0, sizeof(state));
-    r = image_parse_header(s, info, &state);
+    r = image_parse_header(s, info, &state, dec->palette);
     if (r != FM_OK)
     {
         return r;
@@ -425,7 +515,7 @@ FM_Result Image_ReadLine(FM_ImageDecoder *dec, void *line_out,
     {
         return FM_ERR_EOF;
     }
-    output_bpp = (state.bits_per_pixel == 24u) ? 3u : 1u;
+    output_bpp = (state.bits_per_pixel == 24u || state.use_palette) ? 3u : 1u;
     if ((uint64_t)state.width * output_bpp > line_cap)
     {
         return FM_ERR_TOO_LARGE;
@@ -451,6 +541,32 @@ FM_Result Image_ReadLine(FM_ImageDecoder *dec, void *line_out,
             out[x * 3u] = bgr[2];
             out[x * 3u + 1u] = bgr[1];
             out[x * 3u + 2u] = bgr[0];
+        }
+    }
+    else if (state.use_palette)
+    {
+        /* The indices are read into the last third of the row and
+         * expanded from the front: pixel x is written at 3x..3x+2 and
+         * its index sits at 2w+x, so no index is overwritten before it
+         * has been used, and no second buffer is needed. */
+        uint8_t *out = (uint8_t *)line_out;
+        const uint8_t *idx = out + (size_t)state.width * 2u;
+
+        if (image_stream_read_exact(dec->stream, out + (size_t)state.width * 2u,
+                                    state.width) != FM_OK)
+        {
+            return FM_ERR_EOF;
+        }
+        for (x = 0; x < state.width; x++)
+        {
+            const uint8_t *c = dec->palette + (size_t)idx[x] * 3u;
+            uint8_t r8 = c[0];
+            uint8_t g8 = c[1];
+            uint8_t b8 = c[2];
+
+            out[x * 3u] = r8;
+            out[x * 3u + 1u] = g8;
+            out[x * 3u + 2u] = b8;
         }
     }
     else

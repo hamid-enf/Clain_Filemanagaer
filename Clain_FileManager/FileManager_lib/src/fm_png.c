@@ -799,9 +799,14 @@ FM_Result Image_ProbePNG(const void *png, size_t png_size, FM_ImageInfo *info)
     memset(info, 0, sizeof(*info));
     info->width = (uint16_t)w;
     info->height = (uint16_t)h;
-    info->channels = (color == 0u || color == 4u) ? 1u : 3u;
-    info->bit_depth = (uint8_t)(info->channels * 8u);
-    info->data_size = (uint64_t)w * h * info->channels;
+    /* What the decoder delivers, not what the file stores: png_decode()
+     * turns every colour type into RGB888.  Reporting one channel for a
+     * grey picture made a caller that sized its buffer from this answer
+     * allocate a third of what the picture needs -- and Image_Load then
+     * shrank the picture to fit, without an error. */
+    info->channels = 3u;
+    info->bit_depth = 24u;
+    info->data_size = (uint64_t)w * h * 3u;
     (void)strcpy(info->codec, "PNG");
     return FM_OK;
 }
@@ -1632,6 +1637,7 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
     FM_Result r;
     size_t need;
     uint64_t raw;
+    uint32_t rows_per_block;
     uint32_t nblocks;
     uint64_t zlen;
 
@@ -1658,11 +1664,15 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
     }
     rowp = g_png_row;
     raw = (uint64_t)img->height * row_bytes;
-    nblocks = (uint32_t)((raw + 65534u) / 65535u);
-    if (nblocks == 0u)
-    {
-        nblocks = 1u;
-    }
+    /* The length of the IDAT chunk is written before its data, so the
+     * number of stored blocks has to be known here -- and it has to be
+     * the number the loop below really writes.  That loop puts whole
+     * rows in a block, so a block is rarely full: counting
+     * ceil(raw / 65535) blocks was one short whenever the unused tails
+     * added up to a block (800x600: 23 written, 22 counted), and the
+     * chunk length then stopped five bytes before the chunk did. */
+    rows_per_block = 65535u / (uint32_t)row_bytes;      /* >= 1, see above */
+    nblocks = (img->height + rows_per_block - 1u) / rows_per_block;
     zlen = 2u + (uint64_t)nblocks * 5u + raw + 4u;
     if (zlen > PNG_CHUNK_MAX)
     {
@@ -1698,18 +1708,18 @@ static FM_Result png_encode(PngOut *o, const FM_Image *img)
         y = 0;
         while (r == FM_OK && y < img->height)
         {
-            uint32_t this_raw = 0;
-            uint32_t y0;
+            uint32_t rows = img->height - y;
+            uint32_t this_raw;
+            uint32_t y0 = y;
             uint32_t yy;
             uint8_t blkhdr[5];
 
-            while (y < img->height &&
-                   this_raw + (uint32_t)row_bytes <= 65535u)
+            if (rows > rows_per_block)
             {
-                this_raw += (uint32_t)row_bytes;
-                y++;
+                rows = rows_per_block;
             }
-            y0 = y - this_raw / (uint32_t)row_bytes;
+            this_raw = rows * (uint32_t)row_bytes;
+            y += rows;
             blkhdr[0] = (y >= img->height) ? 1u : 0u;
             blkhdr[1] = (uint8_t)(this_raw & 0xFFu);
             blkhdr[2] = (uint8_t)(this_raw >> 8);

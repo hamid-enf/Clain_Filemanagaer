@@ -6,7 +6,10 @@
  * unless FM_USE_IMAGE is 1.
  *
  * Built-in codecs:
- *   BMP  — read + write (24bpp RGB888, 8bpp gray read)
+ *   BMP  — read + write.  Read: 24 bpp -> RGB888; 8 bpp with a grey
+ *          ramp as its colour table (or none) -> GRAY8; 8 bpp with any
+ *          other colour table -> RGB888 through that table.
+ *          Write: 24 bpp
  *   JPEG — still-image decode (picojpeg software, streamed — no heap
  *          slurp) and baseline encode; STM32 JPEG hardware via
  *          Image_RegisterCodec("JPEG", ...) / example 20 (falls back to
@@ -92,6 +95,13 @@ FM_Result Image_Load(const char *path, FM_Image *img, void *pixel_buffer,
 FM_Result Image_LoadEx(const char *path, FM_Image *img, void *pixel_buffer,
                        size_t capacity, uint16_t max_w, uint16_t max_h);
 FM_Result Image_Save(const char *path, const FM_Image *img);
+/* Describes the picture as Image_Load will deliver it, not as the file
+ * stores it: width, height, and channels / bit_depth / data_size of the
+ * decoded pixels (a grey or paletted PNG is reported with 3 channels,
+ * because it is decoded to RGB888).  A buffer of info.data_size bytes
+ * therefore holds the picture at full size.
+ * Only the header is read and checked: FM_OK here says the file starts
+ * as a picture of that size, not that the rest of it decodes. */
 FM_Result Image_GetInfo(const char *path, FM_ImageInfo *info);
 
 /* Optional SDRAM (or other) workspace for HW JPEG file slurp / YCbCr.
@@ -119,7 +129,9 @@ FM_Result Image_EncodeBMP(const FM_Image *img, void *out, size_t out_cap,
 /* JPEG / PNG still-image decode from a complete in-memory file.
  * JPEG uses a registered "JPEG" codec if present (hardware), otherwise
  * the bundled picojpeg software decoder. PNG is built in. Output is
- * RGB888 (or GRAY8 for gray sources). */
+ * RGB888 from the built-in decoders, whatever the file stores (a
+ * registered codec may deliver GRAY8).  The Probe calls report the
+ * decoded layout (see Image_GetInfo). */
 FM_Result Image_DecodeJPEG(const void *jpeg, size_t jpeg_size,
                            FM_Image *img, void *pixel_buffer, size_t capacity);
 FM_Result Image_DecodePNG(const void *png, size_t png_size,
@@ -161,6 +173,7 @@ typedef struct
     FM_Stream    *stream;
     FM_ImageInfo  info;
     uint8_t       state[40];   /* internal decoder state (BMP) */
+    uint8_t       palette[768]; /* colour table of an 8-bpp BMP, RGB   */
 } FM_ImageDecoder;
 
 typedef void (*FM_ImageLineCb)(const void *line, uint32_t y,

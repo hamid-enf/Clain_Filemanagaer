@@ -1055,3 +1055,423 @@ static void test_audit_v2_video(void)
     (void)File_Delete("/av2_nest.mp4");
 }
 #endif /* FM_USE_VIDEO */
+
+/* ================================================================ */
+/* Image part                                                        */
+/* ================================================================ */
+#if FM_USE_IMAGE
+static uint32_t av2_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+
+#if FM_USE_PNG
+/* IMG-01: the chunks of an encoded PNG must add up to the file, and the
+ * picture must come back.  Returns 0, or the step that failed. */
+static int av2_png_roundtrip(uint16_t w, uint16_t h)
+{
+    size_t raw = (size_t)w * h * 3u;
+    size_t cap = raw + raw / 1000u + 4096u + (size_t)h * 8u;
+    uint8_t *src = (uint8_t *)malloc(raw);
+    uint8_t *png = (uint8_t *)malloc(cap);
+    uint8_t *out = (uint8_t *)malloc(raw);
+    FM_Image img;
+    FM_Image dec;
+    size_t len = 0;
+    size_t pos = 8u;
+    size_t i;
+    int idat = 0;
+    int iend = 0;
+    int why = 0;
+
+    if (src == NULL || png == NULL || out == NULL)
+    {
+        why = 1;
+    }
+    else
+    {
+        for (i = 0; i < raw; i++)
+        {
+            src[i] = (uint8_t)((i * 2654435761u) >> 13);
+        }
+        memset(&img, 0, sizeof(img));
+        img.width = w; img.height = h;
+        img.format = FM_PIXEL_RGB888;
+        img.channels = 3; img.bit_depth = 24;
+        img.data = src; img.data_size = raw; img.data_capacity = raw;
+        if (Image_EncodePNG(&img, png, cap, &len) != FM_OK) why = 2;
+    }
+    /* every chunk: length, type, data, CRC -- and the last one is IEND,
+     * ending exactly where the file ends */
+    while (why == 0 && !iend)
+    {
+        uint32_t clen;
+
+        if (pos + 12u > len) { why = 3; break; }
+        clen = av2_be32(png + pos);
+        if (clen > len - pos - 12u) { why = 4; break; }
+        if (memcmp(png + pos + 4u, "IDAT", 4) == 0) idat++;
+        else if (memcmp(png + pos + 4u, "IEND", 4) == 0) iend = 1;
+        else if (memcmp(png + pos + 4u, "IHDR", 4) != 0) { why = 5; break; }
+        pos += 12u + clen;
+    }
+    if (why == 0 && (idat != 1 || pos != len)) why = 6;
+    if (why == 0)
+    {
+        memset(out, 0, raw);
+        memset(&dec, 0, sizeof(dec));
+        if (Image_DecodePNG(png, len, &dec, out, raw) != FM_OK) why = 7;
+        else if (dec.width != w || dec.height != h) why = 8;
+        else if (memcmp(out, src, raw) != 0) why = 9;
+    }
+    free(src); free(png); free(out);
+    return why;
+}
+#endif /* FM_USE_PNG */
+
+/* IMG-02: a buffer sized from Image_GetInfo holds the picture at full
+ * size, in the layout Image_GetInfo announced. */
+static int av2_info_matches_load(const char *path)
+{
+    FM_ImageInfo info;
+    FM_Image img;
+    uint8_t *buf;
+    int why = 0;
+
+    memset(&info, 0, sizeof(info));
+    if (Image_GetInfo(path, &info) != FM_OK) return 1;
+    if (info.data_size == 0u || info.data_size > (16u << 20)) return 2;
+    buf = (uint8_t *)malloc((size_t)info.data_size);
+    if (buf == NULL) return 3;
+    memset(&img, 0, sizeof(img));
+    if (Image_Load(path, &img, buf, (size_t)info.data_size) != FM_OK) why = 4;
+    else if (img.width != info.width || img.height != info.height) why = 5;
+    else if (img.channels != info.channels) why = 6;
+    else if (img.data_size != info.data_size) why = 7;
+    free(buf);
+    return why;
+}
+
+/* IMG-03: an 8-bpp BMP, bottom-up, `used` colour-table entries (0 = the
+ * field says 0, 256 written).  kind 0: colour ramp, 1: grey ramp. */
+#define AV2_BMP_W 13u
+#define AV2_BMP_H 7u
+static uint8_t g_av2_bmp[14 + 40 + 256 * 4 + 16 * AV2_BMP_H];
+
+static void av2_pal_color(int kind, uint32_t i, uint8_t *rgb)
+{
+    if (kind == 1)
+    {
+        rgb[0] = rgb[1] = rgb[2] = (uint8_t)i;
+    }
+    else
+    {
+        rgb[0] = (uint8_t)(3u * i);
+        rgb[1] = (uint8_t)(255u - 3u * i);
+        rgb[2] = (uint8_t)(5u * i);
+    }
+}
+
+static uint8_t av2_bmp_index(uint32_t x, uint32_t y)
+{
+    return (uint8_t)(x * 19u + y * 37u);
+}
+
+static size_t av2_build_bmp8(int kind, uint32_t used)
+{
+    uint32_t entries = (used == 0u) ? 256u : used;
+    uint32_t stride = (AV2_BMP_W + 3u) & ~3u;
+    uint32_t off = 14u + 40u + entries * 4u;
+    uint32_t total = off + stride * AV2_BMP_H;
+    uint8_t *p = g_av2_bmp;
+    uint32_t i;
+    uint32_t x;
+    uint32_t y;
+
+    if (entries > 256u) entries = 256u, off = 14u + 40u + 256u * 4u,
+                        total = off + stride * AV2_BMP_H;
+    memset(p, 0, sizeof(g_av2_bmp));
+    p[0] = 'B'; p[1] = 'M';
+    p[2] = (uint8_t)total; p[3] = (uint8_t)(total >> 8);
+    p[10] = (uint8_t)off; p[11] = (uint8_t)(off >> 8);
+    p[14] = 40;
+    p[18] = (uint8_t)AV2_BMP_W;
+    p[22] = (uint8_t)AV2_BMP_H;
+    p[26] = 1;
+    p[28] = 8;
+    p[46] = (uint8_t)used; p[47] = (uint8_t)(used >> 8);
+    for (i = 0; i < entries; i++)
+    {
+        uint8_t rgb[3];
+
+        av2_pal_color(kind, i, rgb);
+        p[54u + i * 4u] = rgb[2];
+        p[54u + i * 4u + 1u] = rgb[1];
+        p[54u + i * 4u + 2u] = rgb[0];
+    }
+    for (y = 0; y < AV2_BMP_H; y++)         /* file rows run bottom-up */
+    {
+        for (x = 0; x < AV2_BMP_W; x++)
+        {
+            p[off + (AV2_BMP_H - 1u - y) * stride + x] = av2_bmp_index(x, y);
+        }
+    }
+    return total;
+}
+
+static uint8_t g_av2_rows[AV2_BMP_W * AV2_BMP_H * 3u];
+static uint32_t g_av2_row_count;
+
+static void av2_line_cb(const void *line, uint32_t y, void *user_data)
+{
+    (void)user_data;
+    if (y < AV2_BMP_H)
+    {
+        memcpy(g_av2_rows + y * AV2_BMP_W * 3u, line, AV2_BMP_W * 3u);
+        g_av2_row_count++;
+    }
+}
+
+/* 0 when `px` holds the picture as RGB888 through the table */
+static int av2_bmp_colors_ok(const uint8_t *px, int kind, uint32_t used)
+{
+    uint32_t x;
+    uint32_t y;
+
+    for (y = 0; y < AV2_BMP_H; y++)
+    {
+        for (x = 0; x < AV2_BMP_W; x++)
+        {
+            uint8_t want[3] = { 0, 0, 0 };
+            uint8_t i = av2_bmp_index(x, y);
+
+            if (used == 0u || i < used) av2_pal_color(kind, i, want);
+            if (memcmp(px + (y * AV2_BMP_W + x) * 3u, want, 3) != 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_audit_v2_image(void)
+{
+    static uint8_t px[AV2_BMP_W * AV2_BMP_H * 3u];
+    FM_Image img;
+    FM_ImageInfo info;
+    FM_Result r;
+    size_t len;
+    char msg[96];
+
+    printf("\n[External audit v2: image]\n");
+    restore_posix_root();
+
+#if FM_USE_PNG
+    {
+        static const uint16_t dims[][2] = {
+            { 640, 480 }, { 800, 600 }, { 1280, 800 }, { 4369, 9 },
+            { 1, 1 }, { 5461, 3 }, { 300, 219 }
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(dims) / sizeof(dims[0]); i++)
+        {
+            int why;
+            char name[64];
+
+            (void)snprintf(name, sizeof(name),
+                           "IMG-01: PNG encode %ux%u is a valid file",
+                           (unsigned)dims[i][0], (unsigned)dims[i][1]);
+            TEST(name);
+            why = av2_png_roundtrip(dims[i][0], dims[i][1]);
+            if (why != 0)
+            {
+                (void)snprintf(msg, sizeof(msg), "step %d", why);
+                FAIL(msg);
+            }
+            else
+            {
+                PASS();
+            }
+        }
+    }
+
+    TEST("IMG-02: a buffer sized from Image_GetInfo holds every PNG");
+    {
+        static const char *const names[] = {
+            "big_rgb8_a7", "ga16_a7", "ga8", "gray1", "gray16", "gray2_a7",
+            "gray4", "gray8_a7", "pal1_a7", "pal2", "pal4_a7", "pal8_a7",
+            "rgb16", "rgb8_a7", "rgba16_a7", "rgba8_a7", "tall_gray4_a7"
+        };
+        size_t i;
+        int why = 0;
+
+        for (i = 0; i < sizeof(names) / sizeof(names[0]) && why == 0; i++)
+        {
+            char path[96];
+
+            (void)snprintf(path, sizeof(path), "/test/vectors/png/%s.png",
+                           names[i]);
+            why = av2_info_matches_load(path);
+            if (why != 0)
+            {
+                (void)snprintf(msg, sizeof(msg), "%s: step %d", names[i], why);
+            }
+        }
+        if (why != 0) FAIL(msg); else PASS();
+    }
+#endif /* FM_USE_PNG */
+
+    TEST("IMG-02: the same for BMP and JPEG");
+    {
+        int why = av2_info_matches_load("/test/vectors/tiny64.bmp");
+
+#if FM_USE_JPEG
+        if (why == 0)
+        {
+            why = 10 * av2_info_matches_load("/test/vectors/tiny64.jpg");
+        }
+#endif
+        if (why != 0)
+        {
+            (void)snprintf(msg, sizeof(msg), "step %d", why);
+            FAIL(msg);
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("IMG-03: 8-bpp BMP with a colour table comes out in its colours");
+    len = av2_build_bmp8(0, 0u);
+    memset(&img, 0, sizeof(img));
+    memset(px, 0xEE, sizeof(px));
+    r = Image_DecodeBMP(g_av2_bmp, len, &img, px, sizeof(px));
+    if (r != FM_OK) { CHECK_RESULT(r, "decode"); }
+    else if (img.format != FM_PIXEL_RGB888 || img.channels != 3u)
+    {
+        FAIL("indices returned as GRAY8");
+    }
+    else if (av2_bmp_colors_ok(px, 0, 0u) != 0) FAIL("wrong colours");
+    else PASS();
+
+    TEST("IMG-03: Image_GetInfo and Image_Load agree on that file");
+    r = File_WriteAll("/av2_pal.bmp", g_av2_bmp, len);
+    memset(&info, 0, sizeof(info));
+    if (r == FM_OK) r = Image_GetInfo("/av2_pal.bmp", &info);
+    if (r != FM_OK) { CHECK_RESULT(r, "info"); }
+    else if (info.channels != 3u || info.bit_depth != 24u ||
+             info.data_size != (uint64_t)AV2_BMP_W * AV2_BMP_H * 3u)
+    {
+        FAIL("reported as one channel");
+    }
+    else
+    {
+        int why = av2_info_matches_load("/av2_pal.bmp");
+
+        if (why != 0)
+        {
+            (void)snprintf(msg, sizeof(msg), "step %d", why);
+            FAIL(msg);
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("IMG-03: the same picture row by row (Image_StreamDecode)");
+    {
+        FM_Stream st;
+
+        memset(&img, 0, sizeof(img));
+        memset(g_av2_rows, 0xEE, sizeof(g_av2_rows));
+        g_av2_row_count = 0;
+        r = Stream_InitMemoryRead(&st, g_av2_bmp, len);
+        if (r == FM_OK)
+        {
+            r = Image_StreamDecode(&st, &img, av2_line_cb, NULL, NULL);
+            Stream_Close(&st);
+        }
+        if (r != FM_OK) { CHECK_RESULT(r, "stream decode"); }
+        else if (g_av2_row_count != AV2_BMP_H || img.channels != 3u ||
+                 av2_bmp_colors_ok(g_av2_rows, 0, 0u) != 0)
+        {
+            FAIL("rows are not the picture");
+        }
+        else PASS();
+    }
+
+    TEST("IMG-03: scaled down to fit a small buffer, still in colour");
+    {
+        /* 6x3 at most: every output pixel is one of the source pixels */
+        static uint8_t small[6u * 3u * 3u + 2u];
+
+        memset(&img, 0, sizeof(img));
+        r = Image_DecodeBMP(g_av2_bmp, len, &img, small, sizeof(small));
+        if (r != FM_OK) { CHECK_RESULT(r, "decode small"); }
+        else if (img.channels != 3u || img.width == 0u ||
+                 img.width > AV2_BMP_W || img.height > AV2_BMP_H)
+        {
+            FAIL("layout");
+        }
+        else
+        {
+            uint8_t want[3];
+
+            av2_pal_color(0, av2_bmp_index(0, 0), want);
+            if (memcmp(small, want, 3) != 0) FAIL("first pixel");
+            else PASS();
+        }
+    }
+
+    TEST("IMG-03: short colour table: missing entries are black");
+    len = av2_build_bmp8(0, 16u);
+    memset(&img, 0, sizeof(img));
+    r = Image_DecodeBMP(g_av2_bmp, len, &img, px, sizeof(px));
+    if (r != FM_OK) { CHECK_RESULT(r, "decode"); }
+    else if (img.channels != 3u || av2_bmp_colors_ok(px, 0, 16u) != 0)
+    {
+        FAIL("wrong colours");
+    }
+    else PASS();
+
+    TEST("IMG-03: grey-ramp colour table is still GRAY8, bytes untouched");
+    len = av2_build_bmp8(1, 0u);
+    memset(&img, 0, sizeof(img));
+    memset(px, 0xEE, sizeof(px));
+    r = Image_DecodeBMP(g_av2_bmp, len, &img, px, sizeof(px));
+    if (r != FM_OK) { CHECK_RESULT(r, "decode"); }
+    else if (img.format != FM_PIXEL_GRAY8 || img.channels != 1u ||
+             img.data_size != (uint64_t)AV2_BMP_W * AV2_BMP_H)
+    {
+        FAIL("layout");
+    }
+    else
+    {
+        uint32_t x;
+        uint32_t y;
+        int bad = 0;
+
+        for (y = 0; y < AV2_BMP_H; y++)
+        {
+            for (x = 0; x < AV2_BMP_W; x++)
+            {
+                if (px[y * AV2_BMP_W + x] != av2_bmp_index(x, y)) bad = 1;
+            }
+        }
+        if (bad || px[AV2_BMP_W * AV2_BMP_H] != 0xEE) FAIL("pixels");
+        else PASS();
+    }
+
+    TEST("IMG-03: colour table larger than 256 entries is refused");
+    len = av2_build_bmp8(0, 0u);
+    g_av2_bmp[46] = 0x2C; g_av2_bmp[47] = 0x01;         /* 300 */
+    memset(&img, 0, sizeof(img));
+    r = Image_DecodeBMP(g_av2_bmp, len, &img, px, sizeof(px));
+    if (r == FM_ERR_CORRUPTED) PASS();
+    else { (void)snprintf(msg, sizeof(msg), "got %d", (int)r); FAIL(msg); }
+
+    (void)File_Delete("/av2_pal.bmp");
+}
+#endif /* FM_USE_IMAGE */
