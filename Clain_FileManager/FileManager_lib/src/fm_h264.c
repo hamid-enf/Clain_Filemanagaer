@@ -120,7 +120,7 @@ FM_Result H264_GetOutputSize(void *ctx, uint16_t *width, uint16_t *height)
 }
 
 /* ------------------------------------------------------------------ */
-/* YUV420p -> RGB888 (BT.601, integer math)                             */
+/* YUV420p -> RGB888 (BT.601 or BT.709, integer math)                   */
 /*                                                                      */
 /* H.264 luma is 16..235 and chroma 16..240 ("video range") unless the  */
 /* stream's VUI sets video_full_range_flag; a stream without VUI is     */
@@ -128,7 +128,29 @@ FM_Result H264_GetOutputSize(void *ctx, uint16_t *width, uint16_t *height)
 /* (as this file did for every stream) gives black at 16 and white at   */
 /* 235: a flat, grey picture, about 25 dB away from the reference       */
 /* decoder's output.                                                    */
+/*                                                                      */
+/* The matrix is BT.709 when the VUI says so (matrix_coefficients 1:    */
+/* what HD encoders write) and BT.601 otherwise, also when the VUI is   */
+/* silent.  With the BT.601 matrix a BT.709 picture has its reds and    */
+/* greens off by up to 30 levels.                                       */
 /* ------------------------------------------------------------------ */
+typedef struct
+{
+    int16_t y_off;          /* subtracted from luma                     */
+    int16_t y_gain;         /* the rest in 1/256                        */
+    int16_t rv;
+    int16_t gu;
+    int16_t gv;
+    int16_t bu;
+} YuvMatrix;
+
+static const YuvMatrix k_yuv_matrix[4] = {
+    { 16, 298, 409, 100, 208, 516 },    /* BT.601, video range */
+    {  0, 256, 359,  88, 183, 454 },    /* BT.601, full range  */
+    { 16, 298, 459,  55, 136, 541 },    /* BT.709, video range */
+    {  0, 256, 403,  48, 120, 475 }     /* BT.709, full range  */
+};
+
 static int clamp8(int v)
 {
     if (v < 0)   return 0;
@@ -146,7 +168,7 @@ static int clamp8(int v)
 static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
                              uint32_t left, uint32_t top,
                              uint32_t crop_w, uint32_t crop_h,
-                             FM_Bool full_range, uint8_t *rgb)
+                             const YuvMatrix *m, uint8_t *rgb)
 {
     const uint8_t *Y = yuv;
     const uint8_t *U = yuv + (size_t)w * h;
@@ -172,21 +194,12 @@ static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
             int b;
             uint8_t *p = rgb + ((size_t)y * crop_w + x) * 3u;
 
-            if (full_range)
-            {
-                r = yy + ((359 * vv) >> 8);
-                g = yy - ((88 * uu + 183 * vv) >> 8);
-                b = yy + ((454 * uu) >> 8);
-            }
-            else
-            {
-                /* 255/219 on luma, 255/224 on chroma, rounded */
-                const int c = 298 * (yy - 16) + 128;
+            /* video range: 255/219 on luma, 255/224 on chroma; rounded */
+            const int c = m->y_gain * (yy - m->y_off) + 128;
 
-                r = (c + 409 * vv) >> 8;
-                g = (c - 100 * uu - 208 * vv) >> 8;
-                b = (c + 516 * uu) >> 8;
-            }
+            r = (c + m->rv * vv) >> 8;
+            g = (c - m->gu * uu - m->gv * vv) >> 8;
+            b = (c + m->bu * uu) >> 8;
 
             p[0] = (uint8_t)clamp8(r);
             p[1] = (uint8_t)clamp8(g);
@@ -527,7 +540,11 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
                 return FM_ERR_TOO_LARGE;
             }
             yuv420_to_rgb888(pic, buf_w, buf_h, left, top, cw, ch,
-                             (FM_Bool)(h264bsdVideoRange(h->storage) != 0u),
+                             &k_yuv_matrix[
+                                 ((h264bsdMatrixCoefficients(h->storage) == 1u)
+                                      ? 2u : 0u) +
+                                 ((h264bsdVideoRange(h->storage) != 0u)
+                                      ? 1u : 0u)],
                              (uint8_t *)frame_out);
             h->out_w = (uint16_t)cw;
             h->out_h = (uint16_t)ch;

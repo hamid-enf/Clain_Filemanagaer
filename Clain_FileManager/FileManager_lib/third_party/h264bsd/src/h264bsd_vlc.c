@@ -202,7 +202,9 @@ u32 h264bsdDecodeExpGolombUnsigned(strmData_t *pStrmData, u32 *codeNum)
         if (bits == END_OF_STREAM)
             return(HANTRO_NOK);
 
-        *codeNum = (1 << numZeros) - 1 + bits;
+        /* FileManager patch: unsigned shift.  numZeros reaches 31 on a
+         * damaged stream, and 1 << 31 is undefined for an int. */
+        *codeNum = ((u32)1 << numZeros) - 1 + bits;
 
     }
 

@@ -1190,6 +1190,17 @@ static void test_video_picture_colours(void)
     {
         FAIL(m);
     }
+
+    TEST("H.264: a BT.709 stream (VUI matrix_coefficients 1) keeps its red");
+    if (av3_patches("/test/vectors/mp4_h264_patches_709.mp4",
+                    FM_VIDEO_CODEC_H264, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
 #endif
 
 #if FM_USE_MJPEG
