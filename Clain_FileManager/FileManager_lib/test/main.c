@@ -20333,6 +20333,9 @@ int main(void)
     RUN_SUITE(test_coverage);
     RUN_SUITE(test_sync_report);
     RUN_SUITE(test_audit_v2_file);
+#if FM_USE_VIDEO
+    RUN_SUITE(test_audit_v2_video);
+#endif
 #if FM_USE_THREADS && FM_HOST_BUILD
     RUN_SUITE(test_threads);
     RUN_SUITE(test_threads_wide);

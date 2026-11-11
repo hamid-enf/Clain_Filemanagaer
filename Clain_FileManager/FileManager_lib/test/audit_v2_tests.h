@@ -797,6 +797,110 @@ static void av2_explorer(void)
 }
 #endif
 
+/* SUSP-01 and what it led to: a tree deeper than the backend has
+ * directory handles (FM_MAX_OPEN_DIRS) is scanned, measured, copied and
+ * deleted */
+static FM_Result av2_count_cb(const FM_FileInfo *info, void *user)
+{
+    uint32_t *n = (uint32_t *)user;
+
+    if (info->type == FM_ITEM_FILE) n[0]++; else n[1]++;
+    return FM_OK;
+}
+
+static FM_Result av2_deep_tree(int kind)
+{
+    const char *root = "";
+    char top[64];
+    char copy[64];
+    char path[FM_PATH_MAX];
+    char file[FM_PATH_MAX];
+    uint32_t levels = FM_MAX_OPEN_DIRS + 2u;
+    uint32_t n[2] = { 0, 0 };
+    uint64_t size = 0;
+    FM_Bool exists = FM_TRUE;
+    uint32_t i;
+    FM_Result r;
+
+    r = av2_mount(kind, &root);
+    av2_path(top, sizeof(top), root, "av2_tree");
+    av2_path(copy, sizeof(copy), root, "av2_copy");
+    (void)Directory_DeleteRecursive(top);
+    (void)Directory_DeleteRecursive(copy);
+    (void)strcpy(path, top);
+    if (r == FM_OK) r = Directory_Create(path);
+    for (i = 0; i < levels && r == FM_OK; i++)
+    {
+        /* a file in front of and one behind the subdirectory, so that
+         * coming back up has something left to do */
+        (void)strcpy(file, path);
+        (void)strcat(file, "/a.txt");
+        r = File_WriteAll(file, "12345", 5);
+        (void)strcat(path, "/d");
+        if (r == FM_OK) r = Directory_Create(path);
+        if (r == FM_OK && i == 0u)
+        {
+            (void)strcpy(file, top);
+            (void)strcat(file, "/z.txt");
+            r = File_WriteAll(file, "678", 3);
+        }
+    }
+    if (r != FM_OK) printf("[build] ");
+    if (r == FM_OK)
+    {
+        r = Directory_ScanRecursive(top, av2_count_cb, NULL, n, NULL);
+        if (r != FM_OK) printf("[scan] ");
+        else if (n[0] != levels + 1u || n[1] != levels)
+        {
+            printf("[scan saw %u files, %u dirs] ", (unsigned)n[0], (unsigned)n[1]);
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    if (r == FM_OK)
+    {
+        r = Directory_Size(top, &size);
+        if (r != FM_OK) printf("[size] ");
+        else if (size != (uint64_t)levels * 5u + 3u)
+        {
+            printf("[size %u] ", (unsigned)size);
+            r = FM_ERR_INTERNAL;
+        }
+    }
+    if (r == FM_OK)
+    {
+        r = Directory_Copy(top, copy, NULL, NULL);
+        if (r != FM_OK) printf("[copy] ");
+    }
+    if (r == FM_OK)
+    {
+        n[0] = 0;
+        n[1] = 0;
+        r = Directory_ScanRecursive(copy, av2_count_cb, NULL, n, NULL);
+        if (r == FM_OK && (n[0] != levels + 1u || n[1] != levels))
+        {
+            printf("[copy has %u files, %u dirs] ", (unsigned)n[0], (unsigned)n[1]);
+            r = FM_ERR_INTERNAL;
+        }
+        /* the deepest file made it, with its content */
+        (void)strcpy(path, copy);
+        for (i = 0; i + 1u < levels; i++) (void)strcat(path, "/d");
+        (void)strcat(path, "/a.txt");
+        if (r == FM_OK) r = av2_expect(path, "12345");
+    }
+    if (r == FM_OK)
+    {
+        r = Directory_DeleteRecursive(top);
+        if (r != FM_OK) printf("[delete] ");
+    }
+    if (r == FM_OK) r = Directory_DeleteRecursive(copy);
+    if (r == FM_OK) r = Directory_Exists(top, &exists);
+    if (r == FM_OK && exists) r = FM_ERR_EXISTS;
+    (void)Directory_DeleteRecursive(top);
+    (void)Directory_DeleteRecursive(copy);
+    av2_unmount(kind);
+    return r;
+}
+
 static void test_audit_v2_file(void)
 {
     printf("\n[External audit v2: files]\n");
@@ -815,6 +919,7 @@ static void test_audit_v2_file(void)
     av2_stream_rebind();
     av2_posix_open_dir();
     av2_each_backend("seek in front of the first byte", av2_seek_before_start);
+    av2_each_backend("tree deeper than FM_MAX_OPEN_DIRS", av2_deep_tree);
 #if FM_USE_FMFS && FM_USE_SAFE_WRITE
     av2_safe_write();
 #endif
@@ -822,3 +927,131 @@ static void test_audit_v2_file(void)
     av2_explorer();
 #endif
 }
+
+/* ================================================================ */
+/* Video part                                                        */
+/* ================================================================ */
+#if FM_USE_VIDEO
+/* VID-01: MP4 container boxes nested without end */
+static uint8_t g_av2_mp4[4096];
+static uint8_t g_av2_nest[8192];
+
+/* The test MP4 with its "moov" wrapped in `extra` more "moov" boxes */
+static FM_Result av2_nested_mp4(uint32_t extra, size_t *len)
+{
+    size_t mp4_len = 0;
+    size_t ftyp;
+    size_t moov;
+    size_t out = 0;
+    uint32_t i;
+    FM_Result r;
+
+    g_tst_mp4_len_size = 2u;
+    g_tst_mp4_hevc = 1;
+    r = build_mp4((const uint8_t *)"SPSx", 4, (const uint8_t *)"PPS", 3,
+                  (const uint8_t *)"IDR00", 5, (const uint8_t *)"P1", 2,
+                  (const uint8_t *)"P2", 2, g_av2_mp4, &mp4_len);
+    g_tst_mp4_len_size = 4u;
+    g_tst_mp4_hevc = 0;
+    if (r != FM_OK) return r;
+    ftyp = ((size_t)g_av2_mp4[2] << 8) | g_av2_mp4[3];
+    if (ftyp + 8u > mp4_len || memcmp(g_av2_mp4 + ftyp + 4u, "moov", 4) != 0)
+    {
+        return FM_ERR_INTERNAL;
+    }
+    moov = ((size_t)g_av2_mp4[ftyp + 2u] << 8) | g_av2_mp4[ftyp + 3u];
+    if (mp4_len + 8u * extra > sizeof(g_av2_nest)) return FM_ERR_TOO_LARGE;
+    memcpy(g_av2_nest, g_av2_mp4, ftyp);
+    out = ftyp;
+    for (i = 0; i < extra; i++)
+    {
+        size_t size = moov + 8u * (extra - i);
+
+        g_av2_nest[out++] = 0;
+        g_av2_nest[out++] = 0;
+        g_av2_nest[out++] = (uint8_t)(size >> 8);
+        g_av2_nest[out++] = (uint8_t)size;
+        memcpy(g_av2_nest + out, "moov", 4);
+        out += 4u;
+    }
+    memcpy(g_av2_nest + out, g_av2_mp4 + ftyp, mp4_len - ftyp);
+    out += mp4_len - ftyp;
+    *len = out;
+    return FM_OK;
+}
+
+static void test_audit_v2_video(void)
+{
+    static FM_Video vid;
+    size_t len = 0;
+    FM_Result r;
+    FM_Result q;
+
+    printf("\n[External audit v2: video]\n");
+    restore_posix_root();
+
+    TEST("VID-01: MP4 boxes nested a little still open");
+    r = av2_nested_mp4(2u, &len);
+    if (r == FM_OK) r = File_WriteAll("/av2_nest.mp4", g_av2_nest, len);
+    memset(&vid, 0, sizeof(vid));
+    if (r == FM_OK) r = Video_Open("/av2_nest.mp4", &vid);
+    if (r == FM_OK)
+    {
+        if (vid.info.frame_count != 3u) r = FM_ERR_INVALID_FORMAT;
+        (void)Video_Close(&vid);
+    }
+    CHECK_RESULT(r, "nested twice");
+
+    TEST("VID-01: MP4 boxes nested past the limit are refused");
+    r = av2_nested_mp4(12u, &len);
+    if (r == FM_OK) r = File_WriteAll("/av2_nest.mp4", g_av2_nest, len);
+    if (r != FM_OK)
+    {
+        FAIL("set-up");
+    }
+    else
+    {
+        /* the search used to follow the boxes as deep as the file went,
+         * one stack frame per level */
+        memset(&vid, 0, sizeof(vid));
+        q = Video_Open("/av2_nest.mp4", &vid);
+        if (q == FM_OK)
+        {
+            (void)Video_Close(&vid);
+            FAIL("opened: the nesting was followed without a limit");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+
+    TEST("VID-01: 750 nested boxes, nothing else");
+    {
+        uint32_t i;
+        const uint32_t n = 750u;
+
+        memset(g_av2_nest, 0, sizeof(g_av2_nest));
+        memcpy(g_av2_nest, "\0\0\0\014ftypisom", 12);
+        len = 12u;
+        for (i = 0; i < n; i++)
+        {
+            uint32_t size = 8u * (n - i);
+
+            g_av2_nest[len++] = 0;
+            g_av2_nest[len++] = 0;
+            g_av2_nest[len++] = (uint8_t)(size >> 8);
+            g_av2_nest[len++] = (uint8_t)size;
+            memcpy(g_av2_nest + len, "moov", 4);
+            len += 4u;
+        }
+        r = File_WriteAll("/av2_nest.mp4", g_av2_nest, len);
+        memset(&vid, 0, sizeof(vid));
+        q = (r == FM_OK) ? Video_Open("/av2_nest.mp4", &vid) : FM_OK;
+        if (r != FM_OK) FAIL("set-up");
+        else if (q == FM_OK) { (void)Video_Close(&vid); FAIL("opened"); }
+        else PASS();
+    }
+    (void)File_Delete("/av2_nest.mp4");
+}
+#endif /* FM_USE_VIDEO */

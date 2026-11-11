@@ -690,93 +690,142 @@ FM_Result Directory_List(const char *path, const char *filter,
 }
 
 /* ------------------------------------------------------------------ */
-/* Recursive scan                                                      */
+/* Tree walks                                                          */
+/*                                                                     */
+/* Scanning, deleting and copying a tree are loops, not recursion.     */
+/*                                                                     */
+/* A recursive walk keeps one open directory per level, and FatFs,     */
+/* littlefs and FMFS have FM_MAX_OPEN_DIRS (4) of them: a tree five    */
+/* levels deep could be copied (that walk was rewritten earlier) but   */
+/* not scanned, measured or deleted -- FM_ERR_NO_MEMORY.  It also put  */
+/* 0.8 to 1.6 KB on the stack per level, up to 17 levels deep, which   */
+/* no 2-4 KB task stack survives.                                      */
+/*                                                                     */
+/* Here one path buffer is extended and shortened in place, exactly    */
+/* one directory is open at any time, and a level is left by closing   */
+/* it and remembering how many of its entries are done; coming back    */
+/* reopens it and skips those.  The stack no longer depends on the     */
+/* depth.  The skip relies on a directory listing its entries in the   */
+/* same order twice, so a scan callback must not add or remove entries */
+/* in the tree it is being shown.                                      */
 /* ------------------------------------------------------------------ */
-static FM_Result scan_recursive(const char *path, FM_ItemCallback callback,
-                                FM_ProgressCallback progress,
-                                void *user_data, volatile FM_Bool *cancel,
-                                uint32_t depth, uint64_t *processed)
+static FM_Result walk_push(char *path, const char *name)
 {
-    FM_Dir d;
-    FM_DirEntry e;
-    FM_Result r;
+    size_t n = strlen(path);
+    size_t m = strlen(name);
+    size_t slash = (n > 0u && path[n - 1u] != '/') ? 1u : 0u;
 
-    if (depth > FM_DIR_MAX_DEPTH)
+    if (n + slash + m >= (size_t)FM_PATH_MAX)
     {
         return FM_ERR_TOO_LARGE;
     }
-    if (cancel != NULL && *cancel)
+    if (slash != 0u)
     {
-        return FM_ERR_CANCELLED;
+        path[n++] = '/';
     }
+    memcpy(path + n, name, m + 1u);
+    return FM_OK;
+}
 
-    Directory_Init(&d);
-    r = Directory_OpenEx(&d, path);
-    if (r != FM_OK)
+static void walk_pop(char *path)
+{
+    char *cut = strrchr(path, '/');
+
+    if (cut == NULL)
     {
-        return r;
+        path[0] = '\0';
     }
+    else if (cut == path)
+    {
+        path[1] = '\0';         /* "/name" -> "/" */
+    }
+    else
+    {
+        *cut = '\0';
+    }
+}
+
+static FM_Result scan_recursive(const char *root, FM_ItemCallback callback,
+                                FM_ProgressCallback progress,
+                                void *user_data, volatile FM_Bool *cancel,
+                                uint64_t *processed)
+{
+    char path[FM_PATH_MAX];
+    uint32_t done[FM_DIR_MAX_DEPTH + 1u];   /* entries handled, per level */
+    uint32_t depth = 0;
+    FM_Dir d;
+    FM_DirEntry e;
+    FM_FileInfo info;
+    FM_Result r;
+
+    if (strlen(root) >= sizeof(path))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    (void)strcpy(path, root);
+    done[0] = 0;
+
     for (;;)
     {
-        FM_FileInfo info;
+        FM_Bool descend = FM_FALSE;
+        uint32_t skip;
 
-        memset(&e, 0, sizeof(e));
-        r = Directory_Read(&d, &e);
-        if (r == FM_ERR_EOF)
-        {
-            break;
-        }
-        if (r != FM_OK)
-        {
-            (void)Directory_Close(&d);
-            return r;
-        }
         if (cancel != NULL && *cancel)
         {
-            (void)Directory_Close(&d);
             return FM_ERR_CANCELLED;
         }
-
-        memset(&info, 0, sizeof(info));
-        (void)strcpy(info.name, e.name);
-        info.size = e.size;
-        info.type = e.type;
-        info.attributes = e.attributes;
-        info.modified = e.timestamp;
+        Directory_Init(&d);
+        r = Directory_OpenEx(&d, path);
+        if (r != FM_OK)
         {
-            char full[FM_PATH_MAX];
-
-            if (Path_Join(path, e.name, full, sizeof(full)) != FM_OK)
-            {
-                (void)Directory_Close(&d);
-                return FM_ERR_TOO_LARGE;
-            }
-            (void)strcpy(info.path, full);
+            return r;
         }
-
-        if (e.type == FM_ITEM_DIR)
+        for (skip = 0; skip < done[depth] && r == FM_OK; skip++)
         {
+            r = Directory_Read(&d, &e);
+        }
+        while (r == FM_OK)
+        {
+            memset(&e, 0, sizeof(e));
+            r = Directory_Read(&d, &e);
+            if (r != FM_OK)
+            {
+                break;                      /* end of this level, or error */
+            }
+            if (cancel != NULL && *cancel)
+            {
+                r = FM_ERR_CANCELLED;
+                break;
+            }
+            done[depth]++;
+
+            memset(&info, 0, sizeof(info));
+            (void)strcpy(info.name, e.name);
+            info.size = e.size;
+            info.type = e.type;
+            info.attributes = e.attributes;
+            info.modified = e.timestamp;
+            if (Path_Join(path, e.name, info.path, sizeof(info.path)) != FM_OK)
+            {
+                r = FM_ERR_TOO_LARGE;
+                break;
+            }
             r = callback(&info, user_data);
             if (r != FM_OK)
             {
-                (void)Directory_Close(&d);
-                return r;
+                break;
             }
-            r = scan_recursive(info.path, callback, progress, user_data,
-                               cancel, depth + 1, processed);
-            if (r != FM_OK)
+            if (e.type == FM_ITEM_DIR)
             {
-                (void)Directory_Close(&d);
-                return r;
-            }
-        }
-        else
-        {
-            r = callback(&info, user_data);
-            if (r != FM_OK)
-            {
-                (void)Directory_Close(&d);
-                return r;
+                if (depth >= FM_DIR_MAX_DEPTH)
+                {
+                    r = FM_ERR_TOO_LARGE;
+                }
+                else
+                {
+                    descend = FM_TRUE;
+                }
+                break;
             }
             if (processed != NULL)
             {
@@ -787,9 +836,26 @@ static FM_Result scan_recursive(const char *path, FM_ItemCallback callback,
                 progress(*processed, 0, user_data);
             }
         }
+        (void)Directory_Close(&d);
+
+        if (descend)
+        {
+            (void)strcpy(path, info.path);
+            depth++;
+            done[depth] = 0;
+            continue;
+        }
+        if (r != FM_ERR_EOF)
+        {
+            return r;
+        }
+        if (depth == 0u)
+        {
+            return FM_OK;
+        }
+        walk_pop(path);
+        depth--;
     }
-    (void)Directory_Close(&d);
-    return FM_OK;
 }
 
 FM_Result Directory_ScanRecursive(const char *path, FM_ItemCallback callback,
@@ -814,66 +880,86 @@ FM_Result Directory_ScanRecursive(const char *path, FM_ItemCallback callback,
     {
         return r;
     }
-    return scan_recursive(path, callback, progress, user_data, cancel, 0,
+    return scan_recursive(path, callback, progress, user_data, cancel,
                           &processed);
 }
 
 /* ------------------------------------------------------------------ */
 /* Recursive delete                                                    */
 /* ------------------------------------------------------------------ */
-static FM_Result delete_recursive(const char *path, uint32_t depth)
+/* `path` is a buffer of FM_PATH_MAX holding the directory to remove; it
+ * is used as the working path and holds the same string again at the
+ * end.  Files are removed as they are met; a subdirectory is entered
+ * with this level's handle closed, and when it is gone the level is
+ * read again from the start. */
+static FM_Result delete_recursive(char *path)
 {
+    uint32_t depth = 0;
     FM_Dir d;
     FM_DirEntry e;
     FM_Result r;
 
-    if (depth > FM_DIR_MAX_DEPTH)
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    Directory_Init(&d);
-    r = Directory_OpenEx(&d, path);
-    if (r != FM_OK)
-    {
-        return r;
-    }
     for (;;)
     {
-        r = Directory_Read(&d, &e);
-        if (r == FM_ERR_EOF)
-        {
-            break;
-        }
+        FM_Bool descend = FM_FALSE;
+
+        Directory_Init(&d);
+        r = Directory_OpenEx(&d, path);
         if (r != FM_OK)
         {
-            (void)Directory_Close(&d);
             return r;
         }
+        for (;;)
         {
-            char full[FM_PATH_MAX];
-
-            if (Path_Join(path, e.name, full, sizeof(full)) != FM_OK)
+            r = Directory_Read(&d, &e);
+            if (r != FM_OK)
             {
-                (void)Directory_Close(&d);
-                return FM_ERR_TOO_LARGE;
+                break;
+            }
+            r = walk_push(path, e.name);
+            if (r != FM_OK)
+            {
+                break;
             }
             if (e.type == FM_ITEM_DIR)
             {
-                r = delete_recursive(full, depth + 1);
+                descend = FM_TRUE;
+                break;
             }
-            else
-            {
-                r = File_Delete(full);
-            }
+            r = File_Delete(path);
+            walk_pop(path);
             if (r != FM_OK)
             {
-                (void)Directory_Close(&d);
-                return r;
+                break;
             }
         }
+        (void)Directory_Close(&d);
+
+        if (descend)
+        {
+            if (depth >= FM_DIR_MAX_DEPTH)
+            {
+                return FM_ERR_TOO_LARGE;
+            }
+            depth++;
+            continue;
+        }
+        if (r != FM_ERR_EOF)
+        {
+            return r;
+        }
+        r = Directory_Delete(path);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (depth == 0u)
+        {
+            return FM_OK;
+        }
+        walk_pop(path);
+        depth--;
     }
-    (void)Directory_Close(&d);
-    return Directory_Delete(path);
 }
 
 FM_Result Directory_DeleteRecursive(const char *path)
@@ -893,139 +979,119 @@ FM_Result Directory_DeleteRecursive(const char *path)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    return delete_recursive(normalized, 0);
+    return delete_recursive(normalized);
 }
 
 /* ------------------------------------------------------------------ */
 /* Copy / move trees                                                   */
 /* ------------------------------------------------------------------ */
-/* Each batch keeps the stack footprint small while still copying large
- * directories in a single pass. */
-#define DIR_COPY_BATCH 8
-
-/* Copy a directory tree.  A naive recursive copy opens the source
- * directory and keeps it open while recursing into every subfolder, so a
- * tree nested deeper than the directory-handle pool ("FM_MAX_OPEN_DIRS",
- * default 4) exhausts the backends' open-directory slots and fails with
- * FM_ERR_NO_MEMORY.  Instead we read the entries of one level in small
- * batches, close the source handle, copy the batch (recursing for
- * subfolders — the handle is already closed, so recursion pinpoints no
- * extra slot), then reopen and skip the already-copied entries for the
- * next batch.  At any moment at most one directory handle is held, so the
- * copy works for any depth up to FM_DIR_MAX_DEPTH. */
-static FM_Result dir_copy_recursive(const char *src, const char *dst,
+/* Copy a directory tree: the same loop as the scan, with a second path
+ * for the destination.  The source directory is opened before the
+ * destination is created, so a source that does not exist leaves
+ * nothing behind. */
+static FM_Result dir_copy_recursive(const char *src_root, const char *dst_root,
                                     FM_ProgressCallback progress,
-                                    void *user_data, uint32_t depth)
+                                    void *user_data)
 {
+    char src[FM_PATH_MAX];
+    char dst[FM_PATH_MAX];
+    uint32_t done[FM_DIR_MAX_DEPTH + 1u];
+    uint32_t depth = 0;
+    FM_Bool entered = FM_TRUE;      /* this level's destination is not made yet */
     FM_Dir d;
+    FM_DirEntry e;
     FM_Result r;
 
-    if (depth > FM_DIR_MAX_DEPTH)
+    if (strlen(src_root) >= sizeof(src) || strlen(dst_root) >= sizeof(dst))
     {
         return FM_ERR_TOO_LARGE;
     }
-    /* src را اول باز کن: اگر مبدأ وجود ندارد، پوشهٔ مقصد نسازیم و
-     * نیمه‌کاره جا نگذاریم (قبلاً dst ساخته می‌شد و بعد خطا می‌آمد). */
-    Directory_Init(&d);
-    r = Directory_OpenEx(&d, src);
-    if (r != FM_OK)
-    {
-        return r;
-    }
-    (void)Directory_Close(&d);
+    (void)strcpy(src, src_root);
+    (void)strcpy(dst, dst_root);
+    done[0] = 0;
 
-    r = Directory_Create(dst);
-    if (r != FM_OK && r != FM_ERR_EXISTS)
+    for (;;)
     {
-        return r;
-    }
+        FM_Bool descend = FM_FALSE;
+        uint32_t skip;
 
-    {
-        uint32_t processed = 0;
-        FM_Bool done = FM_FALSE;
-
-        while (!done)
+        Directory_Init(&d);
+        r = Directory_OpenEx(&d, src);
+        if (r != FM_OK)
         {
-            FM_DirEntry batch[DIR_COPY_BATCH];
-            uint32_t n = 0;
-            uint32_t i;
-            uint32_t skipped;
-
-            Directory_Init(&d);
-            r = Directory_OpenEx(&d, src);
-            if (r != FM_OK)
+            return r;
+        }
+        if (entered)
+        {
+            r = Directory_Create(dst);
+            if (r != FM_OK && r != FM_ERR_EXISTS)
             {
+                (void)Directory_Close(&d);
                 return r;
             }
-
-            /* Skip the entries already copied in earlier batches. */
-            skipped = 0;
-            while (skipped < processed)
+            entered = FM_FALSE;
+            r = FM_OK;
+        }
+        for (skip = 0; skip < done[depth] && r == FM_OK; skip++)
+        {
+            r = Directory_Read(&d, &e);
+        }
+        while (r == FM_OK)
+        {
+            r = Directory_Read(&d, &e);
+            if (r != FM_OK)
             {
-                FM_DirEntry tmp;
-
-                r = Directory_Read(&d, &tmp);
-                if (r == FM_ERR_EOF)
-                {
-                    break; /* fewer entries than expected */
-                }
-                if (r != FM_OK)
-                {
-                    (void)Directory_Close(&d);
-                    return r;
-                }
-                skipped++;
+                break;
             }
-
-            /* Collect the next batch. */
-            while (n < DIR_COPY_BATCH)
+            done[depth]++;
+            r = walk_push(src, e.name);
+            if (r != FM_OK)
             {
-                r = Directory_Read(&d, &batch[n]);
-                if (r == FM_ERR_EOF)
-                {
-                    done = FM_TRUE;
-                    break;
-                }
-                if (r != FM_OK)
-                {
-                    (void)Directory_Close(&d);
-                    return r;
-                }
-                n++;
+                break;
             }
-
-            /* Close the handle before processing so the recursive call for
-             * a subfolder never holds an ancestor directory handle. */
-            (void)Directory_Close(&d);
-
-            for (i = 0; i < n; i++)
+            r = walk_push(dst, e.name);
+            if (r != FM_OK)
             {
-                char sfull[FM_PATH_MAX];
-                char dfull[FM_PATH_MAX];
-
-                if (Path_Join(src, batch[i].name, sfull, sizeof(sfull)) != FM_OK ||
-                    Path_Join(dst, batch[i].name, dfull, sizeof(dfull)) != FM_OK)
+                walk_pop(src);
+                break;
+            }
+            if (e.type == FM_ITEM_DIR)
+            {
+                if (depth >= FM_DIR_MAX_DEPTH)
                 {
-                    return FM_ERR_TOO_LARGE;
-                }
-                if (batch[i].type == FM_ITEM_DIR)
-                {
-                    r = dir_copy_recursive(sfull, dfull, progress, user_data,
-                                           depth + 1);
+                    r = FM_ERR_TOO_LARGE;
                 }
                 else
                 {
-                    r = File_Copy(sfull, dfull, progress, user_data);
+                    descend = FM_TRUE;
                 }
-                if (r != FM_OK)
-                {
-                    return r;
-                }
-                processed++;
+                break;
             }
+            r = File_Copy(src, dst, progress, user_data);
+            walk_pop(src);
+            walk_pop(dst);
         }
+        (void)Directory_Close(&d);
+
+        if (descend)
+        {
+            depth++;
+            done[depth] = 0;
+            entered = FM_TRUE;
+            continue;
+        }
+        if (r != FM_ERR_EOF)
+        {
+            return r;
+        }
+        if (depth == 0u)
+        {
+            return FM_OK;
+        }
+        walk_pop(src);
+        walk_pop(dst);
+        depth--;
     }
-    return FM_OK;
 }
 
 /* How `b` relates to directory `a`: 0 unrelated, 1 the same path,
@@ -1102,7 +1168,7 @@ FM_Result Directory_Copy(const char *src, const char *dst,
     {
         existed = FM_TRUE;              /* unknown: never clean up */
     }
-    r = dir_copy_recursive(src, dst, progress, user_data, 0);
+    r = dir_copy_recursive(src, dst, progress, user_data);
     if (r != FM_OK && !existed)
     {
         /* The destination did not exist before, so everything in it is
@@ -1203,7 +1269,7 @@ FM_Result Directory_Size(const char *path, uint64_t *size)
         return FM_ERR_INVALID_ARGUMENT;
     }
     ctx.total = 0;
-    r = scan_recursive(path, size_cb, NULL, &ctx, NULL, 0, NULL);
+    r = scan_recursive(path, size_cb, NULL, &ctx, NULL, NULL);
     if (r != FM_OK)
     {
         return r;

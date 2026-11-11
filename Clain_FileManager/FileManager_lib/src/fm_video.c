@@ -1381,9 +1381,19 @@ static FM_Result mp4_walk(FM_Video *v, uint64_t start, uint64_t end,
 }
 
 /* Recursively search for a box, descending into container boxes only
- * (so leaf payloads like mdat or avc1 sample entries are never traversed). */
-static FM_Result mp4_find_deep(FM_Video *v, uint64_t start, uint64_t end,
-                               const char *wanted, Mp4Box *out)
+ * (so leaf payloads like mdat or avc1 sample entries are never traversed).
+ *
+ * The nesting is bounded.  The deepest chain a real file has is
+ * moov/trak/mdia/minf/stbl -- five levels -- but nothing stops a file
+ * from putting a "moov" inside a "moov" a thousand times, 8 bytes each,
+ * and every level is a stack frame: 6 KB of file overran a 64 KB stack.
+ * A file nested deeper than MP4_MAX_NEST is damaged, and is reported as
+ * such instead of being searched. */
+#define MP4_MAX_NEST 8u
+
+static FM_Result mp4_find_nested(FM_Video *v, uint64_t start, uint64_t end,
+                                 const char *wanted, Mp4Box *out,
+                                 uint32_t depth)
 {
     uint64_t pos = start;
 
@@ -1407,15 +1417,26 @@ static FM_Result mp4_find_deep(FM_Video *v, uint64_t start, uint64_t end,
             strcmp(box.type, "edts") == 0 || strcmp(box.type, "mvex") == 0 ||
             strcmp(box.type, "udta") == 0)
         {
-            r = mp4_find_deep(v, box.data, box.start + box.size, wanted, out);
-            if (r == FM_OK)
+            if (depth + 1u >= MP4_MAX_NEST)
             {
-                return FM_OK;
+                return FM_ERR_CORRUPTED;
+            }
+            r = mp4_find_nested(v, box.data, box.start + box.size, wanted,
+                                out, depth + 1u);
+            if (r == FM_OK || r == FM_ERR_CORRUPTED)
+            {
+                return r;       /* found, or nested too deep to go on */
             }
         }
         pos = box.start + box.size;
     }
     return FM_ERR_NOT_FOUND;
+}
+
+static FM_Result mp4_find_deep(FM_Video *v, uint64_t start, uint64_t end,
+                               const char *wanted, Mp4Box *out)
+{
+    return mp4_find_nested(v, start, end, wanted, out, 0u);
 }
 
 /* Append one parameter-set NAL (4-byte start code + `nlen` bytes read at
