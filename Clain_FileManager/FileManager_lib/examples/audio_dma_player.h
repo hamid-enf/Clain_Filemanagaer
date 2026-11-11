@@ -284,8 +284,25 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
         }
         else
         {
+            size_t room = state->half_samples - filled;
+            size_t ch = (state->channels != 0u) ? state->channels : 1u;
+
+            if (room < ch)
+            {
+                /* Odd half size with a stereo source: the slot that is
+                 * left cannot hold a frame.  Asking for it anyway is
+                 * refused by Audio_Read (it used to answer FM_ERR_EOF,
+                 * and that ended the track after the first half) --
+                 * silence it and finish the half, as above. */
+                while (filled < state->half_samples)
+                {
+                    dst[filled++] = 0;
+                }
+                ex13_audio_clean_half(state, half);
+                return FM_OK;
+            }
             r = Player_ReadAudio(&state->player, dst + filled,
-                                 state->half_samples - filled, &got);
+                                 room - (room % ch), &got);
             EX13_DEBUG_LOG("fill half %u: read r=%d got=%lu "
                            "filled=%lu\n",
                            (unsigned)half, (int)r, (unsigned long)got,
@@ -298,6 +315,17 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
             filled += got;
         }
         state->queued_samples += (filled - prev);
+
+        /* Pre-gain tap: raw decoded PCM, editable before volume/DSP.
+         * It has to run here, above the gain: placed after it, as it
+         * was, the "pre" tap saw the samples already scaled. */
+        if (state->pcm_tap_pre != NULL && filled > prev)
+        {
+            state->pcm_tap_pre(state->pcm_tap_pre_context, dst + prev,
+                               filled - prev, state->sample_rate,
+                               state->force_stereo ? (uint16_t)2u
+                                                   : state->channels);
+        }
 
         if (state->volume != (int16_t)0x7FFF)
         {
@@ -360,15 +388,6 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
                 dst[i] = (int16_t)acc;
             }
 #endif
-        }
-
-        /* Pre-gain tap: raw decoded PCM, editable before volume/DSP. */
-        if (state->pcm_tap_pre != NULL && filled > prev)
-        {
-            state->pcm_tap_pre(state->pcm_tap_pre_context, dst + prev,
-                               filled - prev, state->sample_rate,
-                               state->force_stereo ? (uint16_t)2u
-                                                   : state->channels);
         }
 
         /* Live tap: exactly what the speaker will get.  After the gain so

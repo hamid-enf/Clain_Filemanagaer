@@ -28,8 +28,11 @@ static FM_Bool ext_is(const char *path, const char *e)
 
 static FM_Bool is_audio_path(const char *path)
 {
+    /* What Audio_Open can play.  ".opus" (Ogg Opus) was missing; ".m4a"
+     * was listed, but that is AAC in an MP4 container, which Audio_Open
+     * refuses -- a scanned folder got entries that could not be played. */
     return ext_is(path, "wav") || ext_is(path, "mp3") ||
-           ext_is(path, "aac") || ext_is(path, "m4a") ||
+           ext_is(path, "aac") || ext_is(path, "opus") ||
            ext_is(path, "flac") || ext_is(path, "ogg");
 }
 
@@ -387,7 +390,8 @@ FM_Result Player_DecodeVideo(FM_Player *p, void *pixels, size_t cap,
 
 FM_Result Player_Seek(FM_Player *p, double seconds)
 {
-    if (p == NULL || seconds < 0.0)
+    /* written so that "not a number" is refused too */
+    if (p == NULL || !(seconds >= 0.0))
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -396,7 +400,10 @@ FM_Result Player_Seek(FM_Player *p, double seconds)
 #if FM_USE_VIDEO
         if (p->video.info.fps != 0)
         {
-            uint32_t frame = (uint32_t)(seconds * p->video.info.fps);
+            double at = seconds * (double)p->video.info.fps;
+            /* a time past what a frame number can hold is the last frame
+             * (converting it would be undefined) */
+            uint32_t frame = (at >= 4294967295.0) ? UINT32_MAX : (uint32_t)at;
 
             return Video_Seek(&p->video, frame);
         }
@@ -414,7 +421,7 @@ FM_Result Player_SeekFwd(FM_Player *p, double seconds)
 {
     double pos;
 
-    if (p == NULL || seconds < 0.0)
+    if (p == NULL || !(seconds >= 0.0))
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -426,7 +433,7 @@ FM_Result Player_SeekBack(FM_Player *p, double seconds)
 {
     double pos;
 
-    if (p == NULL || seconds < 0.0)
+    if (p == NULL || !(seconds >= 0.0))
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -478,20 +485,16 @@ double Player_GetDuration(const FM_Player *p)
         return 0.0;
     }
 #if FM_USE_AUDIO
-    /* WAV has a known data size; MP3/AAC durations are unknown until fully
-     * decoded (variable bitrate), so they report 0.0 here. */
-    if (p->audio.info.bits_per_sample != 0 && p->audio.info.sample_rate != 0 &&
-        p->audio.info.channels != 0)
+    /* From the length the reader worked out for the format at hand
+     * (FM_AudioInfo.total_frames).  This used to divide data_size by the
+     * size of a 16-bit frame, which is the duration only for 16-bit PCM:
+     * G.711 came out at half, ADPCM at a quarter, and FLAC / Vorbis /
+     * Opus -- whose data_size is the compressed file -- at anything.
+     * 0.0 = not known (AAC); MP3 without a Xing header is an estimate. */
+    if (p->audio.info.sample_rate != 0)
     {
-        uint64_t bytes_per_frame =
-            (uint64_t)p->audio.info.channels *
-            (uint64_t)(p->audio.info.bits_per_sample / 8u);
-
-        if (bytes_per_frame != 0 && p->audio.info.data_size != 0)
-        {
-            return (double)(p->audio.info.data_size / bytes_per_frame) /
-                   (double)p->audio.info.sample_rate;
-        }
+        return (double)p->audio.info.total_frames /
+               (double)p->audio.info.sample_rate;
     }
 #endif
     return 0.0;

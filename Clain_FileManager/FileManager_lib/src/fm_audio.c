@@ -117,7 +117,11 @@ static int16_t wav_alaw_decode(uint8_t a)
     int sign, exp, mant, sample;
 
     a ^= 0x55u;
-    sign = (a & 0x80u) ? -1 : 1;
+    /* G.711: in A-law the sign bit is SET for a positive sample (after
+     * the 0x55 toggle), the opposite of the natural reading -- and of
+     * what this line had.  Every sample came out negated: inaudible on
+     * its own, a cancellation when mixed with a correct source. */
+    sign = (a & 0x80u) ? 1 : -1;
     exp = (a >> 4) & 0x07;
     mant = a & 0x0F;
     sample = (mant << 4) + 8;
@@ -141,6 +145,61 @@ static const int16_t wav_adpcm_step[89] = {
  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767
 };
 static const int8_t wav_adpcm_index[16] = { -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8 };
+/* One IMA nibble: next sample of one channel */
+static int16_t wav_adpcm_nibble(int32_t *pred, int *idx, int nib)
+{
+    int step = wav_adpcm_step[*idx];
+    int diff = step >> 3;
+
+    if (nib & 1) diff += step >> 2;
+    if (nib & 2) diff += step >> 1;
+    if (nib & 4) diff += step;
+    if (nib & 8) *pred -= diff; else *pred += diff;
+    if (*pred > 32767) *pred = 32767; else if (*pred < -32768) *pred = -32768;
+    *idx += wav_adpcm_index[nib & 0x0F];
+    if (*idx > 88) *idx = 88; else if (*idx < 0) *idx = 0;
+    return (int16_t)*pred;
+}
+
+/* Stereo IMA block: a 4-byte header per channel, then groups of 8 bytes
+ * -- 4 bytes (8 samples) of the left channel, 4 bytes of the right.
+ * Output is interleaved L/R.  (The mono decoder below, fed such a block,
+ * read the right channel's header and data as left-channel samples.) */
+static size_t wav_adpcm_decode_block_stereo(const uint8_t *src, size_t src_bytes,
+                                            int16_t *dst, size_t dst_cap)
+{
+    int32_t pred[2];
+    int idx[2];
+    size_t out = 0;
+    size_t pos = 8;
+    int c;
+
+    if (src_bytes < 8u || dst_cap < 2u) return 0;
+    for (c = 0; c < 2; c++) {
+        pred[c] = (int32_t)(int16_t)(src[c * 4] | (src[c * 4 + 1] << 8));
+        idx[c] = src[c * 4 + 2];
+        if (idx[c] > 88) idx[c] = 88;
+        dst[out++] = (int16_t)pred[c];
+    }
+    while (pos + 8u <= src_bytes && out + 16u <= dst_cap) {
+        for (c = 0; c < 2; c++) {
+            int i;
+
+            for (i = 0; i < 4; i++) {
+                uint8_t b = src[pos + (size_t)c * 4u + (size_t)i];
+
+                dst[out + (size_t)(i * 2) * 2u + (size_t)c] =
+                    wav_adpcm_nibble(&pred[c], &idx[c], b & 0x0F);
+                dst[out + (size_t)(i * 2 + 1) * 2u + (size_t)c] =
+                    wav_adpcm_nibble(&pred[c], &idx[c], b >> 4);
+            }
+        }
+        out += 16u;
+        pos += 8u;
+    }
+    return out;
+}
+
 static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16_t *dst, size_t dst_cap)
 {
     if (src_bytes < 4) return 0;
@@ -174,7 +233,7 @@ static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16
     return out;
 }
 /* ------------------------------------------------------------------ */
-/* IMA-ADPCM WAV (format 0x11 / 0x02): block-framed decoding            */
+/* IMA-ADPCM WAV (format 0x11), mono or stereo: block-framed decoding   */
 /*                                                                     */
 /* IMA-ADPCM داده را در بلاک‌های مستقل فریم‌بندی می‌کند (هر بلاک       */
 /* سرصفحهٔ ۴ بایتی predictor/index خودش را دارد). دیکدر بی‌حالت است،   */
@@ -196,9 +255,40 @@ typedef struct {
 #define WAV_ADPCM_CARRY_OFF(st) (((size_t)(st)->block_align + 1u) & ~(size_t)1u)
 #define WAV_ADPCM_CARRY(st)     ((int16_t *)(WAV_ADPCM_RAW(st) + WAV_ADPCM_CARRY_OFF(st)))
 
+/* Most samples one block decodes to (the mono count; a stereo block
+ * gives fewer: 2 + 2 * (ba - 8) rounded down to whole groups). */
 static size_t wav_adpcm_carry_cap(uint16_t ba)
 {
     return (size_t)1u + ((size_t)ba - 4u) * 2u;
+}
+
+/* Sample frames in one full block */
+static size_t wav_adpcm_block_frames(uint16_t ba, uint16_t channels)
+{
+    if (channels == 2u)
+    {
+        return (ba < 8u) ? 0u : (size_t)1u + (((size_t)ba - 8u) / 8u) * 8u;
+    }
+    return wav_adpcm_carry_cap(ba);
+}
+
+/* Sample frames in `bytes` of block data (the last block may be short) */
+static uint64_t wav_adpcm_total_frames(uint64_t bytes, uint16_t ba,
+                                       uint16_t channels)
+{
+    uint64_t full = bytes / ba;
+    uint64_t tail = bytes % ba;
+    uint64_t frames = full * wav_adpcm_block_frames(ba, channels);
+
+    if (channels == 2u)
+    {
+        if (tail >= 8u) frames += 1u + ((tail - 8u) / 8u) * 8u;
+    }
+    else if (tail >= 4u)
+    {
+        frames += 1u + (tail - 4u) * 2u;
+    }
+    return frames;
 }
 
 static uint16_t wav_adpcm_block_align_of(const FM_Audio *a)
@@ -276,9 +366,13 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
              * tail bytes (bug #3). */
             take = got_bytes;
         }
-        got = wav_adpcm_decode_block(WAV_ADPCM_RAW(st), take,
-                                     WAV_ADPCM_CARRY(st),
-                                     wav_adpcm_carry_cap(st->block_align));
+        got = (a->info.channels == 2u)
+                  ? wav_adpcm_decode_block_stereo(
+                        WAV_ADPCM_RAW(st), take, WAV_ADPCM_CARRY(st),
+                        wav_adpcm_carry_cap(st->block_align))
+                  : wav_adpcm_decode_block(
+                        WAV_ADPCM_RAW(st), take, WAV_ADPCM_CARRY(st),
+                        wav_adpcm_carry_cap(st->block_align));
         st->carry_len = got;
         st->carry_pos = 0;
         if (got == 0u)                      /* < 4 bytes: tail junk */
@@ -298,6 +392,21 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
     return FM_OK;
 }
 
+/* Seconds to a sample-frame number, for every seek.  The caller has
+ * refused negative times and NaN; what is left to guard is the cast: a
+ * double too large for uint64_t is undefined behaviour (on x86 it gave
+ * 0x8000000000000000, or 0 -- "seek to infinity" played from the start).
+ * The result is capped at 2^40 frames, half a year at 96 kHz, so the
+ * multiplications that follow cannot overflow either; each format then
+ * clamps to its own length. */
+static uint64_t audio_time_to_frame(double seconds, uint32_t rate)
+{
+    const double cap = 1099511627776.0;             /* 2^40 */
+    double f = seconds * (double)rate;
+
+    return (f >= cap) ? (uint64_t)1 << 40 : (uint64_t)f;
+}
+
 /* Buffered PCM for FLAC/Vorbis/Opus — whole-file decode at open */
 typedef struct {
     int16_t *pcm;
@@ -314,7 +423,7 @@ static FM_Result pcmbuf_read(FM_Audio *a, int16_t *out, size_t count, size_t *re
     if (b->pos >= b->total) return FM_ERR_EOF;
     size_t avail = b->total - b->pos;
     size_t n = (count < avail) ? count : avail;
-    if (a->info.channels == 2u && (n & 1u)) n--;
+    n -= n % a->info.channels;              /* whole frames, any layout */
     if (n == 0) return FM_ERR_EOF;
     memcpy(out, b->pcm + b->pos, n * sizeof(int16_t));
     b->pos += n;
@@ -326,11 +435,12 @@ static FM_Result pcmbuf_read(FM_Audio *a, int16_t *out, size_t count, size_t *re
 static FM_Result pcmbuf_seek(FM_Audio *a, double seconds) {
     PcmBuffer *b = (PcmBuffer*)a->codec_ctx;
     if (!b || a->info.sample_rate == 0) return FM_ERR_INVALID_ARGUMENT;
-    uint64_t frame = (uint64_t)(seconds * (double)a->info.sample_rate);
-    size_t sp = (size_t)(frame * a->info.channels);
-    if (sp > b->total) sp = b->total;
-    if (a->info.channels == 2u) sp &= ~1u;
-    b->pos = sp;
+    uint64_t frame = audio_time_to_frame(seconds, a->info.sample_rate);
+    uint64_t frames = (uint64_t)(b->total / a->info.channels);
+    /* Clamp before narrowing: frame * channels in size_t wrapped on a
+     * 32-bit target, and a seek far past the end played from the start. */
+    if (frame > frames) frame = frames;
+    b->pos = (size_t)frame * a->info.channels;
     a->frame_index = frame;
     return FM_OK;
 }
@@ -339,6 +449,25 @@ static FM_Result pcmbuf_seek(FM_Audio *a, double seconds) {
 #define AUDIO_SLURP_MAX_BYTES (10u * 1024u * 1024u)
 #endif
 #if FM_USE_FLAC
+/* dr_flac's own memory comes from the library allocator (FM_Allocator_Set).
+ * No realloc hook: dr_flac then grows a block by allocate + copy + free,
+ * which works with an allocator that has no realloc. */
+static void *fm_flac_malloc(size_t size, void *user)
+{
+    (void)user;
+    return FM_Alloc(size);
+}
+
+static void fm_flac_free(void *p, void *user)
+{
+    (void)user;
+    FM_Free(p);
+}
+
+static const drflac_allocation_callbacks g_fm_flac_alloc = {
+    NULL, fm_flac_malloc, NULL, fm_flac_free
+};
+
 static FM_Result flac_file_open(FM_Audio *a) {
     uint64_t sz = 0;
     uint8_t *data = NULL;
@@ -354,7 +483,7 @@ static FM_Result flac_file_open(FM_Audio *a) {
     (void)File_Seek(&a->file, 0, FM_SEEK_SET);
     r = File_Read(&a->file, data, (uint32_t)sz, &got);
     if (r != FM_OK || got != sz) { FM_Free(data); return FM_ERR_IO; }
-    p = drflac_open_memory(data, (size_t)sz, NULL);
+    p = drflac_open_memory(data, (size_t)sz, &g_fm_flac_alloc);
     if (!p) { FM_Free(data); return FM_ERR_CORRUPTED; }
     a->info.sample_rate = p->sampleRate;
     a->info.channels = (uint16_t)p->channels;
@@ -363,44 +492,95 @@ static FM_Result flac_file_open(FM_Audio *a) {
     (void)strcpy(a->info.codec, "FLAC");
     a->info.data_offset = 0;
     a->info.data_size = sz;
-    drflac_uint64 total_frames = p->totalPCMFrameCount;
-    if (total_frames > 10*1024*1024) {
-        /* File declares more frames than we can buffer — refuse rather
-         * than silently truncating the end of the track (bug #4). */
-        drflac_close(p);
-        FM_Free(data);
-        return FM_ERR_TOO_LARGE;
-    }
-    FM_Bool unknown_len = (total_frames == 0) ? FM_TRUE : FM_FALSE;
-    if (unknown_len)
-        total_frames = 1024*1024;   /* unknown length: generous upper bound */
     if (p->channels == 0u || p->channels > 8u) {
         drflac_close(p);
         FM_Free(data);
         return FM_ERR_UNSUPPORTED;
     }
-    size_t total_samples = (size_t)(total_frames * p->channels);
-    int16_t *pcm = (int16_t*)FM_Alloc(total_samples * sizeof(int16_t));
-    if (!pcm) { drflac_close(p); FM_Free(data); return FM_ERR_NO_MEMORY; }
-    drflac_uint64 frames_read = drflac_read_pcm_frames_s16(p, total_frames, pcm);
-    if (unknown_len && frames_read == total_frames) {
-        /* STREAMINFO carried no length and the estimate was filled to the
-         * brim: if one more frame decodes, the track is longer than the
-         * buffer and returning FM_OK would silently cut its end off. */
-        int16_t probe[8];
-        if (drflac_read_pcm_frames_s16(p, 1, probe) > 0) {
-            drflac_close(p);
-            FM_Free(data);
-            FM_Free(pcm);
-            return FM_ERR_TOO_LARGE;
+    /* The decoded track is held whole, at most FM_FLAC_MAX_PCM_BYTES of
+     * it.  How large the buffer has to be is a field of the file:
+     *   - a length that does not fit is refused before anything is
+     *     allocated (never a track with its end cut off);
+     *   - no length at all (a stream written without seeking back) used
+     *     to cost a fixed million frames, 2 MiB a channel, for any file:
+     *     such files did not open on a small heap.  The buffer now starts
+     *     small and grows with what is decoded;
+     *   - a length larger than the audio that is really there leaves the
+     *     unused part allocated only until the decode is over. */
+    const uint64_t frame_bytes = (uint64_t)p->channels * sizeof(int16_t);
+    const uint64_t max_frames = (uint64_t)FM_FLAC_MAX_PCM_BYTES / frame_bytes;
+    drflac_uint64 total_frames = p->totalPCMFrameCount;
+    drflac_uint64 frames_read = 0;
+    uint64_t cap_frames;
+    int16_t *pcm;
+
+    if (total_frames > max_frames) {
+        drflac_close(p);
+        FM_Free(data);
+        return FM_ERR_TOO_LARGE;
+    }
+    cap_frames = (total_frames != 0u) ? total_frames : 16384u;
+    if (cap_frames > max_frames) cap_frames = max_frames;
+    pcm = (cap_frames != 0u)
+              ? (int16_t*)FM_Alloc((size_t)(cap_frames * frame_bytes)) : NULL;
+    if (!pcm) {
+        drflac_close(p);
+        FM_Free(data);
+        return (cap_frames != 0u) ? FM_ERR_NO_MEMORY : FM_ERR_TOO_LARGE;
+    }
+    for (;;) {
+        drflac_uint64 want = cap_frames - frames_read;
+        drflac_uint64 got_frames = drflac_read_pcm_frames_s16(
+            p, want, pcm + (size_t)(frames_read * p->channels));
+
+        frames_read += got_frames;
+        if (got_frames < want) break;               /* end of the audio */
+        if (total_frames != 0u) break;              /* declared length  */
+        /* Length not declared and the buffer is full: is there more? */
+        {
+            int16_t probe[8];
+            uint64_t grown = cap_frames * 2u;
+            int16_t *np;
+
+            if (drflac_read_pcm_frames_s16(p, 1, probe) == 0) break;
+            if (cap_frames >= max_frames) {
+                drflac_close(p);
+                FM_Free(data);
+                FM_Free(pcm);
+                return FM_ERR_TOO_LARGE;            /* never cut the end */
+            }
+            if (grown > max_frames) grown = max_frames;
+            np = (int16_t*)FM_ReallocSized(pcm,
+                                           (size_t)(cap_frames * frame_bytes),
+                                           (size_t)(grown * frame_bytes));
+            if (np == NULL) {
+                drflac_close(p);
+                FM_Free(data);
+                FM_Free(pcm);
+                return FM_ERR_NO_MEMORY;
+            }
+            pcm = np;
+            memcpy(pcm + (size_t)(frames_read * p->channels), probe,
+                   (size_t)frame_bytes);
+            frames_read++;
+            cap_frames = grown;
         }
     }
     drflac_close(p);
     FM_Free(data);
     if (frames_read == 0) { FM_Free(pcm); return FM_ERR_CORRUPTED; }
-    total_samples = (size_t)(frames_read * a->info.channels);
+    if (frames_read < cap_frames) {
+        /* give back what the header promised and the file did not have */
+        int16_t *np = (int16_t*)FM_ReallocSized(
+            pcm, (size_t)(cap_frames * frame_bytes),
+            (size_t)(frames_read * frame_bytes));
+
+        if (np != NULL) pcm = np;
+    }
+    size_t total_samples = (size_t)(frames_read * a->info.channels);
     b = (PcmBuffer*)FM_Alloc(sizeof(PcmBuffer));
     if (!b) { FM_Free(pcm); return FM_ERR_NO_MEMORY; }
+    a->info.total_frames = frames_read;
     b->pcm = pcm;
     b->total = total_samples;
     b->pos = 0;
@@ -473,6 +653,7 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
     if (pos == 0) { FM_Free(pcm); return FM_ERR_CORRUPTED; }
     b = (PcmBuffer*)FM_Alloc(sizeof(PcmBuffer));
     if (!b) { FM_Free(pcm); return FM_ERR_NO_MEMORY; }
+    a->info.total_frames = pos / a->info.channels;
     b->pcm = pcm;
     b->total = pos;
     b->pos = 0;
@@ -485,6 +666,38 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
 static uint64_t rd64(const uint8_t *p)
 {
     return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
+}
+
+/* 10^(gain_q8 / (20 * 256)) in Q12, without libm: the gain is split
+ * into whole steps of 6.0206 dB (a factor of two each) and a rest that
+ * goes through a 16-entry table of 2^(i/16), linearly interpolated --
+ * within 0.02 dB of the exact value, far below what can be heard.
+ * The result is limited to +-48 dB. */
+static int32_t opus_gain_q12(int32_t gain_q8)
+{
+    static const uint16_t pow2_16th[17] = {     /* 2^(i/16) * 4096 */
+        4096, 4277, 4467, 4664, 4871, 5087, 5312, 5547, 5793,
+        6049, 6317, 6597, 6889, 7194, 7512, 7845, 8192
+    };
+    /* gain_q8 / 1541.27 = gain in octaves (6.0206 dB * 256 = 1541.27);
+     * work in 1/4096 octave */
+    int32_t oct_q12 = (int32_t)(((int64_t)gain_q8 * 4096 * 100) / 154127);
+    int32_t whole;
+    int32_t frac;
+    int32_t idx;
+    int32_t rest;
+    int32_t v;
+
+    if (oct_q12 > 8 * 4096) oct_q12 = 8 * 4096;
+    if (oct_q12 < -8 * 4096) oct_q12 = -8 * 4096;
+    whole = oct_q12 / 4096;
+    frac = oct_q12 % 4096;
+    if (frac < 0) { frac += 4096; whole--; }
+    idx = frac / 256;
+    rest = frac % 256;
+    v = (int32_t)pow2_16th[idx] +
+        (((int32_t)pow2_16th[idx + 1] - (int32_t)pow2_16th[idx]) * rest) / 256;
+    return (whole >= 0) ? v * (1 << whole) : v >> (-whole);
 }
 
 /*
@@ -528,6 +741,8 @@ static FM_Result opus_file_open(FM_Audio *a) {
         int have_head = 0;
         uint16_t channels = 2;
         uint16_t preskip = 0;
+        int32_t gain_q8 = 0;        /* OpusHead output gain, dB * 256 */
+        int unsupported_layout = 0;
         uint64_t granule_final = 0;
         size_t off = 0;
 
@@ -552,9 +767,21 @@ static FM_Result opus_file_open(FM_Audio *a) {
                 if (!have_head && plen >= 19u &&
                     memcmp(data + p, "OpusHead", 8) == 0) {
                     channels = data[p + 9];
-                    if (channels == 0 || channels > 2) channels = 2;
+                    /* Mapping family 0 is one stream of 1 or 2 channels,
+                     * the only layout the decoder below is set up for.
+                     * Anything else (5.1 is family 1, several coupled
+                     * streams in each packet) used to be "corrected" to
+                     * 2 channels and its packets given to a stereo
+                     * decoder: FM_OK and clipped noise. */
+                    if (channels == 0 || channels > 2 || data[p + 18] != 0u)
+                    {
+                        unsupported_layout = 1;
+                        channels = 2;
+                    }
                     preskip = (uint16_t)(data[p + 10] |
                                          ((uint16_t)data[p + 11] << 8));
+                    gain_q8 = (int16_t)(data[p + 16] |
+                                        ((uint16_t)data[p + 17] << 8));
                     head_serial = serial;
                     have_head = 1;
                 }
@@ -574,6 +801,7 @@ static FM_Result opus_file_open(FM_Audio *a) {
         }
 
         if (!have_head) { FM_Free(data); return FM_ERR_CORRUPTED; }
+        if (unsupported_layout) { FM_Free(data); return FM_ERR_UNSUPPORTED; }
 
         /* ---------- size the PCM buffer ---------- */
         {
@@ -745,6 +973,21 @@ done:
                 FM_Free(pcm);
                 return FM_ERR_TOO_LARGE;
             }
+            /* RFC 7845 5.1: the output gain of the header is part of the
+             * stream, a player has to apply it.  It was not read at all,
+             * so a file mastered with -6 dB there played twice as loud
+             * as everywhere else. */
+            if (gain_q8 != 0) {
+                int32_t scale = opus_gain_q12(gain_q8);
+                size_t k;
+
+                for (k = 0; k < written; k++) {
+                    int32_t v = (int32_t)(((int64_t)pcm[k] * scale) / 4096);
+
+                    if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+                    pcm[k] = (int16_t)v;
+                }
+            }
 
             b = (PcmBuffer*)FM_Alloc(sizeof(PcmBuffer));
             if (!b) { FM_Free(pcm); return FM_ERR_NO_MEMORY; }
@@ -758,6 +1001,7 @@ done:
             (void)strcpy(a->info.codec, "OPUS");
             a->info.data_offset = 0;
             a->info.data_size = sz;
+            a->info.total_frames = written / channels;
             a->codec_ctx = b;
             return FM_OK;
         }
@@ -882,11 +1126,28 @@ static FM_Result audio_parse_wav(FM_Audio *a)
     } else if (a->info.format == 7u) {
         (void)strcpy(a->info.codec, "ULAW");
         a->info.bits_per_sample = 16;
-    } else if (a->info.format == 0x11u || a->info.format == 0x02u) {
+    } else if (a->info.format == 0x11u) {
+        /* IMA ADPCM, 4 bits a sample.  Microsoft ADPCM (format 0x02) is
+         * a different coder with its own block layout; it used to be
+         * accepted here and run through the IMA decoder, which returned
+         * FM_OK and noise.  It is refused like every other format this
+         * reader has no decoder for. */
+        if (a->info.bits_per_sample != 4u) return FM_ERR_UNSUPPORTED;
+        if (a->info.block_align < 4u * a->info.channels) return FM_ERR_CORRUPTED;
         (void)strcpy(a->info.codec, "ADPCM");
         a->info.bits_per_sample = 16;
     } else {
         return FM_ERR_UNSUPPORTED;
+    }
+    /* Length in sample frames, for every WAV flavour */
+    if (a->info.format == 1u) {
+        a->info.total_frames = a->info.data_size /
+            ((uint64_t)a->info.channels * (a->info.bits_per_sample / 8u));
+    } else if (a->info.format == 0x11u) {
+        a->info.total_frames = wav_adpcm_total_frames(
+            a->info.data_size, wav_adpcm_block_align_of(a), a->info.channels);
+    } else {
+        a->info.total_frames = a->info.data_size / a->info.channels;
     }
     return File_Seek(&a->file, (int64_t)a->info.data_offset, FM_SEEK_SET);
 }
@@ -933,6 +1194,13 @@ typedef struct
     uint32_t xing_bytes;
     uint8_t  xing_toc[100];
     uint8_t  have_toc;
+    uint8_t  have_xing;          /* first frame is a Xing/Info header */
+    uint8_t  xing_vbr;           /* ...and its tag is "Xing": VBR     */
+    uint32_t primed_frames;      /* frames consumed with no output    */
+    uint64_t in_file_off;        /* file offset of in[0]              */
+    uint64_t frame_file_off;     /* file offset of the frame in pcm[] */
+    uint64_t audio_start;        /* file offset of the first frame
+                                  * that carries audio                */
     /* Refill diagnostics (see FM_Mp3Stats / Audio_Mp3Stats).  Kept at the
      * end of the struct so the decode state layout stays stable. */
     uint32_t stat_read_calls;    /* File_Read calls on the input buf  */
@@ -1052,6 +1320,7 @@ static FM_Result mp3_fill(FM_Mp3Stream *m)
     {
         memmove(m->in, m->in + m->in_off, m->in_len - m->in_off);
         m->in_len -= m->in_off;
+        m->in_file_off += (uint64_t)m->in_off;
         m->in_off = 0;
     }
     avail = sizeof(m->in) - m->in_len;
@@ -1120,6 +1389,8 @@ static FM_Result mp3_decode_one(FM_Mp3Stream *m)
              * from the buffer start to the first byte after this frame
              * (garbage skipped during a resync included).  Adding
              * frame_offset again would over-consume and strand a frame. */
+            m->frame_file_off = m->in_file_off + (uint64_t)m->in_off +
+                                (uint64_t)info.frame_offset;
             m->in_off += (size_t)info.frame_bytes;
             m->channels = (uint32_t)info.channels;
             m->hz = (uint32_t)info.hz;
@@ -1130,10 +1401,29 @@ static FM_Result mp3_decode_one(FM_Mp3Stream *m)
             m->stat_frames++;
             return FM_OK;
         }
-        /* No complete frame in the buffer: either the frame straddles the
-         * buffer edge (top up once more) or the bytes are corrupt (skip a
-         * byte to resync, as before). */
-        if (!eof_seen && m->in_len < sizeof(m->in))
+        if (m->dec.header[0] == 0xFFu && info.frame_bytes > 0)
+        {
+            /* A frame was there and was parsed, but there is nothing to
+             * play yet: its audio starts in the bit reservoir of frames
+             * this decoder has not seen (the first frames after a seek
+             * or after a gap).  minimp3 has kept what the frame adds to
+             * the reservoir, so the frame is consumed as a whole and the
+             * next one continues from it.
+             *
+             * This used to fall through to "skip one byte" below.  That
+             * made minimp3 start over, without a reservoir, at the very
+             * next frame -- again and again, until a frame happened to
+             * need none.  Few frames do: a seek into a 32 kbit/s file
+             * ran to the end of the file and reported FM_ERR_EOF. */
+            m->in_off += (size_t)info.frame_bytes;
+            m->primed_frames++;
+            continue;
+        }
+        /* No frame at all in what the buffer holds from in_off on.  More
+         * bytes can change that for a frame cut off by the end of the
+         * buffer, so first make sure the buffer is as full as it gets:
+         * also when it is full but partly consumed (in_off > 0). */
+        if (!eof_seen && (m->in_len < sizeof(m->in) || m->in_off > 0u))
         {
             FM_Result r = mp3_fill(m);
 
@@ -1150,8 +1440,19 @@ static FM_Result mp3_decode_one(FM_Mp3Stream *m)
         }
         if (m->in_off < m->in_len)
         {
-            m->in_off++;
-            m->stat_resync_bytes++;
+            /* Corrupt bytes: go on at the next place a frame header can
+             * be.  Stepping a single byte gave the same answer, but ran
+             * the frame search over the whole buffer once per byte: 2 MiB
+             * that is not MP3 took seconds to refuse.  The last three
+             * bytes stay, a header may continue in the next block. */
+            size_t next = m->in_off + 1u;
+
+            while (next + 4u <= m->in_len && !hdr_valid(m->in + next))
+            {
+                next++;
+            }
+            m->stat_resync_bytes += (uint32_t)(next - m->in_off);
+            m->in_off = next;
         }
         else
         {
@@ -1181,6 +1482,9 @@ static void mp3_try_xing(FM_Mp3Stream *m)
             const uint8_t *p = m->in + i + 8u;
             size_t left = m->in_len - (i + 8u);
 
+            m->have_xing = 1u;
+            m->xing_vbr = (uint8_t)((m->in[i] == (uint8_t)'X') ? 1u : 0u);
+
             if ((flags & 1u) != 0u && left >= 4u)
             {
                 m->xing_frames = mp3_be32(p);
@@ -1209,9 +1513,9 @@ static uint64_t mp3_duration_frames(const FM_Mp3Stream *m)
     {
         return (uint64_t)m->xing_frames * (uint64_t)m->granule_samples;
     }
-    if (m->bitrate_kbps != 0u && m->hz != 0u && m->file_size > m->first_frame)
+    if (m->bitrate_kbps != 0u && m->hz != 0u && m->file_size > m->audio_start)
     {
-        uint64_t audio_bytes = m->file_size - m->first_frame;
+        uint64_t audio_bytes = m->file_size - m->audio_start;
 
         /* seconds = audio_bytes / (bitrate_kbps * 125); frames = seconds * hz */
         return (audio_bytes * (uint64_t)m->hz) /
@@ -1236,6 +1540,7 @@ static FM_Result mp3_open(FM_Audio *a)
         mp3_release(m);
         return r;
     }
+    m->in_file_off = m->first_frame;
     r = mp3_fill(m);
     if (r == FM_ERR_EOF || m->in_len == 0)
     {
@@ -1252,7 +1557,22 @@ static FM_Result mp3_open(FM_Audio *a)
     if (r != FM_OK)
     {
         mp3_release(m);
-        return FM_ERR_INVALID_FORMAT;
+        /* no frame in the whole file: not an MP3.  A read error is a
+         * read error, whatever the file is. */
+        return (r == FM_ERR_EOF) ? FM_ERR_INVALID_FORMAT : r;
+    }
+    if (m->have_xing)
+    {
+        /* The Xing/Info frame describes the stream and carries no audio:
+         * decoded, it is one frame of silence in front of the track, and
+         * one frame more than the header itself counts. */
+        m->pcm_len = 0;
+        m->pcm_pos = 0;
+        m->audio_start = m->in_file_off + (uint64_t)m->in_off;
+    }
+    else
+    {
+        m->audio_start = m->frame_file_off;
     }
     (void)File_Size(&a->file, &m->file_size);
     a->info.sample_rate = m->hz;
@@ -1265,6 +1585,9 @@ static FM_Result mp3_open(FM_Audio *a)
         if (frames != 0u && a->info.channels != 0u)
         {
             a->info.data_size = frames * (uint64_t)a->info.channels * 2u;
+            a->info.total_frames = frames;      /* exact with a Xing
+                                                 * header, else estimated
+                                                 * from the first frame */
         }
     }
     (void)strcpy(a->info.codec, "MP3");
@@ -1277,6 +1600,7 @@ static FM_Result mp3_read(FM_Audio *a, int16_t *samples, size_t count,
 {
     FM_Mp3Stream *m = (FM_Mp3Stream *)a->codec_ctx;
     size_t total = 0;
+    FM_Result err = FM_ERR_EOF;
 
     while (total < count)
     {
@@ -1286,6 +1610,7 @@ static FM_Result mp3_read(FM_Audio *a, int16_t *samples, size_t count,
 
             if (r != FM_OK)
             {
+                err = r;
                 break;
             }
         }
@@ -1313,7 +1638,27 @@ static FM_Result mp3_read(FM_Audio *a, int16_t *samples, size_t count,
     {
         a->callback(samples, total, a->callback_data);
     }
-    return (total == 0) ? FM_ERR_EOF : FM_OK;
+    /* What was decoded is delivered first.  With nothing to deliver the
+     * reason is reported as it is: a failed read used to come back as
+     * FM_ERR_EOF, and a player took a card error for the end of the
+     * song.  (The next call tries the read again.) */
+    return (total == 0) ? err : FM_OK;
+}
+
+/* Constant bit rate: where the frame in pcm[] is in the track, in sample
+ * frames, from where it is in the file. */
+static uint64_t mp3_cbr_position(const FM_Mp3Stream *m)
+{
+    uint64_t num;
+    uint64_t den = (uint64_t)m->granule_samples *
+                   (uint64_t)m->bitrate_kbps * 125u;
+
+    if (den == 0u || m->frame_file_off < m->audio_start)
+    {
+        return 0u;
+    }
+    num = (m->frame_file_off - m->audio_start) * (uint64_t)m->hz;
+    return ((num + den / 2u) / den) * (uint64_t)m->granule_samples;
 }
 
 static FM_Result mp3_seek(FM_Audio *a, double seconds)
@@ -1323,13 +1668,16 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
     uint64_t duration_frames;
     uint64_t audio_bytes;
     uint64_t offset;
+    uint64_t position;
+    FM_Bool cbr;
+    FM_Bool from_start;
     FM_Result r;
 
     if (m->hz == 0u || a->info.channels == 0u)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    target_frames = (uint64_t)(seconds * (double)m->hz);
+    target_frames = audio_time_to_frame(seconds, m->hz);
     duration_frames = mp3_duration_frames(m);
     if (duration_frames != 0u && target_frames >= duration_frames)
     {
@@ -1340,7 +1688,12 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
                                         : (m->file_size > m->first_frame
                                                ? m->file_size - m->first_frame
                                                : 0u);
-    if (m->have_toc && duration_frames != 0u && audio_bytes != 0u)
+    /* Constant bit rate (no header frame, or one tagged "Info"): the byte
+     * offset of a frame follows from its number, and its number from its
+     * offset.  The table of a "Xing" header is for variable bit rate. */
+    cbr = (FM_Bool)((!m->have_xing || !m->xing_vbr) && m->bitrate_kbps != 0u &&
+                    m->granule_samples != 0u);
+    if (!cbr && m->have_toc && duration_frames != 0u && audio_bytes != 0u)
     {
         uint32_t percent;
         uint32_t fa;
@@ -1361,12 +1714,26 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
                   audio_bytes) /
                      (256u * duration_frames);
     }
-    else if (m->bitrate_kbps != 0u)
+    else if (cbr)
     {
-        offset = m->first_frame +
-                 (target_frames * (uint64_t)m->bitrate_kbps * 125u) / m->hz;
+        /* Ten frames before the one the target is in: what a frame needs
+         * from the bit reservoir of the frames before it (up to 511
+         * bytes) is then there when the target frame is reached, and the
+         * frames in between are decoded and not played. */
+        uint64_t number = target_frames / m->granule_samples;
+
+        offset = (number > 10u)
+                     ? m->audio_start +
+                           ((number - 10u) * (uint64_t)m->granule_samples *
+                            (uint64_t)m->bitrate_kbps * 125u) / m->hz
+                     : m->first_frame;
     }
     else
+    {
+        offset = m->first_frame;
+    }
+    from_start = (FM_Bool)(target_frames == 0u || offset <= m->audio_start);
+    if (from_start)
     {
         offset = m->first_frame;
     }
@@ -1380,32 +1747,90 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
     m->in_off = 0;
     m->pcm_len = 0;
     m->pcm_pos = 0;
+    m->primed_frames = 0u;
+    m->in_file_off = offset;
     if (File_Seek(m->file, (int64_t)offset, FM_SEEK_SET) != FM_OK)
     {
         return FM_ERR_IO;
     }
     r = mp3_decode_one(m);
-    if (r == FM_ERR_EOF)
-    {
-        return FM_ERR_EOF;
-    }
     if (r != FM_OK)
     {
         return r;
     }
-    /* Byte-seek lands mid-stream: the first decoded frame has no previous
-     * granule for IMDCT overlap and often clips/pops. Drop it when we are
-     * not at the start of the bitstream; keep it if the next frame is EOF
-     * so a seek near the end still has something to play. */
-    if (offset > m->first_frame)
+    if (from_start)
     {
+        if (m->have_xing)
+        {
+            /* the Xing/Info frame, see mp3_open: not audio */
+            r = mp3_decode_one(m);
+            if (r != FM_OK)
+            {
+                m->pcm_len = 0;
+                m->pcm_pos = 0;
+                return r;
+            }
+        }
+        position = 0u;
+    }
+    else
+    {
+        /* Landing in the middle of the stream: the first decoded frame
+         * has no previous granule for the IMDCT overlap and often
+         * clips/pops.  Drop it; keep it if the next frame is the end, so
+         * a seek near the end still has something to play. */
         FM_Result r2 = mp3_decode_one(m);
 
         if (r2 != FM_OK && r2 != FM_ERR_EOF)
         {
             return r2;
         }
+        if (r2 == FM_OK)
+        {
+            m->primed_frames++;         /* the dropped one */
+        }
+        /* Variable bit rate: the table of the Xing header has 100 entries
+         * for the whole track.  The position is the request plus what
+         * was passed over (frames that only filled the bit reservoir,
+         * and the one dropped above), and can be off by a few frames. */
+        position = target_frames +
+                   (uint64_t)m->primed_frames * m->granule_samples;
     }
+    if (cbr)
+    {
+        /* Constant bit rate: the frame now in pcm[] is at a known file
+         * offset, and frames of one size (give or take the padding byte)
+         * make that its number.  Go on to the frame the target is in and
+         * start inside it: the seek is exact to the sample, and so is
+         * the position.  (Reporting the requested time, as this used to,
+         * put the position up to a tenth of a second behind the sound.) */
+        uint32_t guard = 0;
+
+        position = mp3_cbr_position(m);
+        while (position + m->granule_samples <= target_frames && guard < 32u)
+        {
+            r = mp3_decode_one(m);
+            if (r != FM_OK)
+            {
+                m->pcm_len = 0;
+                m->pcm_pos = 0;
+                return r;               /* FM_ERR_EOF: past the last frame */
+            }
+            position = mp3_cbr_position(m);
+            guard++;
+        }
+        if (position < target_frames &&
+            target_frames - position < m->granule_samples)
+        {
+            m->pcm_pos = (size_t)(target_frames - position) * m->channels;
+            if (m->pcm_pos > m->pcm_len)
+            {
+                m->pcm_pos = m->pcm_len;
+            }
+            position = target_frames;
+        }
+    }
+    target_frames = position;
     m->total_samples = target_frames * (uint64_t)a->info.channels;
     a->frame_index = target_frames;
     return FM_OK;
@@ -1693,14 +2118,18 @@ static int64_t aac_find_sync(FM_AacStream *s)
     }
 }
 
+/* The 7 header bytes go to the front of s->frame: the decoder is given
+ * the frame "with its ADTS header" (README), and used to get 7 bytes
+ * nobody had written in its place -- the header was read into a local. */
 static FM_Result aac_read_header(FM_AacStream *s, uint32_t *frame_len,
                                  uint32_t *hz, uint32_t *channels)
 {
-    uint8_t h[7];
+    uint8_t *h = s->frame;
+    FM_Result r = file_read_exact(s->file, h, 7u, NULL);
 
-    if (file_read_exact(s->file, h, sizeof(h), NULL) != FM_OK)
+    if (r != FM_OK)
     {
-        return FM_ERR_EOF;
+        return r;               /* FM_ERR_EOF at the end, else the error */
     }
     if (h[0] != 0xFF || (h[1] & 0xF6u) != 0xF0u)
     {
@@ -1783,6 +2212,12 @@ static FM_Result aac_open(FM_Audio *a)
     /* rewind so the first aac_read starts from the first frame */
     if (File_Seek(s->file, (int64_t)s->first_frame, FM_SEEK_SET) != FM_OK)
     {
+        /* the decoder was created above: without this its context
+         * stayed behind on every open that failed here */
+        if (ops->close != NULL && s->dec != NULL)
+        {
+            ops->close(s->dec);
+        }
         aac_release(s);
         return FM_ERR_IO;
     }
@@ -1790,36 +2225,79 @@ static FM_Result aac_open(FM_Audio *a)
     return FM_OK;
 }
 
+/* Decode the next frame that yields samples.
+ *   FM_OK       s->pcm holds pcm_len (> 0) samples
+ *   FM_ERR_EOF  the file has ended
+ *   other       a read error, or what the decoder said about one frame
+ *               (that frame is consumed; the next call goes on after it)
+ * Bytes that are not a frame header are skipped up to the next sync
+ * word.  They used to end the read with FM_ERR_EOF, and the following
+ * read then went on 7 bytes later as if nothing had happened. */
 static FM_Result aac_decode_one(FM_AacStream *s)
 {
-    uint32_t frame_len;
-    uint32_t hz;
-    uint32_t channels;
-    FM_Result r;
-    size_t out_samples = 0;
+    const size_t cap = sizeof(s->pcm) / sizeof(s->pcm[0]);
 
-    r = aac_read_header(s, &frame_len, &hz, &channels);
-    if (r != FM_OK)
-    {
-        return r;
-    }
-    if (frame_len > sizeof(s->frame))
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    if (file_read_exact(s->file, s->frame + 7, frame_len - 7u, NULL) != FM_OK)
-    {
-        return FM_ERR_EOF;
-    }
-    r = s->ops->decode(s->dec, s->frame, frame_len, s->pcm,
-                       sizeof(s->pcm) / sizeof(s->pcm[0]), &out_samples);
-    if (r != FM_OK)
-    {
-        return r;
-    }
-    s->pcm_len = out_samples;
+    s->pcm_len = 0;
     s->pcm_pos = 0;
-    return (out_samples == 0) ? FM_ERR_EOF : FM_OK;
+    for (;;)
+    {
+        uint32_t frame_len;
+        uint32_t hz;
+        uint32_t channels;
+        uint64_t start = 0;
+        size_t out_samples = 0;
+        FM_Result r;
+
+        if (File_Tell(s->file, &start) != FM_OK)
+        {
+            return FM_ERR_IO;
+        }
+        r = aac_read_header(s, &frame_len, &hz, &channels);
+        if (r == FM_OK && frame_len > sizeof(s->frame))
+        {
+            r = FM_ERR_CORRUPTED;       /* no ADTS frame is that long */
+        }
+        if (r == FM_ERR_INVALID_FORMAT || r == FM_ERR_CORRUPTED)
+        {
+            if (File_Seek(s->file, (int64_t)start + 1, FM_SEEK_SET) != FM_OK)
+            {
+                return FM_ERR_IO;
+            }
+            if (aac_find_sync(s) < 0)
+            {
+                return FM_ERR_EOF;      /* nothing but junk to the end */
+            }
+            continue;
+        }
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        r = file_read_exact(s->file, s->frame + 7, frame_len - 7u, NULL);
+        if (r != FM_OK)
+        {
+            return r;                   /* cut-off last frame: FM_ERR_EOF */
+        }
+        r = s->ops->decode(s->dec, s->frame, frame_len, s->pcm, cap,
+                           &out_samples);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (out_samples > cap)
+        {
+            /* A decoder that reports more than it was given room for has
+             * written past s->pcm -- or would make the reader copy that
+             * much out of it.  Nothing of this frame is used. */
+            return FM_ERR_INTERNAL;
+        }
+        if (out_samples != 0u)
+        {
+            s->pcm_len = out_samples;
+            return FM_OK;
+        }
+        /* a frame with no output yet (decoder priming): take the next */
+    }
 }
 
 static FM_Result aac_read(FM_Audio *a, int16_t *samples, size_t count,
@@ -1827,6 +2305,7 @@ static FM_Result aac_read(FM_Audio *a, int16_t *samples, size_t count,
 {
     FM_AacStream *s = (FM_AacStream *)a->codec_ctx;
     size_t total = 0;
+    FM_Result err = FM_ERR_EOF;
 
     while (total < count)
     {
@@ -1836,6 +2315,7 @@ static FM_Result aac_read(FM_Audio *a, int16_t *samples, size_t count,
 
             if (r != FM_OK)
             {
+                err = r;
                 break;
             }
         }
@@ -1863,13 +2343,13 @@ static FM_Result aac_read(FM_Audio *a, int16_t *samples, size_t count,
     {
         a->callback(samples, total, a->callback_data);
     }
-    return (total == 0) ? FM_ERR_EOF : FM_OK;
+    return (total == 0) ? err : FM_OK;      /* as mp3_read() */
 }
 
 static FM_Result aac_seek(FM_Audio *a, double seconds)
 {
     FM_AacStream *s = (FM_AacStream *)a->codec_ctx;
-    uint64_t target = (uint64_t)(seconds * (double)a->info.sample_rate);
+    uint64_t target = audio_time_to_frame(seconds, a->info.sample_rate);
     uint64_t target_samples = target * a->info.channels;
 
     if (target_samples <= s->total_samples)
@@ -2054,6 +2534,46 @@ FM_Result Audio_GetInfo(const FM_Audio *a, FM_AudioInfo *info)
 static uint8_t g_wav_raw[FM_AUDIO_PCM_CHUNK * 2u]
     __attribute__((aligned(32)));
 
+/* g_wav_raw is one buffer for every WAV stream.  A read fills it from
+ * the file and then converts it into the caller's samples; a second task
+ * reading another WAV in between replaced the bytes, and the first got
+ * the other file's audio.  The lock is held from the file read to the end
+ * of the conversion, one chunk at a time, and never across the caller's
+ * callback.  It sits above the file-layer locks (the read happens under
+ * it) and nothing takes it while holding one of those. */
+#if FM_USE_THREADS
+static FM_Mutex g_wav_raw_lock;
+static FM_Bool  g_wav_raw_lock_init = FM_FALSE;
+
+static void wav_raw_lock(void)
+{
+    FM_Bool ready;
+
+    FM_Lock();
+    if (!g_wav_raw_lock_init && FM_Mutex_Create(&g_wav_raw_lock) == FM_OK)
+    {
+        g_wav_raw_lock_init = FM_TRUE;
+    }
+    ready = g_wav_raw_lock_init;
+    FM_Unlock();
+    if (ready)
+    {
+        FM_Mutex_Lock(&g_wav_raw_lock);
+    }
+}
+
+static void wav_raw_unlock(void)
+{
+    if (g_wav_raw_lock_init)
+    {
+        FM_Mutex_Unlock(&g_wav_raw_lock);
+    }
+}
+#else
+#define wav_raw_lock()   ((void)0)
+#define wav_raw_unlock() ((void)0)
+#endif
+
 FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
                      size_t *read)
 {
@@ -2064,7 +2584,21 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
     size_t n;
     size_t done;
 
-    if (a == NULL || samples == NULL || !File_IsOpen(&a->file))
+    if (read != NULL)
+    {
+        *read = 0;              /* on every path, also the failing ones */
+    }
+    if (a == NULL || samples == NULL || !File_IsOpen(&a->file) ||
+        a->info.channels == 0u)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    /* Samples are delivered in whole frames.  A count that does not hold
+     * one frame cannot be served at all, and that is the caller's error:
+     * it used to come back as FM_ERR_EOF with a thousand frames left, and
+     * a caller that stops at EOF dropped the rest of the track. */
+    count -= count % a->info.channels;
+    if (count == 0u)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -2089,26 +2623,23 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
         return FM_ERR_UNSUPPORTED;
 #endif
     }
-    if (read != NULL)
-    {
-        *read = 0;
-    }
     if (a->info.format == 6u || a->info.format == 7u) {
         if (File_Tell(&a->file, &pos) != FM_OK || pos < a->info.data_offset) return FM_ERR_IO;
         byte_pos = pos - a->info.data_offset;
         available = (byte_pos < a->info.data_size) ? a->info.data_size - byte_pos : 0;
-        n = (size_t)available;
-        if (n > count) n = count;
-        if (a->info.channels == 2u && (n & 1u) != 0u) n--;
-        if (n == 0) return FM_ERR_EOF;
+        n = (available > (uint64_t)count) ? count : (size_t)available;
         if (n > (size_t)FM_AUDIO_PCM_CHUNK) n = (size_t)FM_AUDIO_PCM_CHUNK;
+        n -= n % a->info.channels;
+        if (n == 0) return FM_ERR_EOF;
+        wav_raw_lock();
         FM_Result r2 = file_read_exact(&a->file, g_wav_raw, (uint32_t)n, NULL);
-        if (r2 != FM_OK) return r2;
+        if (r2 != FM_OK) { wav_raw_unlock(); return r2; }
         for (size_t i = 0; i < n; i++) {
             uint8_t b = g_wav_raw[i];
             int16_t s = (a->info.format == 6u) ? wav_alaw_decode(b) : wav_ulaw_decode(b);
             samples[i] = s;
         }
+        wav_raw_unlock();
         if (read) *read = n;
         a->frame_index += (uint64_t)(n / a->info.channels);
         if (a->callback) a->callback(samples, n, a->callback_data);
@@ -2130,19 +2661,13 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
     available = (byte_pos < a->info.data_size)
                     ? a->info.data_size - byte_pos
                     : 0;
-    n = (size_t)(available / bytes_per_sample);
-    if (n > count)
-    {
-        n = count;
-    }
-    if (a->info.channels == 2u && (n & 1u) != 0u)
-    {
-        /* Stereo PCM is consumed in whole L/R frames. Returning a half
-         * frame would leave the file position (and every later read)
-         * misaligned on an odd byte, so drop the trailing odd sample
-         * instead (at most one sample, i.e. < 0.1 ms at 48 kHz). */
-        n--;
-    }
+    n = (available / bytes_per_sample > (uint64_t)count)
+            ? count : (size_t)(available / bytes_per_sample);
+    /* Stereo PCM is consumed in whole L/R frames. Returning a half
+     * frame would leave the file position (and every later read)
+     * misaligned on an odd byte, so drop the trailing odd sample
+     * instead (at most one sample, i.e. < 0.1 ms at 48 kHz). */
+    n -= n % a->info.channels;
     if (n > UINT32_MAX / bytes_per_sample)
     {
         n = UINT32_MAX / bytes_per_sample;
@@ -2163,11 +2688,13 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
             chunk = (size_t)FM_AUDIO_PCM_CHUNK;
         }
         byte_count = (uint32_t)chunk * bytes_per_sample;
+        wav_raw_lock();
         r = file_read_exact(&a->file, g_wav_raw, byte_count, NULL);
         FM_AUDIO_LOG("read: chunk %lu -> %d\n",
                      (unsigned long)chunk, (int)r);
         if (r != FM_OK)
         {
+            wav_raw_unlock();
             return r;
         }
         if (a->info.bits_per_sample == 16)
@@ -2185,6 +2712,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
                     (int16_t)(((int32_t)g_wav_raw[i] - 128) * 256);
             }
         }
+        wav_raw_unlock();
         done += chunk;
     }
     if (read != NULL)
@@ -2202,7 +2730,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
 FM_Result Audio_ReadFrame(FM_Audio *a, int16_t *frame,
                           size_t *channels_read)
 {
-    size_t n;
+    size_t n = 0;
     FM_Result r;
 
     if (a == NULL || frame == NULL || channels_read == NULL)
@@ -2220,7 +2748,11 @@ FM_Result Audio_Seek(FM_Audio *a, double seconds)
     uint64_t frame_bytes;
     uint64_t offset;
 
-    if (a == NULL || seconds < 0.0 || a->info.sample_rate == 0)
+    /* !(x >= 0) is true for a negative time and for NaN, which no
+     * comparison catches: NaN went through "seconds < 0.0" and became
+     * frame 0x8000000000000020 in the formats that do not range-check. */
+    if (a == NULL || !(seconds >= 0.0) || a->info.sample_rate == 0 ||
+        a->info.channels == 0u)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -2229,14 +2761,24 @@ FM_Result Audio_Seek(FM_Audio *a, double seconds)
         /* IMA-ADPCM: seek must land on a block boundary (the decoder is
          * stateless per block).  Granularity = one block. */
         uint16_t ba = wav_adpcm_block_align_of(a);
-        size_t spb = wav_adpcm_carry_cap(ba);   /* samples per block */
-        uint64_t blk = (uint64_t)(seconds * (double)a->info.sample_rate) / spb;
-        uint64_t target = a->info.data_offset + (uint64_t)ba * blk;
+        size_t spb = wav_adpcm_block_frames(ba, a->info.channels);
+        uint64_t blk;
+        uint64_t target;
 
-        if (target > a->info.data_offset + a->info.data_size)
+        if (spb == 0u)
         {
+            return FM_ERR_CORRUPTED;
+        }
+        blk = audio_time_to_frame(seconds, a->info.sample_rate) / spb;
+        if (blk > a->info.data_size / ba)
+        {
+            /* past the end: the end, so the next read reports EOF */
             target = a->info.data_offset + a->info.data_size;
-            blk = (target - a->info.data_offset) / ba;
+            blk = a->info.data_size / ba;
+        }
+        else
+        {
+            target = a->info.data_offset + (uint64_t)ba * blk;
         }
         if (File_Seek(&a->file, (int64_t)target, FM_SEEK_SET) != FM_OK)
         {
@@ -2262,14 +2804,17 @@ FM_Result Audio_Seek(FM_Audio *a, double seconds)
         return FM_ERR_UNSUPPORTED;
 #endif
     }
-    frame = (uint64_t)(seconds * (double)a->info.sample_rate);
+    frame = audio_time_to_frame(seconds, a->info.sample_rate);
     frame_bytes = (uint64_t)a->info.channels *
-                  (uint64_t)(a->info.bits_per_sample / 8u);
-    if (frame_bytes == 0 || frame > UINT64_MAX / frame_bytes)
+                  (uint64_t)((a->info.format == 6u || a->info.format == 7u)
+                                 ? 1u       /* G.711: one byte a sample,
+                                             * reported as 16-bit output */
+                                 : a->info.bits_per_sample / 8u);
+    if (frame_bytes == 0)
     {
-        return FM_ERR_TOO_LARGE;
+        return FM_ERR_INVALID_FORMAT;
     }
-    offset = frame * frame_bytes;
+    offset = frame * frame_bytes;           /* frame <= 2^40: no overflow */
     if (offset > a->info.data_size)
     {
         offset = a->info.data_size;
@@ -2288,18 +2833,27 @@ FM_Result Audio_ReadMono(FM_Audio *a, int16_t *samples, size_t count,
                          size_t *read)
 {
     size_t total = 0;
+    FM_Result err = FM_ERR_EOF;
 
-    if (a == NULL || samples == NULL || !File_IsOpen(&a->file))
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
     if (read != NULL)
     {
         *read = 0;
     }
+    if (a == NULL || samples == NULL || !File_IsOpen(&a->file))
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
     if (a->info.channels == 1)
     {
         return Audio_Read(a, samples, count, read);
+    }
+    if (a->info.channels != 2)
+    {
+        /* Only L/R is averaged here.  A 5.1 stream went through the
+         * pair loop below as if it were stereo and came out three times
+         * as long: interleaved channels, not a downmix.
+         * (Audio_ReadStereo refuses it the same way.) */
+        return FM_ERR_UNSUPPORTED;
     }
     while (total < count)
     {
@@ -2329,6 +2883,11 @@ FM_Result Audio_ReadMono(FM_Audio *a, int16_t *samples, size_t count,
             samples[total + i] = (int16_t)(sum / 2);
         }
         total += pairs;
+        if (r != FM_OK && r != FM_ERR_EOF)
+        {
+            err = r;                    /* a read error is not the end */
+            break;
+        }
         if (got < n || r == FM_ERR_EOF)
         {
             break;
@@ -2338,7 +2897,7 @@ FM_Result Audio_ReadMono(FM_Audio *a, int16_t *samples, size_t count,
     {
         *read = total;
     }
-    return (total == 0) ? FM_ERR_EOF : FM_OK;
+    return (total == 0) ? err : FM_OK;
 }
 
 FM_Result Audio_ReadStereo(FM_Audio *a, int16_t *samples,
@@ -2443,6 +3002,12 @@ FM_Result Audio_Stream(FM_Audio *a, FM_AudioCallback cb, void *user_data,
     if (chunk_samples < capacity)
     {
         capacity = chunk_samples;
+    }
+    /* A chunk smaller than one frame can deliver nothing: that returned
+     * FM_OK with the whole track unplayed (see Audio_Read). */
+    if (a->info.channels == 0u || capacity < a->info.channels)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
     }
     for (;;)
     {
@@ -2918,6 +3483,22 @@ FM_Result AudioRecorder_Open(const char *folder, uint32_t sample_rate,
         (bits_per_sample != 8 && bits_per_sample != 16))
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    {
+        /* Will the name fit the caller's buffer?  Its length does not
+         * depend on the number, so this is known before anything is
+         * created.  It used to be found out after the file existed: the
+         * call failed and left an empty rec_NNNNNN.wav, one per try. */
+        size_t flen = strlen(folder);
+
+        while (flen > 1 && folder[flen - 1] == '/')
+        {
+            flen--;
+        }
+        if (flen + 1 + 4 + 6 + 4 + 1 > path_out_size)
+        {
+            return FM_ERR_TOO_LARGE;
+        }
     }
     {
         FM_Result dr = Directory_Create(folder);

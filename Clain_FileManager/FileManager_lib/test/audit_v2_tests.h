@@ -1475,3 +1475,1378 @@ static void test_audit_v2_image(void)
     (void)File_Delete("/av2_pal.bmp");
 }
 #endif /* FM_USE_IMAGE */
+
+/* ================================================================ */
+/* Audio part                                                        */
+/* ================================================================ */
+#if FM_USE_AUDIO
+static uint8_t g_av2_abuf[64 * 1024];
+static int16_t g_av2_pcm[8192];
+
+static void av2_wr16(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+}
+
+static void av2_wr32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t av2_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* A WAV file of `format` in g_av2_abuf; returns its length */
+static size_t av2_build_wav(uint16_t format, uint16_t channels, uint32_t rate,
+                            uint16_t bits, uint16_t block_align,
+                            const uint8_t *data, uint32_t data_len)
+{
+    uint8_t *p = g_av2_abuf;
+
+    memcpy(p, "RIFF", 4); av2_wr32(p + 4, 36u + data_len);
+    memcpy(p + 8, "WAVEfmt ", 8); av2_wr32(p + 16, 16);
+    av2_wr16(p + 20, format); av2_wr16(p + 22, channels);
+    av2_wr32(p + 24, rate); av2_wr32(p + 28, rate * block_align);
+    av2_wr16(p + 32, block_align); av2_wr16(p + 34, bits);
+    memcpy(p + 36, "data", 4); av2_wr32(p + 40, data_len);
+    memcpy(p + 44, data, data_len);
+    return 44u + data_len;
+}
+
+/* Decode a whole file through Audio_Read in chunks of `chunk` samples;
+ * returns the result that ended the loop, *frames = frames delivered */
+static FM_Result av2_decode_all(const char *path, size_t chunk,
+                                uint64_t *frames, FM_AudioInfo *info)
+{
+    static FM_Audio a;
+    FM_Result r;
+    size_t got = 0;
+    uint64_t total = 0;
+
+    memset(&a, 0, sizeof(a));
+    *frames = 0;
+    r = Audio_Open(path, &a);
+    if (r != FM_OK) return r;
+    if (info != NULL) *info = a.info;
+    while ((r = Audio_Read(&a, g_av2_pcm, chunk, &got)) == FM_OK && got > 0)
+    {
+        total += got;
+    }
+    *frames = total / a.info.channels;
+    (void)Audio_Close(&a);
+    return r;
+}
+
+static FM_Result av2_load(const char *path, size_t *len)
+{
+    size_t got = 0;
+    FM_Result r = File_ReadAll(path, g_av2_abuf, sizeof(g_av2_abuf), &got);
+
+    *len = got;
+    return r;
+}
+
+#define AV2_RESULT(cond, r, what)                                          \
+    do {                                                                   \
+        if (cond) { PASS(); }                                              \
+        else                                                               \
+        {                                                                  \
+            char m_[124];                                                  \
+            (void)snprintf(m_, sizeof(m_), "%.100s (result %d)", (what),   \
+                           (int)(r));                                      \
+            FAIL(m_);                                                      \
+        }                                                                  \
+    } while (0)
+
+/* ---- allocator that remembers the largest request (F14) ---- */
+static size_t g_av2_max_alloc;
+static unsigned long g_av2_alloc_calls;
+static long g_av2_alloc_live;
+static void *av2_alloc(size_t n, void *ctx)
+{
+    void *q;
+
+    (void)ctx;
+    if (n > g_av2_max_alloc) g_av2_max_alloc = n;
+    g_av2_alloc_calls++;
+    q = malloc(n);
+    if (q != NULL) g_av2_alloc_live++;
+    return q;
+}
+static void *av2_realloc(void *q, size_t n, void *ctx)
+{
+    (void)ctx;
+    if (n > g_av2_max_alloc) g_av2_max_alloc = n;
+    return realloc(q, n);
+}
+static void av2_free(void *q, void *ctx)
+{
+    (void)ctx;
+    if (q != NULL) g_av2_alloc_live--;
+    free(q);
+}
+
+/* ---- AAC plug-in stand-in (F5, F6, F16, F17) ---- */
+static int      g_av2_aac_inits;
+static int      g_av2_aac_closes;
+static int      g_av2_aac_header_ok;    /* frames that arrived with header */
+static int      g_av2_aac_frames;
+static size_t   g_av2_aac_claim;        /* samples to report, 0 = honest   */
+
+static FM_Result av2_aac_init(void **ctx, const FM_AudioInfo *info)
+{
+    (void)info;
+    g_av2_aac_inits++;
+    *ctx = &g_av2_aac_inits;
+    return FM_OK;
+}
+
+static FM_Result av2_aac_decode(void *ctx, const uint8_t *in, size_t in_size,
+                                int16_t *out, size_t out_count,
+                                size_t *out_samples)
+{
+    size_t i;
+    size_t n = (out_count < 64u) ? out_count : 64u;
+
+    (void)ctx;
+    g_av2_aac_frames++;
+    if (in_size >= 7u && in[0] == 0xFFu && (in[1] & 0xF6u) == 0xF0u)
+    {
+        g_av2_aac_header_ok++;
+    }
+    for (i = 0; i < n; i++) out[i] = (int16_t)(100 + (int)i);
+    *out_samples = (g_av2_aac_claim != 0u) ? g_av2_aac_claim : n;
+    return FM_OK;
+}
+
+static void av2_aac_close(void *ctx)
+{
+    (void)ctx;
+    g_av2_aac_closes++;
+}
+
+static const FM_AudioDecoderOps g_av2_aac_ops = {
+    "AAC", av2_aac_init, av2_aac_decode, av2_aac_close
+};
+
+/* `frames` ADTS frames (mono, 44.1 kHz), 16 payload bytes each */
+static size_t av2_build_adts(uint32_t frames)
+{
+    uint32_t i;
+    size_t n = 0;
+
+    for (i = 0; i < frames; i++)
+    {
+        uint8_t *h = g_av2_abuf + n;
+        uint32_t flen = 7u + 16u;
+
+        h[0] = 0xFF; h[1] = 0xF1;
+        h[2] = (uint8_t)((1u << 6) | (4u << 2));        /* LC, 44.1 kHz */
+        h[3] = (uint8_t)((1u << 6) | (flen >> 11));     /* 1 channel    */
+        h[4] = (uint8_t)(flen >> 3);
+        h[5] = (uint8_t)((flen << 5) | 0x1F);
+        h[6] = 0xFC;
+        memset(h + 7, (int)(i + 1u), 16);
+        n += flen;
+    }
+    return n;
+}
+
+/* ---- a mount whose reads / seeks can be made to fail (F6, F17) ---- */
+static FM_FS_FileReadFn av2_real_read;
+static FM_FS_FileSeekFn av2_real_seek;
+static long av2_read_budget;
+static long av2_seek_budget;
+
+static FM_Result av2_bad_read(FM_FS *fs, void *fh, void *buf, uint32_t len,
+                              uint32_t *got)
+{
+    if (av2_read_budget == 0)
+    {
+        if (got != NULL) *got = 0;
+        return FM_ERR_IO;
+    }
+    if (av2_read_budget > 0) av2_read_budget--;
+    return av2_real_read(fs, fh, buf, len, got);
+}
+
+static FM_Result av2_bad_seek(FM_FS *fs, void *fh, int64_t offset,
+                              FM_SeekOrigin origin)
+{
+    if (av2_seek_budget == 0) return FM_ERR_IO;
+    if (av2_seek_budget > 0) av2_seek_budget--;
+    return av2_real_seek(fs, fh, offset, origin);
+}
+
+static FM_Result av2_faulty_read_mount(void)
+{
+    FM_Result r = av2_faulty_mount();
+
+    av2_read_budget = -1;
+    av2_seek_budget = -1;
+    if (r == FM_OK)
+    {
+        /* the mount copied the ops: patch the mounted instance */
+        FM_FS *m = &g_av2_fs;
+
+        av2_real_read = m->ops.file_read;
+        av2_real_seek = m->ops.file_seek;
+        m->ops.file_read = av2_bad_read;
+        m->ops.file_seek = av2_bad_seek;
+    }
+    return r;
+}
+
+static void av2_stream_cb(const int16_t *samples, size_t count, void *user)
+{
+    (void)samples; (void)count; (void)user;
+}
+
+/* ---- DMA example (F13, F25) ---- */
+static int16_t g_av2_tap_pre_first;
+static int16_t g_av2_tap_post_first;
+static int     g_av2_tap_pre_calls;
+
+static void av2_tap_pre(void *ctx, int16_t *pcm, size_t samples,
+                        uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)rate; (void)channels;
+    if (samples > 0u && g_av2_tap_pre_calls++ == 0) g_av2_tap_pre_first = pcm[0];
+}
+
+static void av2_tap_post(void *ctx, int16_t *pcm, size_t samples,
+                         uint32_t rate, uint16_t channels)
+{
+    static int calls;
+
+    (void)rate; (void)channels;
+    if (ctx != NULL) { calls = 0; return; }
+    if (samples > 0u && calls++ == 0) g_av2_tap_post_first = pcm[0];
+}
+
+static FM_Result av2_write_ramp_wav(const char *dir, const char *path,
+                                    uint32_t samples)
+{
+    FM_AudioWriter w;
+    FM_Result r;
+    uint32_t i;
+
+    (void)Directory_DeleteRecursive(dir);
+    r = Directory_Create(dir);
+    if (r == FM_OK) r = AudioWriter_Create(path, 8000, 2, 16, &w);
+    for (i = 0; r == FM_OK && i < samples; i += 500u)
+    {
+        int16_t chunk[500];
+        size_t written = 0;
+        uint32_t k;
+
+        for (k = 0; k < 500u; k++) chunk[k] = (int16_t)((i + k) * 4u);
+        r = AudioWriter_Write(&w, chunk, 500, &written);
+    }
+    if (r == FM_OK) r = AudioWriter_Close(&w);
+    return r;
+}
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+/* F4: two tasks, each playing its own WAV file */
+typedef struct
+{
+    const char *path;
+    uint8_t     law;        /* every byte of the file's audio */
+    int16_t     expect;     /* ...and what it decodes to      */
+    int         wrong;
+    FM_Result   result;
+} Av2WavTask;
+
+static void *av2_wav_task(void *arg)
+{
+    Av2WavTask *t = (Av2WavTask *)arg;
+    int16_t out[1024];
+    int pass;
+
+    for (pass = 0; pass < 40 && t->result == FM_OK; pass++)
+    {
+        FM_Audio au;
+        size_t got = 0;
+        size_t i;
+
+        memset(&au, 0, sizeof(au));
+        t->result = Audio_Open(t->path, &au);
+        if (t->result != FM_OK) break;
+        while (Audio_Read(&au, out, 1024, &got) == FM_OK && got > 0)
+        {
+            for (i = 0; i < got; i++)
+            {
+                if (out[i] != t->expect) t->wrong++;
+            }
+        }
+        (void)Audio_Close(&au);
+    }
+    return NULL;
+}
+#endif
+
+static void test_audit_v2_audio(void)
+{
+    static FM_Audio a;
+    FM_AudioInfo info;
+    FM_Result r;
+    FM_Result q;
+    uint64_t frames = 0;
+    size_t len = 0;
+    size_t got = 0;
+    char msg[128];
+
+    printf("\n[External audit v2: audio]\n");
+    restore_posix_root();
+
+#if FM_USE_VORBIS
+    /* ---------------- F1 ---------------- */
+    {
+        static const struct { const char *name; uint32_t count; uint32_t first; int set_first; } k[] = {
+            { "F1: Vorbis comment count 0x20000001 is refused", 0x20000001u, 0, 0 },
+            { "F1: Vorbis comment count 0x10000000 is refused", 0x10000000u, 0, 0 },
+            { "F1: Vorbis comment length 0xFFFFFFFF is refused", 3u, 0xFFFFFFFFu, 1 },
+            { "F1: Vorbis comment count 0xFFFFFFFF is refused", 0xFFFFFFFFu, 0, 0 }
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+        {
+            size_t c = 0;
+            size_t j;
+
+            TEST(k[i].name);
+            r = av2_load("/test/vectors/test_vorbis.ogg", &len);
+            for (j = 0; r == FM_OK && j + 7u < len; j++)
+            {
+                if (memcmp(g_av2_abuf + j, "\003vorbis", 7) == 0)
+                {
+                    c = j + 11u + av2_rd32(g_av2_abuf + j + 7u);
+                    break;
+                }
+            }
+            if (r != FM_OK || c == 0 || c + 8u > len) { FAIL("set-up"); continue; }
+            av2_wr32(g_av2_abuf + c, k[i].count);
+            if (k[i].set_first) av2_wr32(g_av2_abuf + c + 4u, k[i].first);
+            r = File_WriteAll("/av2_bad.ogg", g_av2_abuf, (uint32_t)len);
+            memset(&a, 0, sizeof(a));
+            /* used to write past the list, or free what was never set */
+            q = (r == FM_OK) ? Audio_Open("/av2_bad.ogg", &a) : FM_OK;
+            if (q == FM_OK) (void)Audio_Close(&a);
+            AV2_RESULT(r == FM_OK && q != FM_OK, q, "opened");
+        }
+    }
+
+    TEST("F18: Vorbis cut off anywhere in its setup header (leaks: asan)");
+    {
+        size_t cut;
+        size_t setup = 0;
+        size_t j;
+        int opened = 0;
+
+        r = av2_load("/test/vectors/test_vorbis.ogg", &len);
+        for (j = 0; r == FM_OK && j + 7u < len; j++)
+        {
+            if (memcmp(g_av2_abuf + j, "\005vorbis", 7) == 0) { setup = j; break; }
+        }
+        for (cut = setup; r == FM_OK && setup != 0 && cut < len - 1u; cut += 7u)
+        {
+            r = File_WriteAll("/av2_bad.ogg", g_av2_abuf, (uint32_t)cut);
+            memset(&a, 0, sizeof(a));
+            if (r == FM_OK && Audio_Open("/av2_bad.ogg", &a) == FM_OK)
+            {
+                /* cut in the audio: plays what is there, and that is fine */
+                opened++;
+                (void)Audio_Close(&a);
+            }
+        }
+        AV2_RESULT(r == FM_OK && setup != 0, r, "set-up");
+    }
+    (void)File_Delete("/av2_bad.ogg");
+#endif /* FM_USE_VORBIS */
+
+#if FM_USE_MP3
+    /* ---------------- F2 ---------------- */
+    TEST("F2: MP3 seek into frames that use the bit reservoir");
+    memset(&a, 0, sizeof(a));
+    r = Audio_Open("/test/vectors/mp3_m2_22k_32k.mp3", &a);
+    if (r != FM_OK) { CHECK_RESULT(r, "open"); }
+    else
+    {
+        static const double at[] = { 0.5, 1.5, 2.5, 1.0 };
+        size_t i;
+        int bad = 0;
+
+        for (i = 0; i < sizeof(at) / sizeof(at[0]) && !bad; i++)
+        {
+            uint64_t want = (uint64_t)(at[i] * 22050.0);
+
+            q = Audio_Seek(&a, at[i]);
+            got = 0;
+            if (q == FM_OK) q = Audio_Read(&a, g_av2_pcm, 2048, &got);
+            /* the position is where the audio is: at or a little after
+             * the request, never more than a quarter second away */
+            /* constant bit rate: the position is the request, exactly */
+            if (q != FM_OK || got != 2048u || a.frame_index != want + 2048u)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg),
+                               "seek %.1f: result %d, %u samples, frame %lu",
+                               at[i], (int)q, (unsigned)got,
+                               (unsigned long)a.frame_index);
+            }
+        }
+        (void)Audio_Close(&a);
+        if (bad) FAIL(msg); else PASS();
+    }
+
+    TEST("F22: an MP3 seek (constant bit rate) lands on the sample");
+    {
+        static int16_t whole[70000];
+        static const double at[] = { 0.01, 0.2, 1.234, 2.9, 0.0, 2.0 };
+        size_t n = 0;
+        size_t i;
+        int bad = 0;
+
+        memset(&a, 0, sizeof(a));
+        r = Audio_Open("/test/vectors/mp3_m2_22k_32k.mp3", &a);
+        while (r == FM_OK && n + 4096u <= sizeof(whole) / sizeof(whole[0]) &&
+               Audio_Read(&a, whole + n, 4096, &got) == FM_OK && got > 0)
+        {
+            n += got;
+        }
+        for (i = 0; r == FM_OK && i < sizeof(at) / sizeof(at[0]) && !bad; i++)
+        {
+            size_t want = (size_t)(at[i] * 22050.0);
+            size_t k;
+            long worst = 0;
+
+            q = Audio_Seek(&a, at[i]);
+            if (q == FM_OK && a.frame_index != want) q = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = Audio_Read(&a, g_av2_pcm, 2048, &got);
+            for (k = 0; q == FM_OK && k < got && want + k < n; k++)
+            {
+                long d = (long)g_av2_pcm[k] - (long)whole[want + k];
+
+                if (d < 0) d = -d;
+                if (d > worst) worst = d;
+            }
+            /* the same samples a decode from the start gives */
+            if (q != FM_OK || got != 2048u || worst > 2)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg),
+                               "seek %.3f: result %d, frame %lu (want %lu), off by %ld",
+                               at[i], (int)q, (unsigned long)a.frame_index,
+                               (unsigned long)want, worst);
+            }
+        }
+        if (r == FM_OK) (void)Audio_Close(&a);
+        if (r != FM_OK || n < 60000u) { CHECK_RESULT(FM_ERR_INTERNAL, "set-up"); }
+        else if (bad) FAIL(msg);
+        else PASS();
+    }
+
+    TEST("F2: one damaged MP3 frame header costs a few frames, not the track");
+    {
+        uint64_t whole = 0;
+        uint64_t damaged = 0;
+        size_t at = 0;
+        size_t j;
+
+        r = av2_decode_all("/test/vectors/mp3_m2_22k_32k.mp3", 4096, &whole, NULL);
+        if (r == FM_ERR_EOF) r = av2_load("/test/vectors/mp3_m2_22k_32k.mp3", &len);
+        /* a frame header in the middle of the file */
+        for (j = len / 2u; r == FM_OK && j + 4u < len; j++)
+        {
+            if (g_av2_abuf[j] == 0xFFu && (g_av2_abuf[j + 1u] & 0xE0u) == 0xE0u &&
+                memcmp(g_av2_abuf + j, g_av2_abuf, 2) == 0)
+            {
+                at = j;
+                break;
+            }
+        }
+        if (r == FM_OK && at != 0)
+        {
+            memset(g_av2_abuf + at, 0, 4);
+            r = File_WriteAll("/av2_bad.mp3", g_av2_abuf, (uint32_t)len);
+        }
+        if (r == FM_OK) r = av2_decode_all("/av2_bad.mp3", 4096, &damaged, NULL);
+        (void)snprintf(msg, sizeof(msg), "%lu of %lu frames played",
+                       (unsigned long)damaged, (unsigned long)whole);
+        AV2_RESULT(r == FM_ERR_EOF && at != 0 && whole > 60000u &&
+                   damaged + 8u * 576u >= whole, r, msg);
+        (void)File_Delete("/av2_bad.mp3");
+    }
+
+    TEST("F2: a file that is not MP3 at all is refused");
+    memset(g_av2_abuf, 0, sizeof(g_av2_abuf));
+    r = File_WriteAll("/av2_zero.mp3", g_av2_abuf, (uint32_t)sizeof(g_av2_abuf));
+    memset(&a, 0, sizeof(a));
+    q = (r == FM_OK) ? Audio_Open("/av2_zero.mp3", &a) : FM_OK;
+    if (q == FM_OK) (void)Audio_Close(&a);
+    AV2_RESULT(r == FM_OK && q == FM_ERR_INVALID_FORMAT, q, "open");
+    (void)File_Delete("/av2_zero.mp3");
+
+    /* ---------------- F21 ---------------- */
+    TEST("F21: the Xing/Info frame is not played as audio");
+    r = av2_decode_all("/test/vectors/mp3_info_44k.mp3", 4096, &frames, &info);
+    (void)snprintf(msg, sizeof(msg), "%lu frames decoded, header says %lu",
+                   (unsigned long)frames, (unsigned long)info.total_frames);
+    AV2_RESULT(r == FM_ERR_EOF && info.total_frames != 0u &&
+               frames == info.total_frames, r, msg);
+#endif /* FM_USE_MP3 */
+
+    /* ---------------- F3 ---------------- */
+    TEST("F3: stereo IMA ADPCM decodes to the reference samples");
+    {
+        static uint8_t ref[16 * 1024];
+        static int16_t out[8 * 1024];
+        size_t ref_len = 0;
+        size_t n = 0;
+
+        r = File_ReadAll("/test/vectors/wav_adpcm_ima_stereo_8k.s16", ref,
+                         sizeof(ref), &ref_len);
+        memset(&a, 0, sizeof(a));
+        if (r == FM_OK) r = Audio_Open("/test/vectors/wav_adpcm_ima_stereo_8k.wav", &a);
+        if (r == FM_OK)
+        {
+            /* an awkward chunk size, so blocks are split across reads */
+            while (n + 250u <= sizeof(out) / sizeof(out[0]) &&
+                   (q = Audio_Read(&a, out + n, 250, &got)) == FM_OK && got > 0)
+            {
+                n += got;
+            }
+            info = a.info;
+            (void)Audio_Close(&a);
+        }
+        if (r != FM_OK) { CHECK_RESULT(r, "open"); }
+        else if (n * 2u != ref_len)
+        {
+            (void)snprintf(msg, sizeof(msg), "%u samples, reference has %u",
+                           (unsigned)n, (unsigned)(ref_len / 2u));
+            FAIL(msg);
+        }
+        else if (memcmp(out, ref, ref_len) != 0) FAIL("samples differ");
+        else if (info.total_frames != n / 2u) FAIL("total_frames");
+        else PASS();
+    }
+
+    TEST("F3: Microsoft ADPCM (format 2) is refused, not decoded as IMA");
+    {
+        static const uint8_t blk[256] = { 0 };
+
+        len = av2_build_wav(2, 1, 8000, 4, 256, blk, sizeof(blk));
+        r = File_WriteAll("/av2.wav", g_av2_abuf, (uint32_t)len);
+        memset(&a, 0, sizeof(a));
+        q = (r == FM_OK) ? Audio_Open("/av2.wav", &a) : FM_OK;
+        if (q == FM_OK) (void)Audio_Close(&a);
+        AV2_RESULT(r == FM_OK && q == FM_ERR_UNSUPPORTED, q, "open");
+    }
+
+    /* ---------------- F10 ---------------- */
+    TEST("F10: A-law polarity (G.711: 0xD5 is +8, 0x55 is -8)");
+    {
+        static const uint8_t law[4] = { 0xD5, 0x55, 0xAA, 0x2A };
+        int16_t out4[4] = { 0, 0, 0, 0 };
+
+        len = av2_build_wav(6, 1, 8000, 8, 1, law, sizeof(law));
+        r = File_WriteAll("/av2.wav", g_av2_abuf, (uint32_t)len);
+        memset(&a, 0, sizeof(a));
+        if (r == FM_OK) r = Audio_Open("/av2.wav", &a);
+        if (r == FM_OK)
+        {
+            r = Audio_Read(&a, out4, 4, &got);
+            (void)Audio_Close(&a);
+        }
+        (void)snprintf(msg, sizeof(msg), "got %d %d %d %d", out4[0], out4[1],
+                       out4[2], out4[3]);
+        AV2_RESULT(r == FM_OK && out4[0] == 8 && out4[1] == -8 &&
+                   out4[2] == 32256 && out4[3] == -32256, r, msg);
+    }
+
+#if FM_USE_THREADS && FM_HOST_BUILD
+    /* ---------------- F4 ---------------- */
+    TEST("F4: two tasks play two WAV files, each hears its own");
+    {
+        static uint8_t law[16000];
+        static Av2WavTask task[2] = {
+            { "/av2_t0.wav", 0xFF, 0, 0, FM_OK },       /* mu-law, silence   */
+            { "/av2_t1.wav", 0x00, 0, 0, FM_OK }        /* mu-law, full scale */
+        };
+        pthread_t th[2];
+        int started = 0;
+        int i;
+
+        r = FM_OK;
+        for (i = 0; i < 2 && r == FM_OK; i++)
+        {
+            task[i].wrong = 0;
+            task[i].result = FM_OK;
+            memset(law, task[i].law, sizeof(law));
+            len = av2_build_wav(7, 1, 8000, 8, 1, law, sizeof(law));
+            r = File_WriteAll(task[i].path, g_av2_abuf, (uint32_t)len);
+            /* what one task alone hears */
+            memset(&a, 0, sizeof(a));
+            if (r == FM_OK) r = Audio_Open(task[i].path, &a);
+            if (r == FM_OK)
+            {
+                r = Audio_Read(&a, g_av2_pcm, 1, &got);
+                task[i].expect = g_av2_pcm[0];
+                (void)Audio_Close(&a);
+            }
+        }
+        if (r == FM_OK && task[0].expect == task[1].expect) r = FM_ERR_INTERNAL;
+        for (i = 0; i < 2 && r == FM_OK; i++)
+        {
+            if (pthread_create(&th[i], NULL, av2_wav_task, &task[i]) != 0)
+            {
+                r = FM_ERR_INTERNAL;
+                break;
+            }
+            started++;
+        }
+        for (i = 0; i < started; i++) (void)pthread_join(th[i], NULL);
+        (void)snprintf(msg, sizeof(msg),
+                       "results %d %d, samples of the other file: %d and %d",
+                       (int)task[0].result, (int)task[1].result,
+                       task[0].wrong, task[1].wrong);
+        AV2_RESULT(r == FM_OK && task[0].result == FM_OK &&
+                   task[1].result == FM_OK && task[0].wrong == 0 &&
+                   task[1].wrong == 0, r, msg);
+        (void)File_Delete("/av2_t0.wav");
+        (void)File_Delete("/av2_t1.wav");
+    }
+#endif
+
+    /* ---------------- F8 + G.711 seek ---------------- */
+    TEST("F8: duration and seek of G.711 count one byte a sample");
+    {
+        static uint8_t law[8000];
+        size_t i;
+
+        for (i = 0; i < sizeof(law); i++) law[i] = (uint8_t)(0xD5u ^ (i / 1000u));
+        len = av2_build_wav(7, 1, 8000, 8, 1, law, sizeof(law));
+        r = File_WriteAll("/av2.wav", g_av2_abuf, (uint32_t)len);
+        memset(&a, 0, sizeof(a));
+        if (r == FM_OK) r = Audio_Open("/av2.wav", &a);
+        if (r == FM_OK)
+        {
+            int16_t at_start[1];
+            int16_t at_half[1];
+            uint64_t total = a.info.total_frames;
+
+            q = Audio_Read(&a, at_start, 1, &got);
+            if (q == FM_OK) q = Audio_Seek(&a, 0.5);
+            /* half a second in is byte 4000: a different value than at
+             * byte 8000, where the seek used to land (and found the end) */
+            if (q == FM_OK) q = Audio_Read(&a, at_half, 1, &got);
+            (void)snprintf(msg, sizeof(msg), "%lu frames, frame_index %lu",
+                           (unsigned long)total, (unsigned long)a.frame_index);
+            AV2_RESULT(q == FM_OK && total == 8000u && a.frame_index == 4001u &&
+                       at_half[0] != at_start[0], q, msg);
+            (void)Audio_Close(&a);
+        }
+        else
+        {
+            CHECK_RESULT(r, "open");
+        }
+    }
+
+    TEST("F8: Player_GetDuration for ADPCM, G.711, FLAC, Vorbis, MP3");
+    {
+        static const struct { const char *name; double want; } k[] = {
+            { "wav_adpcm_ima_stereo_8k.wav", 2034.0 / 8000.0 },
+            { "wav_alaw_8k.wav", 0.0 },         /* filled in below */
+#if FM_USE_FLAC
+            { "flac_6ch_8k.flac", 0.2 },
+#endif
+#if FM_USE_VORBIS
+            { "test_vorbis.ogg", 1.0 },
+#endif
+#if FM_USE_MP3
+            { "mp3_info_44k.mp3", 46080.0 / 44100.0 },
+#endif
+        };
+        static FM_Player pl;
+        size_t i;
+        int bad = 0;
+
+        (void)Directory_DeleteRecursive("/av2dur");
+        r = Directory_Create("/av2dur");
+        for (i = 0; r == FM_OK && i < sizeof(k) / sizeof(k[0]); i++)
+        {
+            char from[96];
+            char to[96];
+
+            (void)snprintf(from, sizeof(from), "/test/vectors/%s", k[i].name);
+            (void)snprintf(to, sizeof(to), "/av2dur/%02u_%s", (unsigned)i, k[i].name);
+            r = File_Copy(from, to, NULL, NULL);
+        }
+        if (r == FM_OK) r = Player_Init(&pl);
+        if (r == FM_OK) r = Player_ScanFolder(&pl, "/av2dur", FM_PLAYER_KIND_AUDIO);
+        if (r == FM_OK && Player_Count(&pl) != sizeof(k) / sizeof(k[0])) r = FM_ERR_INTERNAL;
+        for (i = 0; r == FM_OK && i < sizeof(k) / sizeof(k[0]) && !bad; i++)
+        {
+            double d;
+            double want = k[i].want;
+            uint64_t decoded = 0;
+
+            r = Player_Play(&pl, (uint32_t)i);
+            if (r != FM_OK) break;
+            d = Player_GetDuration(&pl);
+            (void)Player_Stop(&pl);
+            /* the truth: what a full decode delivers */
+            q = av2_decode_all(Player_ItemPath(&pl, (uint32_t)i), 3072,
+                               &decoded, &info);
+            if (want == 0.0) want = (double)decoded / (double)info.sample_rate;
+            if (q != FM_ERR_EOF || d < want - 0.002 || d > want + 0.002 ||
+                (double)decoded / (double)info.sample_rate < want - 0.002 ||
+                (double)decoded / (double)info.sample_rate > want + 0.002)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "%s: %.3f s reported, %.3f s decoded",
+                               k[i].name, d,
+                               (double)decoded / (double)info.sample_rate);
+            }
+        }
+        Player_Deinit(&pl);
+        (void)Directory_DeleteRecursive("/av2dur");
+        if (r != FM_OK) { CHECK_RESULT(r, "set-up"); }
+        else if (bad) FAIL(msg);
+        else PASS();
+    }
+
+    /* ---------------- F24 ---------------- */
+    TEST("F24: a scanned folder lists .opus and not .m4a");
+    {
+        static FM_Player pl;
+        uint32_t i;
+        int opus = 0;
+        int m4a = 0;
+
+        (void)Directory_DeleteRecursive("/av2scan");
+        r = Directory_Create("/av2scan");
+        if (r == FM_OK) r = File_WriteAll("/av2scan/a.opus", "x", 1);
+        if (r == FM_OK) r = File_WriteAll("/av2scan/b.m4a", "x", 1);
+        if (r == FM_OK) r = File_WriteAll("/av2scan/c.wav", "x", 1);
+        if (r == FM_OK) r = Player_Init(&pl);
+        if (r == FM_OK) r = Player_ScanFolder(&pl, "/av2scan", FM_PLAYER_KIND_AUDIO);
+        for (i = 0; r == FM_OK && i < Player_Count(&pl); i++)
+        {
+            const char *path = Player_ItemPath(&pl, i);
+
+            if (strstr(path, ".opus") != NULL) opus++;
+            if (strstr(path, ".m4a") != NULL) m4a++;
+        }
+        Player_Deinit(&pl);
+        (void)Directory_DeleteRecursive("/av2scan");
+        (void)snprintf(msg, sizeof(msg), ".opus %d, .m4a %d", opus, m4a);
+        AV2_RESULT(r == FM_OK && opus == 1 && m4a == 0, r, msg);
+    }
+
+    TEST("F9: Player_Seek / SeekFwd / SeekBack refuse NaN");
+    {
+        static FM_Player pl;
+        volatile double zero = 0.0;
+        double nan_value = zero / zero;
+        FM_Result s1 = FM_OK;
+        FM_Result s2 = FM_OK;
+        FM_Result s3 = FM_OK;
+
+        (void)Directory_DeleteRecursive("/av2scan");
+        r = Directory_Create("/av2scan");
+        if (r == FM_OK) r = File_Copy("/test/vectors/wav_alaw_8k.wav", "/av2scan/a.wav", NULL, NULL);
+        if (r == FM_OK) r = Player_Init(&pl);
+        if (r == FM_OK) r = Player_ScanFolder(&pl, "/av2scan", FM_PLAYER_KIND_AUDIO);
+        if (r == FM_OK) r = Player_Play(&pl, 0);
+        if (r == FM_OK) r = Player_Seek(&pl, 1.0);
+        if (r == FM_OK)
+        {
+            s1 = Player_Seek(&pl, nan_value);
+            s2 = Player_SeekFwd(&pl, nan_value);
+            s3 = Player_SeekBack(&pl, nan_value);   /* used to rewind to 0 */
+        }
+        (void)snprintf(msg, sizeof(msg), "results %d %d %d, position %.2f",
+                       (int)s1, (int)s2, (int)s3, Player_GetPosition(&pl));
+        AV2_RESULT(r == FM_OK && s1 == FM_ERR_INVALID_ARGUMENT &&
+                   s2 == FM_ERR_INVALID_ARGUMENT && s3 == FM_ERR_INVALID_ARGUMENT &&
+                   Player_GetPosition(&pl) > 0.99, r, msg);
+        Player_Deinit(&pl);
+        (void)Directory_DeleteRecursive("/av2scan");
+    }
+
+    /* ---------------- F9 ---------------- */
+    TEST("F9: Audio_Seek(NaN) is an argument error in every format");
+    {
+        static const char *const files[] = {
+            "/test/vectors/wav_alaw_8k.wav",
+            "/test/vectors/wav_adpcm_ima_22k.wav",
+#if FM_USE_FLAC
+            "/test/vectors/test_flac.flac",
+#endif
+#if FM_USE_VORBIS
+            "/test/vectors/test_vorbis.ogg",
+#endif
+#if FM_USE_MP3
+            "/test/vectors/mp3_m2_22k_32k.mp3",
+#endif
+        };
+        size_t i;
+        int bad = 0;
+        volatile double zero = 0.0;
+        double nan_value = zero / zero;
+
+        for (i = 0; i < sizeof(files) / sizeof(files[0]) && !bad; i++)
+        {
+            memset(&a, 0, sizeof(a));
+            r = Audio_Open(files[i], &a);
+            q = (r == FM_OK) ? Audio_Seek(&a, nan_value) : r;
+            if (r == FM_OK) (void)Audio_Close(&a);
+            if (q != FM_ERR_INVALID_ARGUMENT)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "%s: result %d", files[i], (int)q);
+            }
+        }
+        if (bad) FAIL(msg); else PASS();
+    }
+
+    TEST("F9: a seek far past the end is the end, not the start");
+    {
+        static const char *const files[] = {
+            "/test/vectors/wav_alaw_8k.wav",
+            "/test/vectors/wav_adpcm_ima_22k.wav",
+#if FM_USE_FLAC
+            "/test/vectors/test_flac.flac",
+#endif
+#if FM_USE_VORBIS
+            "/test/vectors/test_vorbis.ogg",
+#endif
+#if FM_USE_MP3
+            "/test/vectors/mp3_m2_22k_32k.mp3",
+#endif
+        };
+        static const double far_away[] = { 1e30, 1e9, 0.0 /* infinity */ };
+        size_t i;
+        size_t j;
+        int bad = 0;
+        volatile double zero = 0.0;
+
+        for (i = 0; i < sizeof(files) / sizeof(files[0]) && !bad; i++)
+        {
+            for (j = 0; j < 3u && !bad; j++)
+            {
+                double t = (j == 2u) ? 1.0 / zero : far_away[j];
+
+                memset(&a, 0, sizeof(a));
+                r = Audio_Open(files[i], &a);
+                q = (r == FM_OK) ? Audio_Seek(&a, t) : r;
+                got = 99;
+                /* either the seek says "past the end", or the read does */
+                if (q == FM_OK) q = Audio_Read(&a, g_av2_pcm, 256, &got);
+                if (r == FM_OK) (void)Audio_Close(&a);
+                if (q != FM_ERR_EOF)
+                {
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg), "%s, case %u: result %d",
+                                   files[i], (unsigned)j, (int)q);
+                }
+            }
+        }
+        if (bad) FAIL(msg); else PASS();
+    }
+
+#if FM_USE_FLAC
+    /* ---------------- F11 ---------------- */
+    TEST("F11: Audio_ReadMono refuses a 6-channel stream");
+    memset(&a, 0, sizeof(a));
+    r = Audio_Open("/test/vectors/flac_6ch_8k.flac", &a);
+    if (r != FM_OK) { CHECK_RESULT(r, "open"); }
+    else
+    {
+        got = 99;
+        q = Audio_ReadMono(&a, g_av2_pcm, 600, &got);
+        (void)snprintf(msg, sizeof(msg), "%u \"mono\" samples", (unsigned)got);
+        AV2_RESULT(q == FM_ERR_UNSUPPORTED && got == 0u, q, msg);
+        (void)Audio_Close(&a);
+    }
+
+    TEST("F11: a 6-channel stream is read in whole frames");
+    r = av2_decode_all("/test/vectors/flac_6ch_8k.flac", 1000, &frames, &info);
+    {
+        int whole = 1;
+
+        memset(&a, 0, sizeof(a));
+        q = Audio_Open("/test/vectors/flac_6ch_8k.flac", &a);
+        while (q == FM_OK && Audio_Read(&a, g_av2_pcm, 1000, &got) == FM_OK)
+        {
+            if (got % 6u != 0u) whole = 0;      /* 1000 is not a multiple */
+        }
+        if (q == FM_OK) (void)Audio_Close(&a);
+        (void)snprintf(msg, sizeof(msg), "%lu frames", (unsigned long)frames);
+        AV2_RESULT(r == FM_ERR_EOF && q == FM_OK && whole && frames == 1600u,
+                   r, msg);
+    }
+
+    /* ---------------- F14 ---------------- */
+    TEST("F14: FLAC without a declared length does not cost megabytes");
+    {
+        FM_Allocator saved = *FM_Allocator_Get();
+        FM_Allocator mine = { av2_alloc, NULL, av2_realloc, av2_free, NULL };
+        uint64_t declared = 0;
+
+        r = av2_decode_all("/test/vectors/test_flac.flac", 4096, &declared, NULL);
+        if (r == FM_ERR_EOF) r = av2_load("/test/vectors/test_flac.flac", &len);
+        /* STREAMINFO: the 36-bit sample count -> 0 = "not known" */
+        if (r == FM_OK)
+        {
+            g_av2_abuf[21] &= 0xF0u;
+            memset(g_av2_abuf + 22, 0, 4);
+            r = File_WriteAll("/av2.flac", g_av2_abuf, (uint32_t)len);
+        }
+        g_av2_max_alloc = 0;
+        (void)FM_Allocator_Set(&mine);
+        if (r == FM_OK) r = av2_decode_all("/av2.flac", 4096, &frames, &info);
+        (void)FM_Allocator_Set(&saved);
+        (void)snprintf(msg, sizeof(msg), "%lu frames (%lu), largest block %lu",
+                       (unsigned long)frames, (unsigned long)declared,
+                       (unsigned long)g_av2_max_alloc);
+        /* the whole track is under 100 KB of PCM */
+        AV2_RESULT(r == FM_ERR_EOF && frames == declared && frames != 0u &&
+                   info.total_frames == frames &&
+                   g_av2_max_alloc < 512u * 1024u, r, msg);
+        (void)File_Delete("/av2.flac");
+    }
+#endif /* FM_USE_FLAC */
+
+    /* ---------------- F12 / F15 ---------------- */
+    TEST("F12: a read smaller than one frame is an argument error");
+    {
+        static const uint8_t pcm8[400] = { 0 };
+
+        len = av2_build_wav(1, 2, 8000, 16, 4, pcm8, sizeof(pcm8));
+        r = File_WriteAll("/av2.wav", g_av2_abuf, (uint32_t)len);
+        memset(&a, 0, sizeof(a));
+        if (r == FM_OK) r = Audio_Open("/av2.wav", &a);
+        if (r == FM_OK)
+        {
+            FM_Result one;
+            FM_Result three;
+            size_t got3 = 99;
+
+            got = 99;
+            one = Audio_Read(&a, g_av2_pcm, 1, &got);
+            three = Audio_Read(&a, g_av2_pcm, 3, &got3);    /* one frame */
+            (void)snprintf(msg, sizeof(msg), "count 1: %d/%u, count 3: %d/%u",
+                           (int)one, (unsigned)got, (int)three, (unsigned)got3);
+            AV2_RESULT(one == FM_ERR_INVALID_ARGUMENT && got == 0u &&
+                       three == FM_OK && got3 == 2u, one, msg);
+            (void)Audio_Close(&a);
+        }
+        else
+        {
+            CHECK_RESULT(r, "open");
+        }
+    }
+
+    TEST("F12: Audio_Stream with a chunk smaller than one frame");
+    memset(&a, 0, sizeof(a));
+    r = Audio_Open("/av2.wav", &a);
+    q = (r == FM_OK) ? Audio_Stream(&a, av2_stream_cb, NULL, 1) : r;
+    if (r == FM_OK) (void)Audio_Close(&a);
+    AV2_RESULT(q == FM_ERR_INVALID_ARGUMENT, q, "result");
+
+    TEST("F15: the sample count is written on every path");
+    {
+        size_t n1 = 0xDEADu;
+        size_t n2 = 0xDEADu;
+        FM_Result r1;
+        FM_Result r2 = FM_OK;
+
+        memset(&a, 0, sizeof(a));
+        r = Audio_Open("/test/vectors/wav_adpcm_ima_22k.wav", &a);
+        if (r == FM_OK) r = Audio_Seek(&a, 1e9);
+        r1 = (r == FM_OK) ? Audio_Read(&a, g_av2_pcm, 64, &n1) : r;
+        if (r == FM_OK) r2 = Audio_ReadFrame(&a, g_av2_pcm, &n2);
+        if (r == FM_OK) (void)Audio_Close(&a);
+        (void)snprintf(msg, sizeof(msg), "read %d/%lu, frame %d/%lu", (int)r1,
+                       (unsigned long)n1, (int)r2, (unsigned long)n2);
+        AV2_RESULT(r1 == FM_ERR_EOF && n1 == 0u && r2 == FM_ERR_EOF && n2 == 0u,
+                   r, msg);
+    }
+    (void)File_Delete("/av2.wav");
+
+    /* ---------------- F5 / F16 / F6 / F17: AAC ---------------- */
+    r = Audio_RegisterDecoder("AAC", &g_av2_aac_ops);
+    len = av2_build_adts(40);
+    if (r == FM_OK) r = File_WriteAll("/av2.aac", g_av2_abuf, (uint32_t)len);
+
+    TEST("F16: the AAC decoder is given the frame with its ADTS header");
+    g_av2_aac_frames = 0; g_av2_aac_header_ok = 0; g_av2_aac_claim = 0;
+    q = (r == FM_OK) ? av2_decode_all("/av2.aac", 512, &frames, NULL) : r;
+    (void)snprintf(msg, sizeof(msg), "%d of %d frames had a header, %lu samples",
+                   g_av2_aac_header_ok, g_av2_aac_frames, (unsigned long)frames);
+    AV2_RESULT(q == FM_ERR_EOF && g_av2_aac_frames == 40 &&
+               g_av2_aac_header_ok == 40 && frames == 40u * 64u, q, msg);
+
+    TEST("F5: an AAC decoder that reports more than it was given room for");
+    g_av2_aac_claim = 6000u;
+    memset(&a, 0, sizeof(a));
+    q = (r == FM_OK) ? Audio_Open("/av2.aac", &a) : r;
+    if (q == FM_OK)
+    {
+        got = 0;
+        q = Audio_Read(&a, g_av2_pcm, 8192, &got);
+        (void)Audio_Close(&a);
+    }
+    g_av2_aac_claim = 0;
+    (void)snprintf(msg, sizeof(msg), "%u samples delivered", (unsigned)got);
+    AV2_RESULT(q == FM_ERR_INTERNAL && got == 0u, q, msg);
+
+    TEST("F6: junk between AAC frames is skipped, the track goes on");
+    {
+        /* 20 frames, 11 bytes that are no frame, 20 frames */
+        size_t half = 20u * 23u;
+
+        len = av2_build_adts(40);
+        memmove(g_av2_abuf + half + 11u, g_av2_abuf + half, len - half);
+        memset(g_av2_abuf + half, 0x11, 11);
+        q = File_WriteAll("/av2j.aac", g_av2_abuf, (uint32_t)(len + 11u));
+        g_av2_aac_frames = 0;
+        if (q == FM_OK) q = av2_decode_all("/av2j.aac", 512, &frames, NULL);
+        (void)snprintf(msg, sizeof(msg), "%d frames decoded", g_av2_aac_frames);
+        AV2_RESULT(r == FM_OK && q == FM_ERR_EOF && g_av2_aac_frames == 40, q, msg);
+        (void)File_Delete("/av2j.aac");
+    }
+
+#if FM_USE_FMFS
+    TEST("F6: a read error is reported as one, not as the end (AAC, MP3)");
+    {
+        static const char *const names[] = {
+            "/av2.aac",
+#if FM_USE_MP3
+            "/test/vectors/mp3_m2_22k_32k.mp3",
+#endif
+        };
+        size_t i;
+        int bad = 0;
+
+        for (i = 0; i < sizeof(names) / sizeof(names[0]) && !bad; i++)
+        {
+            char path[96];
+            uint64_t clean = 0;
+            long budget;
+            int seen_io = 0;
+
+            q = av2_load(names[i], &len);
+            if (q == FM_OK) q = av2_faulty_read_mount();
+            (void)strcpy(path, g_fc_mount[0]);
+            (void)strcat(path, "/t.bin");
+            /* the extension decides the decoder */
+            (void)strcpy(path + strlen(path) - 3u, (i == 0u) ? "aac" : "mp3");
+            if (q == FM_OK) q = File_WriteAll(path, g_av2_abuf, (uint32_t)len);
+            if (q == FM_OK) q = av2_decode_all(path, 512, &clean, NULL);
+            if (q != FM_ERR_EOF)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "%s: set-up %d", names[i], (int)q);
+            }
+            /* fail the n-th read of the storage, for every n that matters */
+            for (budget = 1; !bad && budget < 40; budget++)
+            {
+                uint64_t part = 0;
+
+                av2_read_budget = budget;
+                q = av2_decode_all(path, 512, &part, NULL);
+                av2_read_budget = -1;
+                if (q == FM_ERR_EOF && part == clean) break;    /* never hit */
+                if (q == FM_ERR_IO) seen_io = 1;
+                if (q == FM_ERR_EOF || q == FM_OK)
+                {
+                    /* a short track that claims to have ended */
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg),
+                                   "%s: read %ld failed, %lu of %lu frames, result %d",
+                                   names[i], budget, (unsigned long)part,
+                                   (unsigned long)clean, (int)q);
+                }
+            }
+            if (!bad && !seen_io)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "%s: no read was failed", names[i]);
+            }
+            fc_drop(0);
+        }
+        if (bad) FAIL(msg); else PASS();
+    }
+
+    TEST("F17: every AAC decoder that is created is closed again");
+    {
+        long budget;
+        int bad = 0;
+        char path[96];
+
+        len = av2_build_adts(40);
+        q = av2_faulty_read_mount();
+        (void)strcpy(path, g_fc_mount[0]);
+        (void)strcat(path, "/t.aac");
+        if (q == FM_OK) q = File_WriteAll(path, g_av2_abuf, (uint32_t)len);
+        g_av2_aac_inits = 0;
+        g_av2_aac_closes = 0;
+        for (budget = 0; q == FM_OK && budget < 12; budget++)
+        {
+            FM_Result o;
+
+            av2_seek_budget = budget;
+            memset(&a, 0, sizeof(a));
+            o = Audio_Open(path, &a);
+            av2_seek_budget = -1;
+            if (o == FM_OK) (void)Audio_Close(&a);
+        }
+        if (q != FM_OK || g_av2_aac_inits == 0 ||
+            g_av2_aac_inits != g_av2_aac_closes)
+        {
+            bad = 1;
+        }
+        (void)snprintf(msg, sizeof(msg), "%d created, %d closed",
+                       g_av2_aac_inits, g_av2_aac_closes);
+        fc_drop(0);
+        AV2_RESULT(!bad, q, msg);
+    }
+#endif /* FM_USE_FMFS */
+    (void)Audio_UnregisterDecoder("AAC");
+    (void)File_Delete("/av2.aac");
+
+#if FM_USE_OPUS && FM_OPUS_USE_LIBOPUS
+    /* ---------------- F7 / F19 ---------------- */
+    TEST("F7: Opus with more than two channels is refused");
+    r = av2_load("/test/vectors/test_opus.ogg", &len);
+    if (r == FM_OK && memcmp(g_av2_abuf + 28, "OpusHead", 8) == 0)
+    {
+        g_av2_abuf[28 + 9] = 6;         /* channels */
+        g_av2_abuf[28 + 18] = 1;        /* mapping family 1 */
+        r = File_WriteAll("/av2.opus", g_av2_abuf, (uint32_t)len);
+    }
+    else if (r == FM_OK) r = FM_ERR_INTERNAL;
+    memset(&a, 0, sizeof(a));
+    q = (r == FM_OK) ? Audio_Open("/av2.opus", &a) : FM_OK;
+    if (q == FM_OK) (void)Audio_Close(&a);
+    AV2_RESULT(r == FM_OK && q == FM_ERR_UNSUPPORTED, q, "open");
+
+    TEST("F19: the Opus header gain is applied (-6 dB halves the level)");
+    {
+        double e_plain = 0.0;
+        double e_gain = 0.0;
+        int pass;
+
+        for (pass = 0; pass < 2; pass++)
+        {
+            double e = 0.0;
+            size_t i;
+
+            r = av2_load("/test/vectors/test_opus.ogg", &len);
+            if (r != FM_OK) break;
+            if (pass == 1)
+            {
+                g_av2_abuf[28 + 16] = 0x00;     /* -6 * 256 = 0xFA00 */
+                g_av2_abuf[28 + 17] = 0xFA;
+            }
+            r = File_WriteAll("/av2.opus", g_av2_abuf, (uint32_t)len);
+            memset(&a, 0, sizeof(a));
+            if (r == FM_OK) r = Audio_Open("/av2.opus", &a);
+            if (r != FM_OK) break;
+            while (Audio_Read(&a, g_av2_pcm, 4096, &got) == FM_OK && got > 0)
+            {
+                for (i = 0; i < got; i++) e += (double)g_av2_pcm[i] * g_av2_pcm[i];
+            }
+            (void)Audio_Close(&a);
+            if (pass == 0) e_plain = e; else e_gain = e;
+        }
+        /* energy ratio of -6 dB is 0.2512 */
+        (void)snprintf(msg, sizeof(msg), "energy ratio %.4f",
+                       (e_plain > 0.0) ? e_gain / e_plain : 0.0);
+        AV2_RESULT(r == FM_OK && e_plain > 0.0 && e_gain > 0.24 * e_plain &&
+                   e_gain < 0.26 * e_plain, r, msg);
+    }
+    (void)File_Delete("/av2.opus");
+#endif
+
+    /* ---------------- F28 ---------------- */
+    TEST("F28: the decoders take their memory from the library allocator");
+    {
+        static const struct { const char *path; unsigned long least; } k[] = {
+#if FM_USE_FLAC
+            /* file, decoder state, PCM, stream: was file, PCM, stream */
+            { "/test/vectors/test_flac.flac", 4 },
+#endif
+#if FM_USE_VORBIS
+            /* codebooks, floors, residues, windows: hundreds of blocks */
+            { "/test/vectors/test_vorbis.ogg", 50 },
+#endif
+#if FM_USE_OPUS && FM_OPUS_USE_LIBOPUS
+            { "/test/vectors/test_opus.ogg", 0 },
+#endif
+            { "/test/vectors/wav_alaw_8k.wav", 0 }
+        };
+        FM_Allocator saved = *FM_Allocator_Get();
+        /* no realloc: what a simple heap has to offer */
+        FM_Allocator mine = { av2_alloc, NULL, NULL, av2_free, NULL };
+        size_t i;
+        int bad = 0;
+
+        for (i = 0; i < sizeof(k) / sizeof(k[0]) && !bad; i++)
+        {
+            g_av2_alloc_calls = 0;
+            g_av2_alloc_live = 0;
+            (void)FM_Allocator_Set(&mine);
+            r = av2_decode_all(k[i].path, 4096, &frames, NULL);
+            (void)FM_Allocator_Set(&saved);
+            if (r != FM_ERR_EOF || frames == 0u ||
+                g_av2_alloc_calls < k[i].least || g_av2_alloc_live != 0)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg),
+                               "%s: result %d, %lu blocks asked for, %ld not freed",
+                               k[i].path, (int)r, g_av2_alloc_calls,
+                               g_av2_alloc_live);
+            }
+        }
+        if (bad) FAIL(msg); else PASS();
+    }
+
+#if FM_USE_MEDIA_DETECT
+    /* ---------------- F26 ---------------- */
+    TEST("F26: UTF-16 text is not detected as MP3");
+    {
+        static const uint8_t bom_short[8] = { 0xFF, 0xFE, 'H', 0, 'i', 0, '\r', 0 };
+        static uint8_t bom_long[512];
+        FM_MediaType t1;
+        FM_MediaType t2;
+        FM_MediaType t3;
+        size_t i;
+
+        bom_long[0] = 0xFF; bom_long[1] = 0xFE;
+        for (i = 2; i < sizeof(bom_long); i += 2u)
+        {
+            bom_long[i] = (uint8_t)('A' + (i / 2u) % 26u);
+            bom_long[i + 1u] = 0;
+        }
+        t1 = Media_DetectBuffer(bom_short, sizeof(bom_short), NULL);
+        t2 = Media_DetectBuffer(bom_long, sizeof(bom_long), NULL);
+        /* and a real MP3 still is one, with a long and with a short look */
+        r = av2_load("/test/vectors/mp3_m2_22k_32k.mp3", &len);
+        t3 = Media_DetectBuffer(g_av2_abuf, 512, NULL);
+        (void)snprintf(msg, sizeof(msg), "text %d %d, mp3 %d %d", (int)t1,
+                       (int)t2, (int)t3,
+                       (int)Media_DetectBuffer(g_av2_abuf, 4, NULL));
+        AV2_RESULT(r == FM_OK && t1 != FM_MEDIA_MP3 && t2 != FM_MEDIA_MP3 &&
+                   t3 == FM_MEDIA_MP3 &&
+                   Media_DetectBuffer(g_av2_abuf, 4, NULL) == FM_MEDIA_MP3 &&
+                   File_DetectType("/test/vectors/tone_stereo.mp3") == FM_MEDIA_MP3,
+                   r, msg);
+    }
+
+    TEST("F26: extensions .m4a .opus .oga .wave, and a bare extension hint");
+    {
+        FM_MediaType m4a = Media_DetectByExtension("/x.m4a");
+        FM_MediaType opus = Media_DetectByExtension("/x.OPUS");
+        FM_MediaType oga = Media_DetectByExtension("/x.oga");
+        FM_MediaType wave = Media_DetectByExtension("/x.wave");
+        FM_MediaType bare = Media_DetectBuffer(NULL, 0, "mp3");
+        FM_MediaType dotted = Media_DetectBuffer(NULL, 0, ".mp3");
+        FM_MediaType named = Media_DetectBuffer(NULL, 0, "a.mp3");
+
+        (void)snprintf(msg, sizeof(msg), "%d %d %d %d, hints %d %d %d", (int)m4a,
+                       (int)opus, (int)oga, (int)wave, (int)bare, (int)dotted,
+                       (int)named);
+        AV2_RESULT(m4a == FM_MEDIA_MP4 && opus == FM_MEDIA_OGG &&
+                   oga == FM_MEDIA_OGG && wave == FM_MEDIA_WAV &&
+                   bare == FM_MEDIA_MP3 && dotted == FM_MEDIA_MP3 &&
+                   named == FM_MEDIA_MP3, FM_OK, msg);
+    }
+#endif /* FM_USE_MEDIA_DETECT */
+
+    /* ---------------- F23 ---------------- */
+    TEST("F23: a recorder that cannot report its file name creates none");
+    {
+        FM_AudioWriter w;
+        char small[8];
+        uint32_t count[2] = { 0, 0 };
+        FM_Result r3 = FM_OK;
+        int i;
+
+        (void)Directory_DeleteRecursive("/av2rec");
+        for (i = 0; i < 3; i++)
+        {
+            r3 = AudioRecorder_Open("/av2rec", 8000, 1, 16, &w, small, sizeof(small));
+            if (r3 == FM_OK) (void)AudioWriter_Close(&w);
+        }
+        (void)Directory_ScanRecursive("/av2rec", av2_count_cb, NULL, count, NULL);
+        (void)snprintf(msg, sizeof(msg), "%u files left", (unsigned)count[0]);
+        AV2_RESULT(r3 == FM_ERR_TOO_LARGE && count[0] == 0u, r3, msg);
+        (void)Directory_DeleteRecursive("/av2rec");
+    }
+
+    /* ---------------- F13 / F25: the DMA example ---------------- */
+    TEST("F13: DMA player, odd half size and a stereo track");
+    {
+        static Ex13_AudioDma x;
+        static int16_t dma[2 * 255] __attribute__((aligned(32)));
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        memset(dma, 0x55, sizeof(dma));
+        if (r == FM_OK)
+        {
+            r = Ex13_AudioDmaStartEx(&x, "/av2dma", &ex13_test_port, NULL,
+                                     dma, 255, NULL);
+        }
+        /* half 0: samples 0..253 and one silent slot; half 1 goes on with
+         * sample 254 -- it used to be silence, the track "had ended" */
+        (void)snprintf(msg, sizeof(msg), "half 0 ends %d %d, half 1 starts %d %d",
+                       dma[253], dma[254], dma[255], dma[256]);
+        AV2_RESULT(r == FM_OK && dma[253] == 253 * 4 && dma[254] == 0 &&
+                   dma[255] == 254 * 4 && dma[256] == 255 * 4, r, msg);
+        (void)Ex13_AudioDmaStop(&x);
+    }
+
+    TEST("F25: DMA player, the pre-gain tap sees the samples before the gain");
+    {
+        static Ex13_AudioDma x;
+        static int16_t dma[2 * 256] __attribute__((aligned(32)));
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        if (r == FM_OK)
+        {
+            r = Ex13_AudioDmaStartEx(&x, "/av2dma", &ex13_test_port, NULL,
+                                     dma, 256, NULL);
+        }
+        g_av2_tap_pre_calls = 0;
+        g_av2_tap_pre_first = -1;
+        g_av2_tap_post_first = -1;
+        av2_tap_post(&x, NULL, 0, 0, 0);            /* reset its counter */
+        if (r == FM_OK)
+        {
+            Ex13_AudioDmaSetVolume(&x, 16383);
+            Ex13_AudioDmaSetPrePcmTap(&x, av2_tap_pre, NULL);
+            Ex13_AudioDmaSetPostPcmTap(&x, av2_tap_post, NULL);
+            Ex13_AudioDmaHalfCallback(&x);          /* refill half 0 */
+            r = Ex13_AudioDmaPoll(&x);
+        }
+        /* the refill starts at sample 512 of the ramp: 2048 */
+        (void)snprintf(msg, sizeof(msg), "pre tap %d, post tap %d",
+                       g_av2_tap_pre_first, g_av2_tap_post_first);
+        AV2_RESULT(r == FM_OK && g_av2_tap_pre_first == 2048 &&
+                   g_av2_tap_post_first >= 1022 && g_av2_tap_post_first <= 1025,
+                   r, msg);
+        (void)Ex13_AudioDmaStop(&x);
+        (void)Directory_DeleteRecursive("/av2dma");
+    }
+}
+#endif /* FM_USE_AUDIO */

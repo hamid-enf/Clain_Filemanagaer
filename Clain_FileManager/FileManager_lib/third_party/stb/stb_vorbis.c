@@ -947,6 +947,14 @@ static void *make_block_array(void *mem, int count, int size)
    return p;
 }
 
+/* FileManager: the decoder's own memory comes from the library allocator
+ * (FM_Allocator_Set), not straight from libc: a project that gives the
+ * library a heap of its own, and has little or no libc heap, could not
+ * open a Vorbis file.  Declared here, not included, so that this file
+ * builds with the include path it always had. */
+extern void *FM_Alloc(size_t size);
+extern void FM_Free(void *p);
+
 static void *setup_malloc(vorb *f, int sz)
 {
    sz = (sz+7) & ~7; // round up to nearest 8 for alignment of future allocs.
@@ -957,13 +965,13 @@ static void *setup_malloc(vorb *f, int sz)
       f->setup_offset += sz;
       return p;
    }
-   return sz ? malloc(sz) : NULL;
+   return sz ? FM_Alloc((size_t) sz) : NULL;
 }
 
 static void setup_free(vorb *f, void *p)
 {
    if (f->alloc.alloc_buffer) return; // do nothing; setup mem is a stack
-   free(p);
+   FM_Free(p);
 }
 
 static void *setup_temp_malloc(vorb *f, int sz)
@@ -974,7 +982,7 @@ static void *setup_temp_malloc(vorb *f, int sz)
       f->temp_offset -= sz;
       return (char *) f->alloc.alloc_buffer + f->temp_offset;
    }
-   return malloc(sz);
+   return FM_Alloc((size_t) sz);
 }
 
 static void setup_temp_free(vorb *f, void *p, int sz)
@@ -983,7 +991,7 @@ static void setup_temp_free(vorb *f, void *p, int sz)
       f->temp_offset += (sz+7)&~7;
       return;
    }
-   free(p);
+   FM_Free(p);
 }
 
 #define CRC32_POLY    0x04c11db7   // from spec
@@ -1598,9 +1606,11 @@ static int get8_packet(vorb *f)
 static int get32_packet(vorb *f)
 {
    uint32 x;
-   x = get8_packet(f);
-   x += get8_packet(f) << 8;
-   x += get8_packet(f) << 16;
+   // FileManager: get8_packet() is -1 at the end of a packet, and shifting
+   // a negative int is undefined; as unsigned the bits are the same.
+   x = (uint32) get8_packet(f);
+   x += (uint32) get8_packet(f) << 8;
+   x += (uint32) get8_packet(f) << 16;
    x += (uint32) get8_packet(f) << 24;
    return x;
 }
@@ -3593,6 +3603,17 @@ static int is_whole_packet_present(stb_vorbis *f)
 }
 #endif // !STB_VORBIS_NO_PUSHDATA_API
 
+// FileManager patch: can `count` items of `unit` bytes each be in this
+// stream at all?  Also keeps count * sizeof(char*) and count + 1 inside
+// an int, which is what setup_malloc takes.
+static int fm_header_len_ok(vorb *f, int count, unsigned int unit)
+{
+   if (count < 0) return 0;
+   if ((unsigned int) count > 0x0FFFFFFFu) return 0;
+   if (f->stream_len != 0 && (uint32) count > f->stream_len / unit) return 0;
+   return 1;
+}
+
 static int start_decoder(vorb *f)
 {
    uint8 header[6], x,y;
@@ -3664,8 +3685,18 @@ static int start_decoder(vorb *f)
    if (get8_packet(f) != VORBIS_packet_comment)            return error(f, VORBIS_invalid_setup);
    for (i=0; i < 6; ++i) header[i] = get8_packet(f);
    if (!vorbis_validate(header))                    return error(f, VORBIS_invalid_setup);
+   // FileManager patch: the three lengths below come straight from the
+   // file and upstream believes them.  A comment count of 0x20000001 made
+   // "sizeof(char*) * count" wrap to 8 bytes in setup_malloc's int and the
+   // loop wrote pointers past that block; a count the allocator refused,
+   // or a comment length of 0xFFFFFFFF, returned with the count still set
+   // over a list that was NULL or never filled in, and vorbis_deinit then
+   // freed whatever it found there.  So: every length is checked against
+   // the size of the stream, the list is zeroed before it is filled, and
+   // the count is only kept while the list behind it exists.
    //file vendor
    len = get32_packet(f);
+   if (!fm_header_len_ok(f, len, 1))               return error(f, VORBIS_invalid_setup);
    f->vendor = (char*)setup_malloc(f, sizeof(char) * (len+1));
    if (f->vendor == NULL)                           return error(f, VORBIS_outofmem);
    for(i=0; i < len; ++i) {
@@ -3675,14 +3706,24 @@ static int start_decoder(vorb *f)
    //user comments
    f->comment_list_length = get32_packet(f);
    f->comment_list = NULL;
+   if (f->comment_list_length < 0 ||
+       !fm_header_len_ok(f, f->comment_list_length, 4)) {   // 4 length bytes each
+      f->comment_list_length = 0;
+      return error(f, VORBIS_invalid_setup);
+   }
    if (f->comment_list_length > 0)
    {
-      f->comment_list = (char**) setup_malloc(f, sizeof(char*) * (f->comment_list_length));
-      if (f->comment_list == NULL)                  return error(f, VORBIS_outofmem);
+      f->comment_list = (char**) setup_malloc(f, (int) (sizeof(char*) * f->comment_list_length));
+      if (f->comment_list == NULL) {
+         f->comment_list_length = 0;
+         return error(f, VORBIS_outofmem);
+      }
+      memset(f->comment_list, 0, sizeof(char*) * f->comment_list_length);
    }
 
    for(i=0; i < f->comment_list_length; ++i) {
       len = get32_packet(f);
+      if (!fm_header_len_ok(f, len, 1))            return error(f, VORBIS_invalid_setup);
       f->comment_list[i] = (char*)setup_malloc(f, sizeof(char) * (len+1));
       if (f->comment_list[i] == NULL)               return error(f, VORBIS_outofmem);
 
@@ -3732,8 +3773,20 @@ static int start_decoder(vorb *f)
    f->codebooks = (Codebook *) setup_malloc(f, sizeof(*f->codebooks) * f->codebook_count);
    if (f->codebooks == NULL)                        return error(f, VORBIS_outofmem);
    memset(f->codebooks, 0, sizeof(*f->codebooks) * f->codebook_count);
+   // FileManager patch: `lengths` and `values` of a sparse codebook are
+   // temporary blocks, freed at the end of this loop body.  Upstream
+   // returns from the middle of it on a damaged header without freeing
+   // them, so every failed open of such a file leaked them.
+   #define FM_CODEBOOK_FAIL(e)                                             \
+      do {                                                                 \
+         if (c->sparse) {                                                  \
+            setup_temp_free(f, values, 0);                                 \
+            setup_temp_free(f, lengths, 0);                                \
+         }                                                                 \
+         return error(f, (e));                                             \
+      } while (0)
    for (i=0; i < f->codebook_count; ++i) {
-      uint32 *values;
+      uint32 *values = NULL;
       int ordered, sorted_count;
       int total=0;
       uint8 *lengths;
@@ -3778,7 +3831,7 @@ static int start_decoder(vorb *f)
                lengths[j] = get_bits(f, 5) + 1;
                ++total;
                if (lengths[j] == 32)
-                  return error(f, VORBIS_invalid_setup);
+                  FM_CODEBOOK_FAIL(VORBIS_invalid_setup);
             } else {
                lengths[j] = NO_CODE;
             }
@@ -3791,7 +3844,7 @@ static int start_decoder(vorb *f)
             f->setup_temp_memory_required = c->entries;
 
          c->codeword_lengths = (uint8 *) setup_malloc(f, c->entries);
-         if (c->codeword_lengths == NULL) return error(f, VORBIS_outofmem);
+         if (c->codeword_lengths == NULL) FM_CODEBOOK_FAIL(VORBIS_outofmem);
          memcpy(c->codeword_lengths, lengths, c->entries);
          setup_temp_free(f, lengths, c->entries); // note this is only safe if there have been no intervening temp mallocs!
          lengths = c->codeword_lengths;
@@ -3821,11 +3874,11 @@ static int start_decoder(vorb *f)
          unsigned int size;
          if (c->sorted_entries) {
             c->codeword_lengths = (uint8 *) setup_malloc(f, c->sorted_entries);
-            if (!c->codeword_lengths)           return error(f, VORBIS_outofmem);
+            if (!c->codeword_lengths)           FM_CODEBOOK_FAIL(VORBIS_outofmem);
             c->codewords = (uint32 *) setup_temp_malloc(f, sizeof(*c->codewords) * c->sorted_entries);
-            if (!c->codewords)                  return error(f, VORBIS_outofmem);
+            if (!c->codewords)                  FM_CODEBOOK_FAIL(VORBIS_outofmem);
             values = (uint32 *) setup_temp_malloc(f, sizeof(*values) * c->sorted_entries);
-            if (!values)                        return error(f, VORBIS_outofmem);
+            if (!values)                        FM_CODEBOOK_FAIL(VORBIS_outofmem);
          }
          size = c->entries + (sizeof(*c->codewords) + sizeof(*values)) * c->sorted_entries;
          if (size > f->setup_temp_memory_required)
@@ -3833,18 +3886,17 @@ static int start_decoder(vorb *f)
       }
 
       if (!compute_codewords(c, lengths, c->entries, values)) {
-         if (c->sparse) setup_temp_free(f, values, 0);
-         return error(f, VORBIS_invalid_setup);
+         FM_CODEBOOK_FAIL(VORBIS_invalid_setup);
       }
 
       if (c->sorted_entries) {
          // allocate an extra slot for sentinels
          c->sorted_codewords = (uint32 *) setup_malloc(f, sizeof(*c->sorted_codewords) * (c->sorted_entries+1));
-         if (c->sorted_codewords == NULL) return error(f, VORBIS_outofmem);
+         if (c->sorted_codewords == NULL) FM_CODEBOOK_FAIL(VORBIS_outofmem);
          // allocate an extra slot at the front so that c->sorted_values[-1] is defined
          // so that we can catch that case without an extra if
          c->sorted_values    = ( int   *) setup_malloc(f, sizeof(*c->sorted_values   ) * (c->sorted_entries+1));
-         if (c->sorted_values == NULL) return error(f, VORBIS_outofmem);
+         if (c->sorted_values == NULL) FM_CODEBOOK_FAIL(VORBIS_outofmem);
          ++c->sorted_values;
          c->sorted_values[-1] = -1;
          compute_sorted_huffman(c, lengths, values);
@@ -3857,6 +3909,7 @@ static int start_decoder(vorb *f)
          c->codewords = NULL;
       }
 
+      #undef FM_CODEBOOK_FAIL
       compute_accelerated_huffman(c);
 
       CHECK(f);
@@ -5185,7 +5238,7 @@ static void copy_samples(short *dest, float *src, int len)
    for (i=0; i < len; ++i) {
       FASTDEF(temp);
       int v = FAST_SCALED_FLOAT_TO_INT(temp, src[i],15);
-      if ((unsigned int) (v + 32768) > 65535)
+      if (((unsigned int) v + 32768u) > 65535u) /* FileManager: unsigned add, no signed overflow */
          v = v < 0 ? -32768 : 32767;
       dest[i] = v;
    }
@@ -5209,7 +5262,7 @@ static void compute_samples(int mask, short *output, int num_c, float **data, in
       for (i=0; i < n; ++i) {
          FASTDEF(temp);
          int v = FAST_SCALED_FLOAT_TO_INT(temp,buffer[i],15);
-         if ((unsigned int) (v + 32768) > 65535)
+         if (((unsigned int) v + 32768u) > 65535u) /* FileManager: unsigned add, no signed overflow */
             v = v < 0 ? -32768 : 32767;
          output[o+i] = v;
       }
@@ -5249,7 +5302,7 @@ static void compute_stereo_samples(short *output, int num_c, float **data, int d
       for (i=0; i < (n<<1); ++i) {
          FASTDEF(temp);
          int v = FAST_SCALED_FLOAT_TO_INT(temp,buffer[i],15);
-         if ((unsigned int) (v + 32768) > 65535)
+         if (((unsigned int) v + 32768u) > 65535u) /* FileManager: unsigned add, no signed overflow */
             v = v < 0 ? -32768 : 32767;
          output[o2+i] = v;
       }
@@ -5299,7 +5352,7 @@ static void convert_channels_short_interleaved(int buf_c, short *buffer, int dat
             FASTDEF(temp);
             float f = data[i][d_offset+j];
             int v = FAST_SCALED_FLOAT_TO_INT(temp, f,15);//data[i][d_offset+j],15);
-            if ((unsigned int) (v + 32768) > 65535)
+            if (((unsigned int) v + 32768u) > 65535u) /* FileManager: unsigned add, no signed overflow */
                v = v < 0 ? -32768 : 32767;
             *buffer++ = v;
          }

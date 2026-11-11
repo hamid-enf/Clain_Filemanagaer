@@ -64,12 +64,24 @@ static FM_Result fm_opus_do_init(void **ctx, const FM_AudioInfo *info)
         int err = OPUS_INVALID_STATE;
         /* Opus always decodes to 48 kHz internally (input_sample_rate
          * is only a hint for the encoder API family we do not use). */
-        c->dec = opus_decoder_create(48000, (opus_int32)c->info.channels, &err);
+        /* The decoder state comes from the library allocator
+         * (FM_Allocator_Set): opus_decoder_create() takes it from libc. */
+        int size = opus_decoder_get_size((int)c->info.channels);
+
+        c->dec = (size > 0) ? (OpusDecoder *)FM_Alloc((size_t)size) : NULL;
+        if (c->dec != NULL) {
+            err = opus_decoder_init(c->dec, 48000,
+                                    (opus_int32)c->info.channels);
+        }
         if (c->dec == NULL || err != OPUS_OK) {
+            FM_Result why = (c->dec == NULL) ? FM_ERR_NO_MEMORY
+                                             : FM_ERR_INTERNAL;
+
+            FM_ERR_LOG("Opus decoder set-up failed: %s",
+                       c->dec != NULL ? opus_strerror(err) : "no memory");
+            FM_Free(c->dec);
             FM_Free(c);
-            FM_ERR_LOG("opus_decoder_create failed: %s",
-                       err != OPUS_OK ? opus_strerror(err) : "null state");
-            return FM_ERR_NO_MEMORY;
+            return why;
         }
     }
 
@@ -119,7 +131,7 @@ static void fm_opus_do_close(void *ctx)
     if (ctx == NULL) return;
     {
         OpusCtx *c = (OpusCtx *)ctx;
-        if (c->dec != NULL) opus_decoder_destroy(c->dec);
+        FM_Free(c->dec);                /* state from FM_Alloc, see init */
     }
     FM_Free(ctx);
 }

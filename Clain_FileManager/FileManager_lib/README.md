@@ -74,7 +74,7 @@ File_Move("/config/backup.txt", "/backup.txt", NULL, NULL);
 | EEPROM page-aware read/write/update/erase adapter | ✅ |
 | USB MSC block bridge for TinyUSB/STM32 USB ports | ✅ |
 | Thread-safe core (FreeRTOS / CMSIS-RTOS2 / pthread ports) | ✅ |
-| Dynamic allocation in the core | None |
+| Dynamic allocation in the file / storage core | None (decoders: see [Memory allocation hooks](#memory-allocation-hooks)) |
 
 ### Exact media format contract
 
@@ -304,6 +304,68 @@ Audio_Close(&a);
 stereo output are available separately.  MP3 input is streamed (no whole-file
 buffer) and ID3v2 tags are skipped automatically.
 
+### Audio rules and limits
+
+**Length and position.** `FM_AudioInfo.total_frames` is the length of the
+track in sample frames (one frame = one sample per channel) and
+`FM_Audio.frame_index` the position; `Player_GetDuration()` and
+`Player_GetPosition()` are these two divided by the sample rate.  The
+length is exact for WAV (PCM, G.711, IMA ADPCM), FLAC, Vorbis, Opus and
+MP3 with a Xing/Info header.  For MP3 without one it is computed from the
+bit rate of the first frame: right for constant bit rate, **wrong for
+variable bit rate without a Xing header** (such files play, but length,
+position and seek are estimates).  It is 0, "not known", for AAC.
+
+**Reads are whole frames.** `Audio_Read(a, samples, count, &read)` rounds
+`count` down to a multiple of the channel count.  A `count` smaller than
+one frame is `FM_ERR_INVALID_ARGUMENT`; it is not the end of the track.
+`*read` is written on every path, 0 when nothing was delivered.
+
+**Results.** `FM_ERR_EOF` is the end of the audio and nothing else.  A
+storage failure is `FM_ERR_IO`, a damaged file `FM_ERR_CORRUPTED`, a
+format the library knows and does not decode `FM_ERR_UNSUPPORTED`, a
+track too long for its buffer `FM_ERR_TOO_LARGE`.  Damaged stretches
+inside an MP3 or AAC stream are skipped to the next frame and playback
+goes on.
+
+**Seek.** `Audio_Seek(a, seconds)` refuses a negative time and NaN
+(`FM_ERR_INVALID_ARGUMENT`); a time past the end is the end.  It lands on
+the exact sample for WAV, FLAC, Vorbis, Opus and constant-bit-rate MP3.
+For variable-bit-rate MP3 it goes by the 100-entry table of the Xing
+header: the sound starts up to about 0.15 s after the request and
+`frame_index` can be some 50 ms off.  AAC does not seek.
+
+**What is decoded.**
+
+| Format | Decoded | Refused |
+|---|---|---|
+| WAV | PCM 8/16 bit, A-law, mu-law, IMA ADPCM (4 bit) mono and stereo | Microsoft ADPCM (format 2), 24-bit, float, more than 2 channels: `FM_ERR_UNSUPPORTED` |
+| MP3 | MPEG-1/2/2.5 Layer III; the Xing/Info frame is read, not played | |
+| FLAC | up to 8 channels, decoded whole at open, at most `FM_FLAC_MAX_PCM_BYTES` of PCM | longer: `FM_ERR_TOO_LARGE` |
+| Ogg Vorbis | mono / stereo, decoded whole at open | more channels: `FM_ERR_UNSUPPORTED` |
+| Ogg Opus | mono / stereo (channel mapping family 0); the output gain of the header is applied | surround (family 1 and up): `FM_ERR_UNSUPPORTED` |
+| AAC (ADTS) | through a registered decoder | `.m4a` is an MP4 file: open it with the video API (`Video_ReadAudioFrame`) |
+
+A **chained Ogg file** (several streams one after the other, as internet
+radio recordings are) plays its first stream only.  `Audio_ReadMono()`
+serves mono and stereo; with more channels it is `FM_ERR_UNSUPPORTED`.
+
+**Stack.** The decoders work on the stack of the task that calls
+`Audio_Open` / `Audio_Read`.  Measured on x86 by an external audit: MP3
+about 19 KB (minimp3 keeps its scratch area there), Opus 24 to 28 KB at
+open, Vorbis about 8 KB, FLAC about 6 KB, WAV about 4 KB.  ARM figures
+differ, the order of magnitude does not: give an audio task that plays
+MP3 or Opus at least 32 KB and measure the high-water mark on the target
+(they have not been measured on one).
+
+**Damaged files and the bundled decoders.** `dr_flac` computes its
+predictions in signed 32-bit arithmetic; on a damaged FLAC file these can
+overflow, which the C standard leaves undefined.  No memory error follows
+(the external audit fuzzed it under AddressSanitizer and saw none), the
+samples of that block are noise.
+Compile `src/fm_flac.c` with `-fwrapv` if your rules require defined
+behaviour here.
+
 ## Video: AVI / MP4 / H.264 / MJPEG / audio
 
 The video layer parses FMRV, AVI (RIFF), MP4 (ISO BMFF), Matroska/WebM and
@@ -452,9 +514,17 @@ for real-time audio/video streams.
 
 ## Memory allocation hooks
 
-The core stays allocation-free, but the optional H.264 decoder, image-resize
-helpers and media-player playlist need dynamic memory.  All of them go through
-`fm_alloc.h`, so you can redirect them to external RAM in one call:
+The file and storage core stays allocation-free.  These parts need dynamic
+memory: the H.264 decoder and the video demuxer (`fm_video.c`), the image
+helpers of `fm_image.c`, the optional JPEG file buffer (`FM_JPEG_HW_HEAP`),
+the media-player playlist, IMA ADPCM (one block), and the
+FLAC, Vorbis and Opus decoders, which hold the compressed file, the decoder
+state and the whole decoded track (FLAC: at most `FM_FLAC_MAX_PCM_BYTES`,
+Opus: `FM_OPUS_MAX_FILE_BYTES` / `FM_OPUS_MAX_PCM_BYTES`).  WAV PCM, G.711
+and MP3 play without any.  All of it goes through `fm_alloc.h` -- the
+state of the bundled dr_flac, stb_vorbis and libopus included, nothing
+calls the C library's `malloc` behind the allocator's back -- so you can
+redirect it to external RAM in one call:
 
 ```c
 FM_Allocator ext = { sram_alloc, sram_calloc, sram_realloc, sram_free, ctx };
@@ -486,6 +556,12 @@ AAC block or an OS codec API plugs in with one call:
 Audio_RegisterDecoder("AAC", &my_aac_ops);
 Audio_Open("/song.aac", &a);   /* now plays */
 ```
+
+The decoder's `decode()` is given one whole frame **including its 7-byte
+ADTS header** and room for `out_count` samples.  It reports how many it
+wrote in `*out_samples`; a count above `out_count` is treated as a broken
+decoder and ends the read with `FM_ERR_INTERNAL`.  Every context `init()`
+creates is given back to `close()`, also when the open fails afterwards.
 
 ## Resize (images and video)
 

@@ -20339,6 +20339,9 @@ int main(void)
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);
 #endif
+#if FM_USE_AUDIO
+    RUN_SUITE(test_audit_v2_audio);
+#endif
 #if FM_USE_THREADS && FM_HOST_BUILD
     RUN_SUITE(test_threads);
     RUN_SUITE(test_threads_wide);

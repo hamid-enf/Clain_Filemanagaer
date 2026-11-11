@@ -410,6 +410,13 @@
 #define FM_OPUS_MAX_PCM_BYTES (16u * 1024u * 1024u)
 #endif
 #endif
+#ifndef FM_FLAC_MAX_PCM_BYTES
+/* FLAC is decoded whole at open: the most decoded PCM one track may
+ * take (16-bit, all channels).  A longer track is refused with
+ * FM_ERR_TOO_LARGE, never shortened.  40 MiB is 3 min 58 s of 44.1 kHz
+ * stereo; set it to what your heap can give in fm_board_config.h. */
+#define FM_FLAC_MAX_PCM_BYTES (40u * 1024u * 1024u)
+#endif
 #ifndef FM_USE_AAC
 #define FM_USE_AAC FM_TIER1_CODEC_DEFAULT
 #endif

@@ -13,6 +13,25 @@
 #define DR_FLAC_IMPLEMENTATION
 #include "../third_party/dr_flac/dr_flac.h"
 
+/* dr_flac's own memory comes from the library allocator (FM_Allocator_Set).
+ * No realloc hook: dr_flac then grows a block by allocate + copy + free,
+ * which works with an allocator that has no realloc. */
+static void *fm_flac_malloc(size_t size, void *user)
+{
+    (void)user;
+    return FM_Alloc(size);
+}
+
+static void fm_flac_free(void *p, void *user)
+{
+    (void)user;
+    FM_Free(p);
+}
+
+static const drflac_allocation_callbacks g_fm_flac_alloc = {
+    NULL, fm_flac_malloc, NULL, fm_flac_free
+};
+
 typedef struct {
     FM_AudioInfo info;
 } FlacCtx;
@@ -41,7 +60,7 @@ static FM_Result flac_decode(void *ctx, const uint8_t *in, size_t in_size,
     if (in == NULL || in_size < 42u) return FM_ERR_CORRUPTED;
     if (out_count == 0u) return FM_ERR_TOO_LARGE;
 
-    p = drflac_open_memory(in, in_size, NULL);
+    p = drflac_open_memory(in, in_size, &g_fm_flac_alloc);
     if (p == NULL) return FM_ERR_CORRUPTED;
 
     if (c != NULL && c->info.channels != 0 && p->channels != c->info.channels) {

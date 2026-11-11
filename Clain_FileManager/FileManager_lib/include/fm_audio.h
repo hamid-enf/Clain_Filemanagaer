@@ -26,6 +26,11 @@ typedef struct
     uint32_t format;           /* 1 = PCM                           */
     char     codec[8];         /* "WAV","MP3",...                   */
     uint16_t block_align;      /* WAV: bytes per block (ADPCM framing) */
+    uint64_t total_frames;     /* length in sample frames; 0 = not known
+                                * (AAC).  Exact for WAV, FLAC, Vorbis,
+                                * Opus and MP3 with a Xing/Info header;
+                                * for other MP3 an estimate from the
+                                * bitrate of the first frame.           */
 } FM_AudioInfo;
 
 typedef void (*FM_AudioCallback)(const int16_t *samples,

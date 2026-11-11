@@ -97,11 +97,14 @@ FM_Result Player_DecodeVideo(FM_Player *p, void *pixels, size_t cap,
 /* ------------------------------------------------------------------ */
 /* Seek                                                                */
 /* ------------------------------------------------------------------ */
+/* A negative time or NaN is FM_ERR_INVALID_ARGUMENT. */
 FM_Result Player_Seek(FM_Player *p, double seconds);       /* absolute */
 FM_Result Player_SeekFwd(FM_Player *p, double seconds);
 FM_Result Player_SeekBack(FM_Player *p, double seconds);
 
-/* Position / duration in seconds (0.0 = unknown, e.g. VBR MP3/AAC). */
+/* Position / duration in seconds.  The duration is FM_AudioInfo.total_frames
+ * over the sample rate: 0.0 = not known (AAC); an estimate for MP3 without
+ * a Xing/Info header (wrong when such a file is variable bit rate). */
 double Player_GetPosition(const FM_Player *p);
 double Player_GetDuration(const FM_Player *p);
 
