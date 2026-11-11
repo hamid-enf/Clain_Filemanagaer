@@ -15,6 +15,7 @@
 #if FM_USE_FLAC
 #include "fm_flac.h"
 #endif
+#include "fm_adpcm.h"       /* Microsoft ADPCM blocks (WAV format 0x02) */
 #if FM_USE_VORBIS
 struct stb_vorbis;
 typedef struct stb_vorbis stb_vorbis;
@@ -236,7 +237,9 @@ static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16
     return out;
 }
 /* ------------------------------------------------------------------ */
-/* IMA-ADPCM WAV (format 0x11), mono or stereo: block-framed decoding   */
+/* ADPCM WAV, mono or stereo: block-framed decoding                     */
+/* IMA (format 0x11) and Microsoft (format 0x02) share everything here  */
+/* but the block decoder and the number of frames a block holds.        */
 /*                                                                     */
 /* IMA-ADPCM داده را در بلاک‌های مستقل فریم‌بندی می‌کند (هر بلاک       */
 /* سرصفحهٔ ۴ بایتی predictor/index خودش را دارد). دیکدر بی‌حالت است،   */
@@ -246,7 +249,7 @@ static size_t wav_adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16
 /* استریم را بدون گم‌شدن نمونه تولید می‌کند.                            */
 /* ------------------------------------------------------------------ */
 typedef struct {
-    uint16_t block_align;   /* bytes per IMA block (sanitised >= 4) */
+    uint16_t block_align;   /* bytes per block (sanitised >= 4)      */
     size_t   carry_len;     /* decoded samples sitting in carry      */
     size_t   carry_pos;     /* first unserved sample in carry        */
     /* flexible tail: uint8_t raw[block_align]; int16_t carry[];     */
@@ -301,6 +304,56 @@ static uint16_t wav_adpcm_block_align_of(const FM_Audio *a)
     return ba;
 }
 
+/* The same three questions for either coder (format 0x11 / 0x02) */
+static size_t wav_adpcm_frames_of(const FM_Audio *a, uint16_t ba)
+{
+    return (a->info.format == 0x02u)
+               ? adpcm_block_frames(0x0002u, a->info.channels, ba)
+               : wav_adpcm_block_frames(ba, a->info.channels);
+}
+
+static uint64_t wav_adpcm_length_of(const FM_Audio *a)
+{
+    uint16_t ba = wav_adpcm_block_align_of(a);
+
+    if (a->info.format == 0x02u)
+    {
+        return (a->info.data_size / ba) *
+                   adpcm_block_frames(0x0002u, a->info.channels, ba) +
+               adpcm_block_frames(0x0002u, a->info.channels,
+                                  (size_t)(a->info.data_size % ba));
+    }
+    return wav_adpcm_total_frames(a->info.data_size, ba, a->info.channels);
+}
+
+/* Samples (not frames) the carry has to hold for one block */
+static size_t wav_adpcm_carry_of(const FM_Audio *a, uint16_t ba)
+{
+    return (a->info.format == 0x02u) ? (size_t)ba * 2u
+                                     : wav_adpcm_carry_cap(ba);
+}
+
+/* One Microsoft ADPCM block into the carry.  The block decoder writes
+ * little-endian bytes; the carry holds samples in host order. */
+static size_t wav_adpcm_ms_decode(const uint8_t *src, size_t n, uint32_t ch,
+                                  int16_t *dst)
+{
+    size_t samples = adpcm_block_frames(0x0002u, ch, n) * ch;
+    uint8_t *b = (uint8_t *)dst;
+    size_t i;
+
+    if (samples == 0u)
+    {
+        return 0u;
+    }
+    (void)adpcm_ms_block(src, n, ch, b);
+    for (i = 0u; i < samples; i++)
+    {
+        dst[i] = (int16_t)adpcm_rd16(b + 2u * i);
+    }
+    return samples;
+}
+
 static void wav_adpcm_reset(FM_Audio *a)
 {
     WavAdpcmState *st = (WavAdpcmState *)a->codec_ctx;
@@ -321,7 +374,7 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
     if (st == NULL) {
         uint16_t ba = wav_adpcm_block_align_of(a);
         size_t carry_off = ((size_t)ba + 1u) & ~(size_t)1u; /* align carry */
-        size_t cap = wav_adpcm_carry_cap(ba);
+        size_t cap = wav_adpcm_carry_of(a, ba);
         st = (WavAdpcmState *)FM_Alloc(sizeof(*st) + carry_off +
                                        cap * sizeof(int16_t));
         if (st == NULL) return FM_ERR_NO_MEMORY;
@@ -369,7 +422,10 @@ static FM_Result wav_adpcm_serve(FM_Audio *a, int16_t *samples,
              * tail bytes (bug #3). */
             take = got_bytes;
         }
-        got = (a->info.channels == 2u)
+        got = (a->info.format == 0x02u)
+                  ? wav_adpcm_ms_decode(WAV_ADPCM_RAW(st), take,
+                                        a->info.channels, WAV_ADPCM_CARRY(st))
+              : (a->info.channels == 2u)
                   ? wav_adpcm_decode_block_stereo(
                         WAV_ADPCM_RAW(st), take, WAV_ADPCM_CARRY(st),
                         wav_adpcm_carry_cap(st->block_align))
@@ -1123,13 +1179,18 @@ static FM_Result audio_parse_wav(FM_Audio *a)
         (void)strcpy(a->info.codec, "ULAW");
         a->info.bits_per_sample = 16;
     } else if (a->info.format == 0x11u) {
-        /* IMA ADPCM, 4 bits a sample.  Microsoft ADPCM (format 0x02) is
-         * a different coder with its own block layout; it used to be
-         * accepted here and run through the IMA decoder, which returned
-         * FM_OK and noise.  It is refused like every other format this
-         * reader has no decoder for. */
+        /* IMA ADPCM, 4 bits a sample. */
         if (a->info.bits_per_sample != 4u) return FM_ERR_UNSUPPORTED;
         if (a->info.block_align < 4u * a->info.channels) return FM_ERR_CORRUPTED;
+        (void)strcpy(a->info.codec, "ADPCM");
+        a->info.bits_per_sample = 16;
+    } else if (a->info.format == 0x02u) {
+        /* Microsoft ADPCM: a different coder with its own block layout
+         * (fm_adpcm.h).  It was once run through the IMA decoder (FM_OK
+         * and noise), then refused; it now has its decoder.  A block
+         * starts with 7 bytes a channel. */
+        if (a->info.bits_per_sample != 4u) return FM_ERR_UNSUPPORTED;
+        if (a->info.block_align < 7u * a->info.channels) return FM_ERR_CORRUPTED;
         (void)strcpy(a->info.codec, "ADPCM");
         a->info.bits_per_sample = 16;
     } else {
@@ -1139,9 +1200,8 @@ static FM_Result audio_parse_wav(FM_Audio *a)
     if (a->info.format == 1u) {
         a->info.total_frames = a->info.data_size /
             ((uint64_t)a->info.channels * (a->info.bits_per_sample / 8u));
-    } else if (a->info.format == 0x11u) {
-        a->info.total_frames = wav_adpcm_total_frames(
-            a->info.data_size, wav_adpcm_block_align_of(a), a->info.channels);
+    } else if (a->info.format == 0x11u || a->info.format == 0x02u) {
+        a->info.total_frames = wav_adpcm_length_of(a);
     } else {
         a->info.total_frames = a->info.data_size / a->info.channels;
     }
@@ -2476,7 +2536,7 @@ FM_Result Audio_Close(FM_Audio *a)
     {
         if (a->info.format == 0x11u || a->info.format == 0x02u)
         {
-            /* IMA-ADPCM block state (lazy per-stream allocation) */
+            /* ADPCM block state (lazy per-stream allocation) */
             FM_Free(a->codec_ctx);
             a->codec_ctx = NULL;
         }
@@ -2602,7 +2662,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
     {
         if (a->info.format == 0x11u || a->info.format == 0x02u)
         {
-            /* IMA-ADPCM block state (codec string is "ADPCM") */
+            /* ADPCM block state (codec string is "ADPCM") */
             return wav_adpcm_serve(a, samples, count, read);
         }
         if (strcmp(a->info.codec, "AAC") == 0)
@@ -2754,10 +2814,10 @@ FM_Result Audio_Seek(FM_Audio *a, double seconds)
     }
     if (a->info.format == 0x11u || a->info.format == 0x02u)
     {
-        /* IMA-ADPCM: seek must land on a block boundary (the decoder is
+        /* ADPCM: seek must land on a block boundary (the decoder is
          * stateless per block).  Granularity = one block. */
         uint16_t ba = wav_adpcm_block_align_of(a);
-        size_t spb = wav_adpcm_block_frames(ba, a->info.channels);
+        size_t spb = wav_adpcm_frames_of(a, ba);
         uint64_t blk;
         uint64_t target;
 

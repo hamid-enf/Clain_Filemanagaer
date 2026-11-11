@@ -2108,16 +2108,39 @@ static void test_audit_v2_audio(void)
         else PASS();
     }
 
-    TEST("F3: Microsoft ADPCM (format 2) is refused, not decoded as IMA");
+    TEST("F3: Microsoft ADPCM (format 2) has its own decoder, not the IMA one");
     {
+        /* A block of zeros: predictor 0, both start samples 0, every
+         * nibble 0 -> 2 + (256 - 7) * 2 = 500 frames of silence.  (The
+         * IMA decoder made 505 samples of it; the reference vectors are
+         * in test/audit_v3_tests.h.) */
         static const uint8_t blk[256] = { 0 };
+        static int16_t pcm[600];
+        size_t i;
+        int quiet = 1;
 
+        memset(&info, 0, sizeof(info));
+        memset(pcm, 0x55, sizeof(pcm));
+        got = 0;
         len = av2_build_wav(2, 1, 8000, 4, 256, blk, sizeof(blk));
         r = File_WriteAll("/av2.wav", g_av2_abuf, (uint32_t)len);
         memset(&a, 0, sizeof(a));
         q = (r == FM_OK) ? Audio_Open("/av2.wav", &a) : FM_OK;
-        if (q == FM_OK) (void)Audio_Close(&a);
-        AV2_RESULT(r == FM_OK && q == FM_ERR_UNSUPPORTED, q, "open");
+        if (r == FM_OK && q == FM_OK)
+        {
+            (void)Audio_GetInfo(&a, &info);
+            q = Audio_Read(&a, pcm, 600, &got);
+            (void)Audio_Close(&a);
+        }
+        for (i = 0; i < got && i < 600u; i++)
+        {
+            if (pcm[i] != 0) quiet = 0;
+        }
+        (void)snprintf(msg, sizeof(msg), "%lu samples, total_frames %lu, quiet %d",
+                       (unsigned long)got, (unsigned long)info.total_frames,
+                       quiet);
+        AV2_RESULT(r == FM_OK && q == FM_OK && got == 500u &&
+                   info.total_frames == 500u && quiet, q, msg);
     }
 
     /* ---------------- F10 ---------------- */

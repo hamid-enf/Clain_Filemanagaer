@@ -20435,6 +20435,9 @@ int main(void)
 #if FM_USE_IMAGE && FM_USE_JPEG
     RUN_SUITE(test_jpeg_layouts);
 #endif
+#if FM_USE_AUDIO && FM_USE_VIDEO
+    RUN_SUITE(test_wav_adpcm_ms);
+#endif
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);
 #endif

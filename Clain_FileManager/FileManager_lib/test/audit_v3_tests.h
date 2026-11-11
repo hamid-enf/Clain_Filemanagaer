@@ -1430,4 +1430,162 @@ static void test_jpeg_layouts(void)
 
 #endif /* FM_USE_IMAGE && FM_USE_JPEG */
 
+/* ------------------------------------------------------------------ */
+/* WAV with Microsoft ADPCM                                            */
+/* ------------------------------------------------------------------ */
+#if FM_USE_AUDIO && FM_USE_VIDEO
+
+/* Read the whole file `chunk` samples at a time into g_av3_pcm. */
+static FM_Result av3_wav_read(const char *path, size_t chunk, size_t *bytes,
+                              uint64_t *declared)
+{
+    static FM_Audio a;
+    static int16_t buf[1024];
+    FM_AudioInfo info;
+    FM_Result r;
+
+    *bytes = 0u;
+    *declared = 0u;
+    memset(&a, 0, sizeof(a));
+    memset(&info, 0, sizeof(info));
+    r = Audio_Open(path, &a);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    (void)Audio_GetInfo(&a, &info);
+    *declared = info.total_frames * info.channels * 2u;
+    for (;;)
+    {
+        size_t got = 0;
+        size_t i;
+
+        r = Audio_Read(&a, buf, chunk, &got);
+        if (r != FM_OK || got == 0u)
+        {
+            break;
+        }
+        for (i = 0; i < got && *bytes + 2u <= sizeof(g_av3_pcm); i++)
+        {
+            g_av3_pcm[*bytes] = (uint8_t)((uint16_t)buf[i] & 0xFFu);
+            g_av3_pcm[*bytes + 1u] = (uint8_t)((uint16_t)buf[i] >> 8);
+            *bytes += 2u;
+        }
+    }
+    (void)Audio_Close(&a);
+    return (r == FM_ERR_EOF) ? FM_OK : r;
+}
+
+static void test_wav_adpcm_ms(void)
+{
+    /* length and CRC-32 of ffmpeg's decode, printed by
+     * tools/gen_video_audio_vectors.py */
+    static const struct
+    {
+        const char *what;
+        const char *path;
+        size_t chunk;
+        size_t bytes;
+        uint32_t crc;
+    } c[3] = {
+        { "WAV Microsoft ADPCM, stereo: the samples ffmpeg decodes",
+          "/test/vectors/wav_adpcm_ms_stereo_8k.wav", 1024u, 16192u, 0xA04716C3u },
+        { "WAV Microsoft ADPCM, stereo, read 333 samples at a time",
+          "/test/vectors/wav_adpcm_ms_stereo_8k.wav", 333u, 16192u, 0xA04716C3u },
+        { "WAV Microsoft ADPCM, mono: the samples ffmpeg decodes",
+          "/test/vectors/wav_adpcm_ms_mono_11k.wav", 1000u, 12216u, 0xD8BB37BB }
+    };
+    char m[160];
+    unsigned i;
+
+    for (i = 0u; i < 3u; i++)
+    {
+        size_t bytes = 0;
+        uint64_t declared = 0;
+        FM_Result r;
+
+        TEST(c[i].what);
+        r = av3_wav_read(c[i].path, c[i].chunk, &bytes, &declared);
+        if (r == FM_OK && bytes == c[i].bytes && declared == c[i].bytes &&
+            av3_crc32(g_av3_pcm, bytes) == c[i].crc)
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m),
+                           "result %d, %lu bytes (declared %lu), CRC 0x%08lX",
+                           (int)r, (unsigned long)bytes,
+                           (unsigned long)declared,
+                           (unsigned long)av3_crc32(g_av3_pcm, bytes));
+            FAIL(m);
+        }
+    }
+
+    TEST("WAV Microsoft ADPCM: a seek lands on a block and plays the same samples");
+    {
+        static FM_Audio a;
+        static int16_t part[512];
+        size_t bytes = 0;
+        uint64_t declared = 0;
+        size_t got = 0;
+        uint64_t at = 0;
+        FM_Result r;
+
+        r = av3_wav_read(c[0].path, 1024u, &bytes, &declared);
+        memset(&a, 0, sizeof(a));
+        if (r == FM_OK)
+        {
+            r = Audio_Open(c[0].path, &a);
+        }
+        if (r == FM_OK)
+        {
+            r = Audio_Seek(&a, 0.25);
+            at = a.frame_index;
+            if (r == FM_OK)
+            {
+                r = Audio_Read(&a, part, 512u, &got);
+            }
+            (void)Audio_Close(&a);
+        }
+        /* 0.25 s is frame 2000.  The block size is the encoder's choice,
+         * so what is checked is: at a block start not past the target,
+         * and the samples from there are those of the plain read. */
+        if (r == FM_OK && got == 512u && at <= 2000u && at > 1000u &&
+            (size_t)at * 4u + 1024u <= bytes)
+        {
+            size_t k;
+            int same = 1;
+
+            for (k = 0; k < 512u; k++)
+            {
+                const uint8_t *q = g_av3_pcm + (size_t)at * 4u + k * 2u;
+
+                if (part[k] != (int16_t)((uint16_t)q[0] | ((uint16_t)q[1] << 8)))
+                {
+                    same = 0;
+                }
+            }
+            if (same)
+            {
+                PASS();
+            }
+            else
+            {
+                (void)snprintf(m, sizeof(m), "samples differ at frame %lu",
+                               (unsigned long)at);
+                FAIL(m);
+            }
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m), "result %d, at frame %lu, %lu samples",
+                           (int)r, (unsigned long)at, (unsigned long)got);
+            FAIL(m);
+        }
+    }
+}
+
+#endif /* FM_USE_AUDIO && FM_USE_VIDEO */
+
 #endif /* AUDIT_V3_TESTS_H */
