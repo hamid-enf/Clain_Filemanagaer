@@ -330,7 +330,7 @@ void SimpleVideo_Info(SimpleVideoInfo *out)
  * head-room against SD/SPI contention on STM32H7 SPI+TFT panels.
  * Still fits the shared simple_i2s_ring[65534] (2*16384=32768).  With
  * LCD_SPI_DMA_IDLE=1 the 30 ms SPI burst now has 4 FM_Idle slots
- * inside it; together with blocking present (see board/main.c) the
+ * inside it; together with blocking present (board/app_display.h) the
  * 15 fps budget stays 45 ms sequential and audio no longer contends. */
 #define SIMPLE_VIDEO_HALF_SAMPLES 16384u
 #endif

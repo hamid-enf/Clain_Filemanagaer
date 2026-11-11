@@ -66,7 +66,7 @@ echo "examples: $plain plain, $stubbed with HAL stub, $skipped skipped"
 
 # ---------------------------------------------------------------------
 # FM_USE_VIDEO=0 (and every media module off): the examples must still
-# compile -- board/defines.h includes simple_video.h unconditionally --
+# compile -- the board defines.h includes simple_video.h unconditionally --
 # and the video player must leave NO static storage behind (it used to
 # keep sv_rgb/sv_frame, 11 MB, and failed to compile at all).
 # ---------------------------------------------------------------------

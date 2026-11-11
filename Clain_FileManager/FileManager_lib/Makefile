@@ -426,13 +426,14 @@ ex33test: $(LIBS)
 		tools/ex33_host_test.c $(LIBS) -lm -o fm_ex33test
 	@./fm_ex33test
 
-# tapstest — the PCM-tap block of board/main.c (Example 33 wiring)
-# executed on the host.  The section is extracted VERBATIM from
-# board/main.c between "AGC_TARGET_PEAK" (the pre-tap DSP banner) and
-# the UART defines, so what is tested is exactly what ships to the board.
+# tapstest — the PCM-tap block of board/app_audio_hooks.h (Example 33
+# wiring) executed on the host.  The section is extracted VERBATIM from
+# that header between "AGC_TARGET_PEAK" (the pre-tap DSP banner) and the
+# TAPS-BLOCK-END marker, so what is tested is exactly what ships to the
+# board.
 tapstest: $(LIBS)
-	@sed -n '/^#define AGC_TARGET_PEAK/,/^#define UART_RX_BUF_SIZE/p' \
-		board/main.c | head -n -1 > /tmp/fm_main_taps.h
+	@sed -n '/^#define AGC_TARGET_PEAK/,/TAPS-BLOCK-END/p' \
+		board/app_audio_hooks.h > /tmp/fm_main_taps.h
 	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
 		-Iinclude -Ibackends -Isrc -I/tmp \
 		tools/board_taps_host_test.c $(LIBS) -lm -o fm_tapstest

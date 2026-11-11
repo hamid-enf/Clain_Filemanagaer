@@ -1,5 +1,5 @@
 /*
- * code_cmd_music.h — دیسپچ تمیز و بدون هنگِ دستورهای UART
+ * code_cmd.h — دیسپچ تمیز و بدون هنگِ دستورهای UART
  *
  *  Created on: Aug 28, 2026
  *      Author: HAMSHAHRI

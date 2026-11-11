@@ -1,16 +1,23 @@
 /*
  * board_taps_host_test.c — host validation for the PCM-tap block of
- * board/main.c (Example 33 wiring: pre-tap DSP, post-tap telemetry,
+ * board/app_audio_hooks.h (Example 33 wiring: pre-tap DSP, post-tap telemetry,
  * automatic 5-second recorder, folder-copy and video-info commands).
  *
  * The tap/pump code is not copied here: the Makefile rule extracts the
- * section between the «قلاب‌های PCM (Example 33)» banner and the UART
- * defines from board/main.c into /tmp/fm_main_taps.h, so what runs is
+ * section between "#define AGC_TARGET_PEAK" and the TAPS-BLOCK-END line
+ * from board/app_audio_hooks.h into /tmp/fm_main_taps.h, so what runs is
  * exactly what ships to the board.  HAL/board functions are stubbed;
  * Directory_Copy is the REAL library function.
  *
  *   gcc ... -I/tmp tools/board_taps_host_test.c libfilemanager.a -lm
  */
+
+/* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
+ * STM32CubeIDE compiles every .c under FileManager_lib; in a firmware
+ * build (USE_HAL_DRIVER, set by every CubeMX project) this file compiles
+ * to nothing, so it cannot clash with the project.  The rule is checked
+ * by tools/check_cubeide.sh. */
+#ifndef USE_HAL_DRIVER
 
 #include <stdio.h>
 #include <string.h>
@@ -103,12 +110,12 @@ static void SimpleImage_SetOutputSize(int w, int h) { (void)w; (void)h; }
 static FM_Result SimpleImage_Begin(void)
 { stub_img_begin_calls++; return stub_img_begin_ret; }
 static size_t SdramAlloc_FreeBytes(void) { return (size_t)8u * 1024u * 1024u; }
-/* the real one lives above the extracted block in board/main.c */
+/* the real one lives in board/app_display.h */
 void my_lcd_blit_video(const void *px, uint16_t w, uint16_t h,
                        FM_PixelFormat fmt, size_t bytes)
 { (void)px; (void)w; (void)h; (void)fmt; (void)bytes; }
 
-/* ---- the REAL board code, extracted from board/main.c ------------- */
+/* ---- the REAL board code, extracted from board/app_audio_hooks.h ---- */
 #include "fm_main_taps.h"
 
 /* ---- tiny framework ----------------------------------------------- */
@@ -124,7 +131,7 @@ int main(void)
     FM_FS fs;
     FM_Bool exists = FM_FALSE;
 
-    printf("board/main.c PCM-tap block (Example 33) host test\n");
+    printf("board/app_audio_hooks.h PCM-tap block (Example 33) host test\n");
     printf("==================================================\n");
 
     /* 1) install: pre = قبل از ولوم، post = بعد از ولوم */
@@ -294,3 +301,7 @@ int main(void)
     printf("\nResults: %s\n", fails == 0 ? "all PASS" : "FAILURES");
     return fails == 0 ? 0 : 1;
 }
+
+#else  /* USE_HAL_DRIVER */
+typedef int fm_not_firmware_t;
+#endif /* USE_HAL_DRIVER */
