@@ -6,6 +6,8 @@
  * test/main.c; uses its TEST / PASS / FAIL macros.
  */
 
+#include <time.h>
+
 /* ================================================================ */
 /* File part                                                         */
 /* ================================================================ */
@@ -901,11 +903,70 @@ static FM_Result av2_deep_tree(int kind)
     return r;
 }
 
+/* The name filter of Directory_List ('*' only) */
+static void av2_wildcard(void)
+{
+    static const struct { const char *filter; uint32_t files; } k[] = {
+        { "*", 5 }, { "*.txt", 2 }, { "a*", 4 }, { "*c*", 3 },
+        { "a*b*c.txt", 2 }, { "abc.txt", 1 }, { "**.log**", 1 },
+        { "*.tx", 0 }, { "bc.txt", 0 }, { "a*a*b", 0 },
+        /* every split of every star: the recursive matcher did not come
+         * back from this one */
+        { "*a*a*a*a*a*a*a*a*a*a*a*a*b", 0 },
+        { "*a*a*a*a*a*a*a*a*a*a*a*a*", 2 }
+    };
+    char longname[140];
+    FM_Result r;
+    size_t i;
+    int bad = 0;
+    char msg[96];
+
+    TEST("Directory_List filter: '*' semantics, and no blow-up");
+    (void)Directory_DeleteRecursive("/av2wild");
+    r = Directory_Create("/av2wild");
+    if (r == FM_OK) r = File_WriteAll("/av2wild/abc.txt", "1", 1);
+    if (r == FM_OK) r = File_WriteAll("/av2wild/aXbXc.txt", "1", 1);
+    if (r == FM_OK) r = File_WriteAll("/av2wild/xcx.log", "1", 1);
+    (void)strcpy(longname, "/av2wild/");
+    memset(longname + 9, 'a', 28);
+    longname[37] = '\0';
+    if (r == FM_OK) r = File_WriteAll(longname, "1", 1);
+    longname[36] = 'z';
+    if (r == FM_OK) r = File_WriteAll(longname, "1", 1);
+    for (i = 0; r == FM_OK && i < sizeof(k) / sizeof(k[0]) && !bad; i++)
+    {
+        uint32_t n[2] = { 0, 0 };
+        clock_t t0 = clock();
+        double took;
+
+        r = Directory_List("/av2wild", k[i].filter, av2_count_cb, n);
+        took = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
+        if (r == FM_OK && n[0] != k[i].files)
+        {
+            bad = 1;
+            (void)snprintf(msg, sizeof(msg), "\"%.40s\": %u files, expected %u",
+                           k[i].filter, (unsigned)n[0], (unsigned)k[i].files);
+        }
+        else if (r == FM_OK && took > 2.0)
+        {
+            /* five short names: this is microseconds of work */
+            bad = 1;
+            (void)snprintf(msg, sizeof(msg), "\"%.40s\" took %.1f s",
+                           k[i].filter, took);
+        }
+    }
+    (void)Directory_DeleteRecursive("/av2wild");
+    if (r != FM_OK) { CHECK_RESULT(r, "set-up"); }
+    else if (bad) FAIL(msg);
+    else PASS();
+}
+
 static void test_audit_v2_file(void)
 {
     printf("\n[External audit v2: files]\n");
     restore_posix_root();
 
+    av2_wildcard();
     av2_each_backend("FILE-01: truncate, read-only handle", av2_truncate_readonly);
     av2_each_backend("FILE-02: append after the file grew", av2_append_after_grow);
     av2_each_backend("FILE-02: two append handles", av2_append_two_handles);

@@ -266,6 +266,12 @@
 #define FM_PATH_MAX 160               /* max absolute path length      */
 #endif
 #ifndef FM_NAME_MAX
+/* Longest entry name, terminator included.  A directory that holds a
+ * longer name cannot be listed, measured or deleted recursively
+ * (FM_ERR_TOO_LARGE; names are never shortened).  FAT long file names
+ * and littlefs names go up to 255: set this to 256 for cards or images
+ * that are written elsewhere.  Costs that many bytes per FM_DirEntry /
+ * FM_FileInfo, most of them on the stack of the caller. */
 #define FM_NAME_MAX 64                /* max file/dir entry name       */
 #endif
 #ifndef FM_MAX_OPEN_FILES

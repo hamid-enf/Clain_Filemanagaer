@@ -3,8 +3,9 @@
  * fm_text.h - Text file API (ASCII / UTF-8 line based)
  *
  * Line based operations stream through the file and never require the
- * whole file in RAM.  Lines are terminated with '\n'; a trailing '\r'
- * is stripped on read and normalized on write for CRLF compatibility.
+ * whole file in RAM.  Lines are terminated with '\n'.  On read, a '\r'
+ * directly before the '\n' is removed with it (CRLF files); a '\r'
+ * anywhere else is part of the line and is kept.
  */
 
 #ifndef FM_TEXT_H

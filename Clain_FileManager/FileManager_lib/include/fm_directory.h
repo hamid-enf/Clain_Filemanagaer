@@ -59,7 +59,25 @@ FM_Result Directory_Count(const char *path, uint8_t type_filter,
 
 /* Recursive listing.  For every item (files + dirs, depth first) the
  * callback is invoked with a full FM_FileInfo.  progress may be NULL.
- * Return FM_ERR_CANCELLED from the callback to stop the scan. */
+ * Return FM_ERR_CANCELLED from the callback to stop the scan.
+ *
+ * `filter` is matched against the entry name: '*' stands for any run of
+ * characters (also none), everything else for itself.  NULL or "" lists
+ * everything.
+ *
+ * Rules for every walk of a tree (List, ScanRecursive, Size, Copy, Move,
+ * DeleteRecursive):
+ *  - A tree may be FM_DIR_MAX_DEPTH (16) directories deep below `path`;
+ *    a deeper one is FM_ERR_TOO_LARGE.  The walk has one directory open
+ *    at a time and its stack use does not grow with the depth.
+ *  - The callback must not add or remove entries in the tree it is being
+ *    shown.  Coming back from a sub-directory the walk reads the parent
+ *    again and skips the entries it has done, which is right only if the
+ *    directory lists them in the same order as before; entries would be
+ *    skipped or visited twice otherwise.
+ *  - An entry whose name does not fit FM_NAME_MAX stops the walk with
+ *    FM_ERR_TOO_LARGE (a name is never shortened).  Cards written on a
+ *    PC can hold such names: see FM_NAME_MAX in fm_config.h. */
 FM_Result Directory_List(const char *path, const char *filter,
                          FM_ItemCallback callback, void *user_data);
 

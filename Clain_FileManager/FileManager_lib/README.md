@@ -475,6 +475,15 @@ software decoder, which needs no file-sized memory.  With
 `-DFM_JPEG_HW_HEAP=0` and a work buffer, the library therefore never
 allocates for a JPEG file.
 
+**BMP read**: 24 bpp gives RGB888.  8 bpp goes through the colour table
+of the file: a grey ramp (or no table) gives GRAY8, any other table
+RGB888 with the colours of the table (a table with more than 256 entries
+is `FM_ERR_CORRUPTED`).  `Image_GetInfo()` and the `Image_Probe*` calls
+report the layout the decoder will deliver, not the one the file stores,
+so a buffer of `info.data_size` bytes always holds the decoded picture.
+`FM_ImageDecoder` carries the colour table (768 bytes): it is larger than
+it was, mind it when the object lives on a small stack.
+
 ## Rename-over and atomic replace
 
 `File_Move`, `File_SafeReplace`/`File_AtomicWrite`, `Json_SaveFile`,
@@ -487,6 +496,34 @@ the destination first; a non-empty directory destination is refused with
 do not implement rename at all are handled safely: `File_Move` /
 `Directory_Move` fall back to copy + delete and `File_Rename` /
 `Directory_Rename` return `FM_ERR_UNSUPPORTED`.
+
+### File rules worth knowing
+
+* **Appending.** `File_Append()` and a handle opened with `FM_OPEN_APPEND`
+  write at the end the file has *at that moment*, as one step with the
+  write: two handles appending to one file do not overwrite each other.
+* **LittleFS: one writer or many readers.** littlefs keeps a private copy
+  of a file's state in each handle, so a second handle on a file that is
+  open for writing would lose data without any error.  The adapter
+  refuses the open that would create that situation with `FM_ERR_BUSY`.
+  Any number of read-only handles is fine.  FatFS, FMFS and POSIX share
+  the state and allow it.
+* **Truncating** needs a handle that may write (`FM_ERR_ACCESS`
+  otherwise) and leaves the position where it was, on every backend.
+* **A failed replace keeps the backup.** When `File_Transaction` cannot
+  put the original back after a failure (volume full, card gone), the
+  backup stays as `<path>.fm_tmp.bak`: it is the last copy of the data.
+* **Walking a tree** (`Directory_List`, `_ScanRecursive`, `_Size`,
+  `_Copy`, `_DeleteRecursive`): up to `FM_DIR_MAX_DEPTH` (16) levels,
+  deeper is `FM_ERR_TOO_LARGE`; stack use does not grow with the depth;
+  the callback must not add or remove entries in the tree it is shown.
+* **Long names.** An entry name that does not fit `FM_NAME_MAX` (64)
+  makes the listing of its directory fail with `FM_ERR_TOO_LARGE`.  For
+  cards written on a PC set `FM_NAME_MAX` to 256.
+* **Explorer.** A listing holds at most `FM_MAX_EXPLORER_ITEMS` entries;
+  `Explorer_IsTruncated()` says when the directory has more.
+* **`Text_ReadLine`** removes the `\r` of a `\r\n` line end; a `\r`
+  anywhere else is part of the line.
 
 Note: buffer-taking APIs such as `Path_GetFilename`, `Path_GetDirectory`
 and `Json_ReadString` report `FM_ERR_TOO_LARGE` when the output buffer is

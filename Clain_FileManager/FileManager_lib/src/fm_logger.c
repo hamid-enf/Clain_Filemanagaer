@@ -45,40 +45,43 @@ static void logger_copy_string(char *dst, size_t dst_size, const char *src)
 
 static FM_Bool wildcard_match_local(const char *pattern, const char *text)
 {
-    while (*pattern != '\0')
+    /* One loop, no recursion.  After a '*' the place is remembered; when
+     * the text stops matching, the star takes one more character and the
+     * match goes on from there.  Only the last star ever has to be
+     * revisited, so the work is at most pattern length x text length.
+     * (The recursive form this replaces tried every split for every
+     * star: a filter such as "*a*a*a*a*a*b" against a long name of 'a's
+     * ran for minutes, and each star cost a stack frame.) */
+    const char *star = NULL;        /* the last '*' seen in the pattern */
+    const char *retry = NULL;       /* where in the text it began       */
+
+    while (*text != '\0')
     {
         if (*pattern == '*')
         {
-            while (pattern[1] == '*')
-            {
-                pattern++;
-            }
-            if (pattern[1] == '\0')
-            {
-                return FM_TRUE;
-            }
-            {
-                const char *t = text;
-
-                while (*t != '\0')
-                {
-                    if (wildcard_match_local(pattern + 1, t))
-                    {
-                        return FM_TRUE;
-                    }
-                    t++;
-                }
-            }
-            return wildcard_match_local(pattern + 1, text);
+            star = pattern++;
+            retry = text;
         }
-        if (*text == '\0' || *text != *pattern)
+        else if (*pattern == *text)
+        {
+            pattern++;
+            text++;
+        }
+        else if (star != NULL)
+        {
+            pattern = star + 1;
+            text = ++retry;
+        }
+        else
         {
             return FM_FALSE;
         }
-        pattern++;
-        text++;
     }
-    return *text == '\0';
+    while (*pattern == '*')
+    {
+        pattern++;
+    }
+    return (FM_Bool)(*pattern == '\0');
 }
 
 static const char *logger_ext(FM_LogFormat fmt)
