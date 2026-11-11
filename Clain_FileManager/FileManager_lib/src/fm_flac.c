@@ -5,11 +5,31 @@
 #define FM_DEBUG_TAG "flac"
 #include "fm_debug.h"
 #include "fm_audio.h"
+#include "fm_flac.h"
 #include "fm_alloc.h"
 #include <string.h>
 
+uint32_t FM_Flac_Bits(const uint8_t *data, size_t size)
+{
+    /* "fLaC", a 4-byte block header (type 0 = STREAMINFO), then 34 bytes:
+     * block sizes (4), frame sizes (6), 20 bits rate, 3 bits channels - 1,
+     * 5 bits width - 1, ... */
+    if (data == NULL || size < 22u || memcmp(data, "fLaC", 4) != 0 ||
+        (data[4] & 0x7Fu) != 0u)
+    {
+        return 0u;
+    }
+    return ((((uint32_t)data[20] & 1u) << 4) | ((uint32_t)data[21] >> 4)) + 1u;
+}
+
 #if FM_USE_AUDIO && FM_USE_FLAC
 
+/* dr_flac lives in this file only: no file I/O of its own (the library
+ * reads through its backends), and every function static, so nothing
+ * named drflac_* is exported (an application that links dr_flac itself
+ * used to get duplicate symbols). */
+#define DR_FLAC_NO_STDIO
+#define DRFLAC_API static
 #define DR_FLAC_IMPLEMENTATION
 #include "../third_party/dr_flac/dr_flac.h"
 
@@ -60,6 +80,10 @@ static FM_Result flac_decode(void *ctx, const uint8_t *in, size_t in_size,
     if (in == NULL || in_size < 42u) return FM_ERR_CORRUPTED;
     if (out_count == 0u) return FM_ERR_TOO_LARGE;
 
+    if (FM_Flac_Bits(in, in_size) > FM_FLAC_MAX_BITS)
+    {
+        return FM_ERR_UNSUPPORTED;       /* valid, wider than dr_flac does */
+    }
     p = drflac_open_memory(in, in_size, &g_fm_flac_alloc);
     if (p == NULL) return FM_ERR_CORRUPTED;
 
@@ -99,6 +123,35 @@ FM_Result FM_Flac_Init(void)
     return Audio_RegisterDecoder("FLAC", &g_flac_ops);
 }
 
+void *FM_Flac_OpenMemory(const uint8_t *data, size_t size,
+                         uint32_t *sample_rate, uint32_t *channels,
+                         uint64_t *total_frames)
+{
+    drflac *p = drflac_open_memory(data, size, &g_fm_flac_alloc);
+
+    if (p != NULL)
+    {
+        if (sample_rate != NULL)  { *sample_rate = p->sampleRate; }
+        if (channels != NULL)     { *channels = p->channels; }
+        if (total_frames != NULL) { *total_frames = p->totalPCMFrameCount; }
+    }
+    return p;
+}
+
+uint64_t FM_Flac_ReadS16(void *flac, uint64_t frames, int16_t *out)
+{
+    return (flac != NULL)
+               ? drflac_read_pcm_frames_s16((drflac *)flac, frames, out) : 0u;
+}
+
+void FM_Flac_Close(void *flac)
+{
+    if (flac != NULL)
+    {
+        drflac_close((drflac *)flac);
+    }
+}
+
 const FM_AudioDecoderOps *FM_Flac_GetOps(void)
 {
     return &g_flac_ops;
@@ -107,4 +160,18 @@ const FM_AudioDecoderOps *FM_Flac_GetOps(void)
 #else
 FM_Result FM_Flac_Init(void) { return FM_ERR_UNSUPPORTED; }
 const FM_AudioDecoderOps *FM_Flac_GetOps(void) { return NULL; }
+void *FM_Flac_OpenMemory(const uint8_t *data, size_t size,
+                         uint32_t *sample_rate, uint32_t *channels,
+                         uint64_t *total_frames)
+{
+    (void)data; (void)size; (void)sample_rate; (void)channels;
+    (void)total_frames;
+    return NULL;
+}
+uint64_t FM_Flac_ReadS16(void *flac, uint64_t frames, int16_t *out)
+{
+    (void)flac; (void)frames; (void)out;
+    return 0u;
+}
+void FM_Flac_Close(void *flac) { (void)flac; }
 #endif

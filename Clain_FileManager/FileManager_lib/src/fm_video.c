@@ -35,6 +35,7 @@
 #include <string.h>
 #include "fm_audio.h"
 #include "fm_vorbis.h"
+#include "fm_flac.h"
 #if FM_USE_MP3
 #include "minimp3.h"
 #endif
@@ -5422,6 +5423,37 @@ static FM_Result adts_build(uint8_t *h, uint32_t aot, uint32_t rate,
     return FM_OK;
 }
 
+/* Bits per sample of a FLAC track, from the STREAMINFO the container
+ * carries (MP4 dfLa, MKV CodecPrivate; with or without "fLaC" in front);
+ * 0 = not known. */
+static uint32_t video_flac_bits(const FM_VideoPriv *priv)
+{
+    const uint8_t *p = video_audio_private(priv);
+    uint32_t n = priv->audio_private_size;
+
+    if (p != NULL && n >= 4u && memcmp(p, "fLaC", 4) == 0)
+    {
+        p += 4;
+        n -= 4u;
+    }
+    if (p == NULL || n < 18u || (p[0] & 0x7Fu) != 0u)
+    {
+        return 0u;
+    }
+    return ((((uint32_t)p[16] & 1u) << 4) | ((uint32_t)p[17] >> 4)) + 1u;
+}
+
+/* A FLAC track wider than the bundled decoder does (dr_flac: 24 bits,
+ * FLAC itself allows 32).  A decoder the application registered under
+ * "FLAC" in its place is asked whatever the width. */
+static FM_Bool video_flac_too_wide(const FM_VideoPriv *priv)
+{
+    return (priv->audio_codec == FM_VIDEO_AUDIO_FLAC &&
+            video_flac_bits(priv) > FM_FLAC_MAX_BITS &&
+            Audio_GetDecoder("FLAC") == FM_Flac_GetOps())
+               ? FM_TRUE : FM_FALSE;
+}
+
 FM_Result Video_HasAudio(const FM_Video *v, FM_Bool *has)
 {
     if (v == NULL || has == NULL || !File_IsOpen(&v->file))
@@ -5477,6 +5509,15 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info)
 
         info->decodable = (tag != NULL && Audio_GetDecoder(tag) != NULL)
                               ? FM_TRUE : FM_FALSE;
+        if (priv->audio_codec == FM_VIDEO_AUDIO_FLAC &&
+            video_flac_bits(priv) != 0u)
+        {
+            info->bits_per_sample = (uint16_t)video_flac_bits(priv);
+            if (video_flac_too_wide(priv))
+            {
+                info->decodable = FM_FALSE;
+            }
+        }
         break;
     }
     }
@@ -6266,6 +6307,21 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
 
     if (video_audio_tag(priv->audio_codec) != NULL)
     {
+        if (video_flac_too_wide(priv))
+        {
+            /* A valid track this build cannot play.  The packet is
+             * passed over, so the track still ends. */
+            if (!priv->audio_nodec_logged)
+            {
+                priv->audio_nodec_logged = FM_TRUE;
+                FM_ERR_LOG("FLAC track with %u bits per sample: the "
+                           "decoder does at most %u",
+                           (unsigned)video_flac_bits(priv),
+                           (unsigned)FM_FLAC_MAX_BITS);
+            }
+            v->audio_frame_index++;
+            return FM_ERR_UNSUPPORTED;
+        }
         /* Compressed track: decode to 16-bit PCM with the registered
          * decoder.  The decoder context lives as long as the video. */
         r = video_audio_dec_get(priv);

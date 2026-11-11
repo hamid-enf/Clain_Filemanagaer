@@ -13,7 +13,7 @@
 #include <string.h>
 #include "fm_alloc.h"
 #if FM_USE_FLAC
-#include "../third_party/dr_flac/dr_flac.h"
+#include "fm_flac.h"
 #endif
 #if FM_USE_VORBIS
 struct stb_vorbis;
@@ -452,30 +452,14 @@ static FM_Result pcmbuf_seek(FM_Audio *a, double seconds) {
 #define AUDIO_SLURP_MAX_BYTES (10u * 1024u * 1024u)
 #endif
 #if FM_USE_FLAC
-/* dr_flac's own memory comes from the library allocator (FM_Allocator_Set).
- * No realloc hook: dr_flac then grows a block by allocate + copy + free,
- * which works with an allocator that has no realloc. */
-static void *fm_flac_malloc(size_t size, void *user)
-{
-    (void)user;
-    return FM_Alloc(size);
-}
-
-static void fm_flac_free(void *p, void *user)
-{
-    (void)user;
-    FM_Free(p);
-}
-
-static const drflac_allocation_callbacks g_fm_flac_alloc = {
-    NULL, fm_flac_malloc, NULL, fm_flac_free
-};
-
 static FM_Result flac_file_open(FM_Audio *a) {
     uint64_t sz = 0;
     uint8_t *data = NULL;
     uint32_t got = 0;
-    drflac *p = NULL;
+    void *p = NULL;
+    uint32_t rate = 0;
+    uint32_t channels = 0;
+    uint64_t total_frames = 0;
     PcmBuffer *b = NULL;
     FM_Result r = File_Size(&a->file, &sz);
     if (r != FM_OK) return r;
@@ -486,17 +470,27 @@ static FM_Result flac_file_open(FM_Audio *a) {
     (void)File_Seek(&a->file, 0, FM_SEEK_SET);
     r = File_Read(&a->file, data, (uint32_t)sz, &got);
     if (r != FM_OK || got != sz) { FM_Free(data); return FM_ERR_IO; }
-    p = drflac_open_memory(data, (size_t)sz, &g_fm_flac_alloc);
+    if (FM_Flac_Bits(data, (size_t)sz) > FM_FLAC_MAX_BITS) {
+        /* wider than the decoder does (FLAC allows 32 bits): a valid
+         * file this build cannot play, not a damaged one.  (dr_flac
+         * opens it and then decodes nothing.) */
+        FM_ERR_LOG("FLAC with %u bits per sample: at most %u",
+                   (unsigned)FM_Flac_Bits(data, (size_t)sz),
+                   (unsigned)FM_FLAC_MAX_BITS);
+        FM_Free(data);
+        return FM_ERR_UNSUPPORTED;
+    }
+    p = FM_Flac_OpenMemory(data, (size_t)sz, &rate, &channels, &total_frames);
     if (!p) { FM_Free(data); return FM_ERR_CORRUPTED; }
-    a->info.sample_rate = p->sampleRate;
-    a->info.channels = (uint16_t)p->channels;
+    a->info.sample_rate = rate;
+    a->info.channels = (uint16_t)channels;
     a->info.bits_per_sample = 16;
     a->info.format = 0xF1AC;
     (void)strcpy(a->info.codec, "FLAC");
     a->info.data_offset = 0;
     a->info.data_size = sz;
-    if (p->channels == 0u || p->channels > 8u) {
-        drflac_close(p);
+    if (channels == 0u || channels > 8u) {
+        FM_Flac_Close(p);
         FM_Free(data);
         return FM_ERR_UNSUPPORTED;
     }
@@ -510,15 +504,14 @@ static FM_Result flac_file_open(FM_Audio *a) {
      *     small and grows with what is decoded;
      *   - a length larger than the audio that is really there leaves the
      *     unused part allocated only until the decode is over. */
-    const uint64_t frame_bytes = (uint64_t)p->channels * sizeof(int16_t);
+    const uint64_t frame_bytes = (uint64_t)channels * sizeof(int16_t);
     const uint64_t max_frames = (uint64_t)FM_FLAC_MAX_PCM_BYTES / frame_bytes;
-    drflac_uint64 total_frames = p->totalPCMFrameCount;
-    drflac_uint64 frames_read = 0;
+    uint64_t frames_read = 0;
     uint64_t cap_frames;
     int16_t *pcm;
 
     if (total_frames > max_frames) {
-        drflac_close(p);
+        FM_Flac_Close(p);
         FM_Free(data);
         return FM_ERR_TOO_LARGE;
     }
@@ -527,14 +520,14 @@ static FM_Result flac_file_open(FM_Audio *a) {
     pcm = (cap_frames != 0u)
               ? (int16_t*)FM_Alloc((size_t)(cap_frames * frame_bytes)) : NULL;
     if (!pcm) {
-        drflac_close(p);
+        FM_Flac_Close(p);
         FM_Free(data);
         return (cap_frames != 0u) ? FM_ERR_NO_MEMORY : FM_ERR_TOO_LARGE;
     }
     for (;;) {
-        drflac_uint64 want = cap_frames - frames_read;
-        drflac_uint64 got_frames = drflac_read_pcm_frames_s16(
-            p, want, pcm + (size_t)(frames_read * p->channels));
+        uint64_t want = cap_frames - frames_read;
+        uint64_t got_frames = FM_Flac_ReadS16(
+            p, want, pcm + (size_t)(frames_read * channels));
 
         frames_read += got_frames;
         if (got_frames < want) break;               /* end of the audio */
@@ -545,9 +538,9 @@ static FM_Result flac_file_open(FM_Audio *a) {
             uint64_t grown = cap_frames * 2u;
             int16_t *np;
 
-            if (drflac_read_pcm_frames_s16(p, 1, probe) == 0) break;
+            if (FM_Flac_ReadS16(p, 1, probe) == 0) break;
             if (cap_frames >= max_frames) {
-                drflac_close(p);
+                FM_Flac_Close(p);
                 FM_Free(data);
                 FM_Free(pcm);
                 return FM_ERR_TOO_LARGE;            /* never cut the end */
@@ -557,19 +550,19 @@ static FM_Result flac_file_open(FM_Audio *a) {
                                            (size_t)(cap_frames * frame_bytes),
                                            (size_t)(grown * frame_bytes));
             if (np == NULL) {
-                drflac_close(p);
+                FM_Flac_Close(p);
                 FM_Free(data);
                 FM_Free(pcm);
                 return FM_ERR_NO_MEMORY;
             }
             pcm = np;
-            memcpy(pcm + (size_t)(frames_read * p->channels), probe,
+            memcpy(pcm + (size_t)(frames_read * channels), probe,
                    (size_t)frame_bytes);
             frames_read++;
             cap_frames = grown;
         }
     }
-    drflac_close(p);
+    FM_Flac_Close(p);
     FM_Free(data);
     if (frames_read == 0) { FM_Free(pcm); return FM_ERR_CORRUPTED; }
     if (frames_read < cap_frames) {

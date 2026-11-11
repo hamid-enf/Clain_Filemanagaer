@@ -4736,7 +4736,9 @@ static int get_seek_page_info(stb_vorbis *f, ProbedPage *z)
    z->page_end = z->page_start + 27 + header[26] + len;
 
    // read the last-decoded sample out of the data
-   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + (header[9] << 24);
+   // FileManager patch: (uint32) on the top byte; int << 24 of a byte
+   // above 127 is undefined
+   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + ((uint32) header[9] << 24);
 
    // restore file state to where we were
    set_file_offset(f, z->page_start);

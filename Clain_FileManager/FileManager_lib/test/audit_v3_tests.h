@@ -1084,6 +1084,87 @@ static void test_video_damaged_sizes(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* FLAC tracks: 24 bits plays, 32 bits is "unsupported", not "damaged"  */
+/* ------------------------------------------------------------------ */
+/* The two tones as 16-bit PCM: what every lossless vector decodes to
+ * (tools/gen_video_audio_vectors.py prints both numbers). */
+#define AV3_PCM_BYTES   6400u
+#define AV3_PCM_CRC     0xD29F0E89u
+
+#if FM_USE_AUDIO && FM_USE_FLAC
+static void test_video_flac_track(void)
+{
+    static FM_Video v;
+    FM_AudioTrackInfo ti;
+    Av3Run run;
+    char m[160];
+    FM_Result r;
+
+    TEST("FLAC 24-bit in MP4 decodes to the 16-bit PCM it was made from");
+    r = av3_decode("/test/vectors/mp4_flac24.mp4", 16384u, &run);
+    if (r == FM_OK && run.bad == 0u && run.ended &&
+        run.bytes == AV3_PCM_BYTES &&
+        av3_crc32(g_av3_pcm, run.bytes) == AV3_PCM_CRC)
+    {
+        PASS();
+    }
+    else
+    {
+        av3_report(&run, m, sizeof(m));
+        FAIL(m);
+    }
+
+    TEST("FLAC 32-bit in MP4: not decodable, every read says unsupported, the track ends");
+    memset(&v, 0, sizeof(v));
+    memset(&ti, 0, sizeof(ti));
+    memset(&run, 0, sizeof(run));
+    r = Video_Open("/test/vectors/mp4_flac32.mp4", &v);
+    if (r == FM_OK)
+    {
+        (void)Video_GetAudioInfo(&v, &ti);
+        av3_drain(&v, 16384u, 500u, &run);
+        (void)Video_Close(&v);
+    }
+    if (r == FM_OK && ti.codec == FM_VIDEO_AUDIO_FLAC && !ti.decodable &&
+        ti.bits_per_sample == 32u && run.ok == 0u && run.bad != 0u &&
+        run.first_bad == FM_ERR_UNSUPPORTED && run.ended)
+    {
+        PASS();
+    }
+    else
+    {
+        (void)snprintf(m, sizeof(m),
+                       "open %d, codec %d, decodable %d, %u bits; reads ok %u, "
+                       "errors %u (first %d), end %d", (int)r, (int)ti.codec,
+                       (int)ti.decodable, (unsigned)ti.bits_per_sample,
+                       run.ok, run.bad, (int)run.first_bad, run.ended);
+        FAIL(m);
+    }
+
+    TEST("A 32-bit .flac file is refused as unsupported");
+    {
+        static FM_Audio a;
+
+        memset(&a, 0, sizeof(a));
+        r = Audio_Open("/test/vectors/flac32_8k.flac", &a);
+        if (r == FM_OK)
+        {
+            (void)Audio_Close(&a);
+        }
+        if (r == FM_ERR_UNSUPPORTED)
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m), "Audio_Open -> %d", (int)r);
+            FAIL(m);
+        }
+    }
+}
+#endif /* FM_USE_AUDIO && FM_USE_FLAC */
+
+/* ------------------------------------------------------------------ */
 /* The picture: colours                                                */
 /* ------------------------------------------------------------------ */
 #if FM_USE_H264 || FM_USE_MJPEG
