@@ -237,6 +237,7 @@ static FM_Result si_dma2d_convert(const JPEG_ConfTypeDef *cfg,
  * DMA2D هم تبدیل و هم جابه‌جایی R/B و هم برعکس‌کردن بایت‌ها (که
  * نمایشگر SPI لازم دارد) در یک گذر و بدون CPU انجام می‌شود.
  */
+__attribute__((unused))   /* only hooked up when FM_USE_VIDEO is 1 */
 static FM_Result si_dma2d_rgb565(const uint8_t *rgb, uint8_t *dst,
                                  uint16_t w, uint16_t h,
                                  uint8_t bgr, uint8_t swap)

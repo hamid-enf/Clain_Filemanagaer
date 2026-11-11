@@ -59,12 +59,12 @@
 #if FM_USE_IMAGE
 #include "fm_image.h"
 #endif
-#if FM_USE_AUDIO
+/* Audio, video and the player are declared whatever the switches say:
+ * with a subsystem compiled out its functions are still defined (they
+ * answer FM_ERR_UNSUPPORTED), so code that calls them needs the
+ * prototypes and the types too. */
 #include "fm_audio.h"
-#endif
-#if FM_USE_VIDEO
 #include "fm_video.h"
-#endif
 #if FM_USE_H264
 #include "fm_h264.h"
 #endif
@@ -72,9 +72,7 @@
 #include "fm_mjpeg.h"
 #endif
 #include "fm_hw.h"
-#if FM_USE_AUDIO || FM_USE_VIDEO
 #include "fm_player.h"
-#endif
 #if FM_USE_EEPROM
 #include "fm_eeprom.h"
 #endif

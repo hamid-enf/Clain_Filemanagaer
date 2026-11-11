@@ -539,12 +539,12 @@ static void test_json(void)
 /* ================================================================ */
 /* Logger tests                                                      */
 /* ================================================================ */
+#if FM_USE_DATA_LOGGER
 static uint32_t my_now(void)
 {
     return 0x12345678u;
 }
 
-#if FM_USE_DATA_LOGGER
 
 static void test_logger(void)
 {
@@ -4379,6 +4379,87 @@ static void test_board_config(void)
         else
         {
             FAIL("a disabled video entry point did not say UNSUPPORTED");
+        }
+    }
+#endif
+
+#if !FM_USE_AUDIO
+    /* Same contract as video and images: with FM_USE_AUDIO=0 the public
+     * API is still there (the board code calls it without #if), every
+     * entry point says UNSUPPORTED and reports "nothing read". */
+    TEST("Audio compiled out: API links, reports UNSUPPORTED, owns no state");
+    {
+        FM_Audio a;
+        FM_AudioWriter w;
+        FM_AudioFileWriter fw;
+        FM_AudioInfo ai;
+        FM_AudioEncodeConfig cfg;
+        int16_t pcm[8];
+        size_t got = 123u;
+        size_t got2 = 123u;
+        size_t got3 = 123u;
+        char path[32];
+
+        memset(&a, 0, sizeof(a));
+        memset(&w, 0, sizeof(w));
+        memset(&fw, 0, sizeof(fw));
+        memset(&cfg, 0, sizeof(cfg));
+        if (Audio_Open("/song.wav", &a) == FM_ERR_UNSUPPORTED &&
+            Audio_GetInfo(&a, &ai) == FM_ERR_UNSUPPORTED &&
+            Audio_Read(&a, pcm, 8u, &got) == FM_ERR_UNSUPPORTED &&
+            got == 0u &&
+            Audio_ReadStereo(&a, pcm, 4u, &got2) == FM_ERR_UNSUPPORTED &&
+            got2 == 0u &&
+            Audio_Seek(&a, 1.0) == FM_ERR_UNSUPPORTED &&
+            AudioWriter_Create("/o.wav", 8000u, 1u, 16u, &w) ==
+                FM_ERR_UNSUPPORTED &&
+            AudioWriter_Write(&w, pcm, 8u, &got3) == FM_ERR_UNSUPPORTED &&
+            got3 == 0u &&
+            AudioFileWriter_Open(&fw, "/o.wav", FM_AUDIO_FILE_WAV, &cfg) ==
+                FM_ERR_UNSUPPORTED &&
+            AudioRecorder_Open("/rec", 8000u, 1u, 16u, &w, path,
+                               sizeof(path)) == FM_ERR_UNSUPPORTED &&
+            Audio_GetEncoder(FM_AUDIO_FILE_MP3) == NULL &&
+            Audio_Close(&a) == FM_ERR_UNSUPPORTED)
+        {
+            PASS();
+        }
+        else
+        {
+            FAIL("a disabled audio entry point did not say UNSUPPORTED");
+        }
+    }
+#endif
+
+#if !FM_USE_AUDIO && !FM_USE_VIDEO
+    /* fm_player.c used to be empty in this configuration, which left the
+     * playlist calls of the board slideshow undefined at link time. */
+    TEST("Player without audio and video: playlist links, playback refuses");
+    {
+        FM_Player pl;
+        int16_t pcm[4];
+        uint8_t px[4];
+        size_t got = 0u;
+
+        if (Player_Init(&pl) != FM_OK)
+        {
+            FAIL("Player_Init");
+        }
+        else
+        {
+            if (Player_Count(&pl) == 0u &&
+                Player_Play(&pl, 0u) != FM_OK &&
+                Player_ReadAudio(&pl, pcm, 4u, &got) == FM_ERR_UNSUPPORTED &&
+                Player_DecodeVideo(&pl, px, sizeof(px), NULL, NULL) ==
+                    FM_ERR_UNSUPPORTED)
+            {
+                PASS();
+            }
+            else
+            {
+                FAIL("playback did not refuse cleanly");
+            }
+            Player_Deinit(&pl);
         }
     }
 #endif

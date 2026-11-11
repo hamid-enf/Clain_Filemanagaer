@@ -13,7 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if FM_USE_AUDIO || FM_USE_VIDEO
+/* The player is compiled even with FM_USE_AUDIO and FM_USE_VIDEO both
+ * 0: the playlist half (scan a folder, next / previous, item path) has
+ * no codec in it and the board slideshow uses it for pictures, and the
+ * playback half already answers FM_ERR_UNSUPPORTED per media type.
+ * Leaving the file empty in that configuration left every Player_*
+ * call of the application undefined at link time. */
 
 static FM_Bool ext_is(const char *path, const char *e)
 {
@@ -499,5 +504,3 @@ double Player_GetDuration(const FM_Player *p)
 #endif
     return 0.0;
 }
-
-#endif /* FM_USE_AUDIO || FM_USE_VIDEO */

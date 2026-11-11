@@ -127,6 +127,11 @@ if [ "$MODE" != "quick" ]; then
     run_one "FLAC=0 VORBIS=0 OPUS=0"       FM_USE_FLAC=0 FM_USE_VORBIS=0 FM_USE_OPUS=0
     run_one "CACHE=0"                      FM_USE_CACHE=0
     run_one "CRC=0"                        FM_USE_CRC=0
+    # the optional file helpers of the board feature block, one at a time
+    run_one "JSON=0"                       FM_USE_JSON=0
+    run_one "TEXT=0"                       FM_USE_TEXT=0
+    run_one "SAFE_WRITE=0"                 FM_USE_SAFE_WRITE=0
+    run_one "DATA_LOGGER=0"                FM_USE_DATA_LOGGER=0
     run_one "THREADS=1"                    FM_USE_THREADS=1
     run_one "OPUS_LIB=1 (real libopus)"    FM_USE_OPUS_LIB=1
     CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=3" run_one "FM_DEBUG_LEVEL=3 (all log macros expanded)"
