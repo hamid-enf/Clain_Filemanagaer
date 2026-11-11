@@ -221,6 +221,15 @@ make examples        # build examples 00-10
 make examples_run    # run examples 00-10
 ```
 
+**What the tests are, and are not.**  Everything above runs on a PC: the
+suite as a 64-bit and as a 32-bit program, under ASan / UBSan / TSan and
+in every combination of the `FM_USE_*` switches (`tools/check_matrix.sh`,
+`tools/check_32bit.sh`).  The ARM builds are compiled and measured (code
+size, stack frames) but **nothing in this repository has been run on a
+board**: the STM32 ports, the QSPI / SD / I2S / DMA examples and the
+hardware JPEG path are tested against stub HALs.  Bring-up on real
+hardware is still to be done by whoever uses them.
+
 ### CMake (STM32 / ESP32 / desktop)
 
 The repository ships a single `CMakeLists.txt` that works both as a plain
@@ -502,6 +511,15 @@ Notes:
   walking the container again (AVI `movi`, Matroska clusters, the MP4 sample
   tables, FLV tags).  Sequential playback costs O(1) per frame; a seek far
   past the table walks forward from the last indexed frame.
+* **Static RAM.**  The index tables live in the video slots, which makes
+  them the largest static object of the library: `FM_MAX_VIDEO` (4) slots
+  of `FM_VIDEO_MAX_FRAMES` (4096) picture and `FM_VIDEO_MAX_AUDIO_FRAMES`
+  audio entries are 546 688 bytes of `.bss` on a 64-bit host (about 137 KB
+  for each video that can be open at the same time).  On a
+  microcontroller set `FM_MAX_VIDEO` to the number you really open (1 for
+  a player) and, if needed, the two table sizes: with 1 slot and 1024
+  entries it is about 38 KB, and longer clips still play (see the item
+  above).
 * The parser allocates (`FM_Alloc`, released by `Video_Close`) in two cases
   only: the Matroska lace table of a clip longer than the index, and audio
   setup data (MKV CodecPrivate, MP4 `dfLa`) larger than
@@ -693,6 +711,10 @@ What to know before choosing a level:
   the level to OFF.  `FileManager_GetDebugLevel()` returns the level the
   library was really built with (useful when it is a separate static
   library).
+* **The test suite is noisy at LOW, on purpose.**  One run of `fm_test`
+  prints about 8300 level-1 lines: all of them come from tests that feed
+  damaged files, failing storage or failing allocations.  It is not what
+  an application sees; a file that cannot be played costs a line or two.
 * Not logged at any level: the inside of the decoders (per frame or
   packet), directory walks, the JSON/text helpers.  They report through
   result codes only.
