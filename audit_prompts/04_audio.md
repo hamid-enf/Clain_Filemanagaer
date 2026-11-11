@@ -197,7 +197,9 @@ F18 only under ASan, no test for the stb_vorbis UB fixes or the RIFF size
 check): try to break exactly those.
 
 What is already established (running it again will find nothing): the suite
-passes in 49 build configurations under ASan + UBSan, under ThreadSanitizer
+passes in 49 build configurations (at this commit: all 49 plain, and the full
+build, the build with libopus and the nine single-switch builds under ASan +
+UBSan; all 49 under the sanitizers at `2a45d9d`), under ThreadSanitizer
 through three synchronisation ports, and as a 32-bit x86 program built with
 clang, with and without UBSan. Methods most likely to pay off now:
 

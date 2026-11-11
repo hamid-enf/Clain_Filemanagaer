@@ -164,7 +164,9 @@ was built. Start there: concurrency, the drivers, those files, and the
 differential tester of section 6.
 
 What is already established (running it again will find nothing): the suite
-passes in 49 build configurations under ASan + UBSan, under ThreadSanitizer
+passes in 49 build configurations (at this commit: all 49 plain, and the full
+build, the build with libopus and the nine single-switch builds under ASan +
+UBSan; all 49 under the sanitizers at `2a45d9d`), under ThreadSanitizer
 through three synchronisation ports, and as a 32-bit x86 program built with
 clang, with and without UBSan. Methods most likely to pay off now:
 
