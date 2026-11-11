@@ -5,7 +5,13 @@
  * Cube: FATFS/Target/sd_diskio.c را Exclude from Build کنید.
  *       خود فایل کیوب را کپی/پچ نکنید.
  */
-#if defined(FM_USE_FATFS) && FM_USE_FATFS && \
+/* FM-NOT-FIRMWARE: top_api/sdcard_fm_diskio.c is the same file and is the one
+ * the firmware builds.  STM32CubeIDE compiles every .c under
+ * FileManager_lib, so this copy stays empty unless the project defines
+ * FM_EXAMPLES_DIR_BUILD (do that only after excluding the top_api copy).
+ * The rule is checked by tools/check_cubeide.sh. */
+#if defined(FM_EXAMPLES_DIR_BUILD) && \
+    defined(FM_USE_FATFS) && FM_USE_FATFS && \
     defined(FM_SD_DISKIO) && (FM_SD_DISKIO == FILEMANAGER) && \
     !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)
 

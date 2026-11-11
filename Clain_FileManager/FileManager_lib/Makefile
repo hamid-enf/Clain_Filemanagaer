@@ -449,6 +449,7 @@ fatfs:
 # check — everything: tests, sanitizers, ports, examples
 check: test cachetest videohooks ex33test tapstest asan ports fatfs
 	@sh tools/check_examples.sh
+	@sh tools/check_cubeide.sh
 	@sh tools/check_cmake.sh
 	@sh tools/check_32bit.sh
 

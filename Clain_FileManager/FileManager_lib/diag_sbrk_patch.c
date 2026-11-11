@@ -15,6 +15,12 @@
  *   4) یا اگه نمی‌خواهید printf رو عوض کنید، فقط _sbrk safe شما کافیه
  */
 
+/* FM-NOT-FIRMWARE: optional diagnostic, off by default.
+ * STM32CubeIDE compiles every .c under FileManager_lib, and it replaces _sbrk and the newlib stubs of syscalls.c / sysmem.c (STM32F4 variant).
+ * It compiles to nothing unless the project defines FM_DIAG_SBRK_F4.
+ * The rule is checked by tools/check_cubeide.sh. */
+#ifdef FM_DIAG_SBRK_F4
+
 #include <stdint.h>
 #include <stddef.h>
 #include <errno.h>
@@ -192,3 +198,7 @@ int _wait(int *status)
     (void)status;
     return -1;
 }
+
+#else  /* FM_DIAG_SBRK_F4 */
+typedef int fm_not_firmware_t;
+#endif /* FM_DIAG_SBRK_F4 */

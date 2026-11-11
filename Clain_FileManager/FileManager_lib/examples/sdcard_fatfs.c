@@ -17,7 +17,13 @@
  * این فایل روی هاست (FM_HOST_BUILD=1) به هیچی ترجمه نمی‌شود.
  */
 
-#if defined(FM_USE_FATFS) && FM_USE_FATFS && \
+/* FM-NOT-FIRMWARE: top_api/sdcard_fatfs.c is the same file and is the one
+ * the firmware builds.  STM32CubeIDE compiles every .c under
+ * FileManager_lib, so this copy stays empty unless the project defines
+ * FM_EXAMPLES_DIR_BUILD (do that only after excluding the top_api copy).
+ * The rule is checked by tools/check_cubeide.sh. */
+#if defined(FM_EXAMPLES_DIR_BUILD) && \
+    defined(FM_USE_FATFS) && FM_USE_FATFS && \
     !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)
 
 #include <stdio.h>

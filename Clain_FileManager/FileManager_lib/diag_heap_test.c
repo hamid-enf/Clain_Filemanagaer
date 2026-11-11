@@ -9,6 +9,12 @@
  *
  * این فایل heap رو تست می‌کنه بدون استفاده از FileManager.
  */
+
+/* FM-NOT-FIRMWARE: optional diagnostic, off by default.
+ * STM32CubeIDE compiles every .c under FileManager_lib, and it defines its own main().
+ * It compiles to nothing unless the project defines FM_DIAG_HEAP_TEST.
+ * The rule is checked by tools/check_cubeide.sh. */
+#ifdef FM_DIAG_HEAP_TEST
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -68,3 +74,7 @@ int main(void) {
     test_heap();
     return 0;
 }
+
+#else  /* FM_DIAG_HEAP_TEST */
+typedef int fm_not_firmware_t;
+#endif /* FM_DIAG_HEAP_TEST */

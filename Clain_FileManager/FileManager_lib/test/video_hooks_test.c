@@ -8,6 +8,13 @@
  *   gcc -Iinclude -Iexamples -Itools/halstub test/video_hooks_test.c \
  *       libfilemanager.a -o fm_videohooks
  */
+
+/* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
+ * STM32CubeIDE compiles every .c under FileManager_lib; in a firmware
+ * build (USE_HAL_DRIVER, set by every CubeMX project) this file compiles
+ * to nothing, so it cannot clash with the project.  The rule is checked
+ * by tools/check_cubeide.sh. */
+#ifndef USE_HAL_DRIVER
 #include <stdio.h>
 #include <string.h>
 #include "simple_image.h"
@@ -194,3 +201,7 @@ int main(void)
            fails ? "FAILED" : "همه درست", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }
+
+#else  /* USE_HAL_DRIVER */
+typedef int fm_not_firmware_t;
+#endif /* USE_HAL_DRIVER */

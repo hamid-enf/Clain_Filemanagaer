@@ -10,6 +10,12 @@
  *   در main(): fm_log_test_run();
  */
 
+/* FM-NOT-FIRMWARE: optional diagnostic, off by default.
+ * STM32CubeIDE compiles every .c under FileManager_lib, and it is a one-off FM_Log self-test.
+ * It compiles to nothing unless the project defines FM_DIAG_LOG_TEST.
+ * The rule is checked by tools/check_cubeide.sh. */
+#ifdef FM_DIAG_LOG_TEST
+
 #include "fm_log.h"
 
 void fm_log_test_run(void)
@@ -23,3 +29,7 @@ void fm_log_test_run(void)
     FM_LOG("[6] Pointer: 0x%08X\n", (unsigned int)&fm_log_test_run);
     FM_LOG("=== END ===\n");
 }
+
+#else  /* FM_DIAG_LOG_TEST */
+typedef int fm_not_firmware_t;
+#endif /* FM_DIAG_LOG_TEST */

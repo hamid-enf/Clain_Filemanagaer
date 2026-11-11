@@ -4,6 +4,13 @@
  * filesystem, then runs the five media examples exactly like the board.
  */
 
+/* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
+ * STM32CubeIDE compiles every .c under FileManager_lib; in a firmware
+ * build (USE_HAL_DRIVER, set by every CubeMX project) this file compiles
+ * to nothing, so it cannot clash with the project.  The rule is checked
+ * by tools/check_cubeide.sh. */
+#ifndef USE_HAL_DRIVER
+
 #include "../examples/examples_sdcard.h"
 #include "../examples/examples_sdcard_media.h"
 #include "../examples/media_data_io.h"
@@ -144,3 +151,7 @@ int main(void)
     printf("\n===== ALL MEDIA EXAMPLES DONE OK =====\n");
     return 0;
 }
+
+#else  /* USE_HAL_DRIVER */
+typedef int fm_not_firmware_t;
+#endif /* USE_HAL_DRIVER */

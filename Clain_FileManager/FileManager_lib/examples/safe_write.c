@@ -8,6 +8,13 @@
  *   File_Transaction   — backup + safe-replace + rollback on failure
  *   File_Recover       — حذف فایل temp باقی‌مانده
  */
+
+/* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
+ * STM32CubeIDE compiles every .c under FileManager_lib; in a firmware
+ * build (USE_HAL_DRIVER, set by every CubeMX project) this file compiles
+ * to nothing, so it cannot clash with the project.  The rule is checked
+ * by tools/check_cubeide.sh. */
+#ifndef USE_HAL_DRIVER
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -52,3 +59,7 @@ int main(void)
     FileManager_Deinit();
     return 0;
 }
+
+#else  /* USE_HAL_DRIVER */
+typedef int fm_not_firmware_t;
+#endif /* USE_HAL_DRIVER */

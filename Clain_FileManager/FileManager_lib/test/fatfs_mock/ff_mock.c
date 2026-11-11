@@ -2,6 +2,13 @@
  * ff_mock.c - FatFS API simulator (host tests only).
  * See ff.h for details. Not a real FAT - file level simulation.
  */
+
+/* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
+ * STM32CubeIDE compiles every .c under FileManager_lib; in a firmware
+ * build (USE_HAL_DRIVER, set by every CubeMX project) this file compiles
+ * to nothing, so it cannot clash with the project.  The rule is checked
+ * by tools/check_cubeide.sh. */
+#ifndef USE_HAL_DRIVER
 #include "ff.h"
 #include <stdlib.h>
 #include <string.h>
@@ -438,3 +445,7 @@ FRESULT f_mkfs(const TCHAR *path, BYTE opt, DWORD au, void *work, UINT len)
     return FR_OK;
 }
 #endif
+
+#else  /* USE_HAL_DRIVER */
+typedef int fm_not_firmware_t;
+#endif /* USE_HAL_DRIVER */
