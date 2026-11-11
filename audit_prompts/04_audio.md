@@ -1,4 +1,4 @@
-# External audit — audio
+# External audit, follow-up round — audio
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and **propose** a fix. You do not fix
@@ -8,7 +8,9 @@ anything in the repository.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `8dd0f25` (audit exactly this commit; quote it in your report)
+- Commit: `2a45d9d` (audit exactly this commit; quote it in your report)
+- Previous audit of this part: commit `8dd0f25`, report in `ReportV2.txt` at the
+  repository root, lines 1267–1582
 - Library root: `Clain_FileManager/FileManager_lib/` (all paths below are relative to it)
 
 It is a C99 file-manager and media library for STM32 microcontrollers (STM32H7
@@ -49,17 +51,23 @@ one line in the "Outside my scope" section and move on.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite, about 358 tests, about 12 s
+make test                 # whole suite, about 478 tests, about 15 s
 make asan                 # same suite under ASan + UBSan
 make tsan                 # threaded suite under ThreadSanitizer
-make check                # everything: tests, sanitizers, ports, examples, cmake
-make matrix-quick         # a subset of the 45 build configurations
+make m32                  # suite built and run as a 32-bit program (clang);
+                          #   needs:  pip install ziglang   (make m32 M32=ubsan adds UBSan)
+make check                # everything: tests, sanitizers, ports, examples, cmake, 32-bit
+make matrix-quick         # a subset of the 49 build configurations
 make test FM_USE_THREADS=1
 make test FM_USE_IMAGE=0  # every FM_USE_* switch can be set like this
+make test CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=3"   # debug level 0, 1 (default), 2, 3
+FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library prints
 ```
 
-- All tests are in `test/main.c` (about 20 000 lines; suites are functions named
-  `test_*`, registered with `RUN_SUITE` near the end). It is the best source of
+- The tests are in `test/main.c` (about 20 000 lines; suites are functions named
+  `test_*`, registered with `RUN_SUITE` near the end), `test/audit_v2_tests.h`
+  (the tests written for the findings of the previous audit, suites
+  `test_audit_v2_*`) and `test/debug_log_tests.h`. They are the best source of
   working call sequences for every API.
 - Configuration lives in `include/fm_config.h` (`FM_USE_*` feature switches and
   size limits). The `asan` target in the `Makefile` shows how to build an
@@ -69,28 +77,130 @@ make test FM_USE_IMAGE=0  # every FM_USE_* switch can be set like this
   bytes into it: see `FileManager_MountMemory(...)` in `test/fatfs_host_test.c`
   and the many `RamDisk_Init` / `Storage_Register` / `FMFS_Init` / `FS_Mount`
   sequences in `test/main.c`.
+- For a 32-bit harness of your own, use the compiler `tools/check_32bit.sh`
+  uses: `python3 -m ziglang cc -target x86-linux-musl` (a static 32-bit x86
+  program that runs on a 64-bit Linux). The same tool cross-compiles for the
+  real target, which is enough to measure code size and stack frames:
+  `python3 -m ziglang cc -target arm-linux-musleabihf -mcpu=cortex_m7 -mthumb -Os -fstack-size-section`.
+  (This clang writes no `.su` files for `-fstack-usage` on that target; the
+  frame sizes are in the `.stack_sizes` section of each object, which
+  `llvm-readobj --stack-sizes` prints. The frames above 1 KB measured this way
+  are in `README.md`, "Stack".)
 - Source files use CRLF line endings. Some comments are in Persian; the code and
   identifiers are English.
 
-## 4. What has already been done (do not repeat it)
+## 4. This is a follow-up audit: what changed, and your three jobs
 
-The suite passes in 45 build configurations under ASan + UBSan, and under
-ThreadSanitizer through three synchronisation ports. Running the existing tests
-again will find nothing. The defects that are left are the ones those tests do
-not reach. Methods that have **not** been applied yet, and are therefore the
-most likely to pay off:
+This part was audited once before, at commit `8dd0f25`. That report is in the
+repository: `ReportV2.txt` at the repository root, lines 1267–1582 (the other
+line ranges are the other three parts). Read it first, including its sections
+"Examined and found sound" and "Not examined". Everything it found has been
+worked on since; `git log 8dd0f25..2a45d9d` and
+`git diff 8dd0f25..2a45d9d -- src/fm_audio.c src/fm_flac.c src/fm_vorbis.c src/fm_opus.c src/fm_player.c src/fm_media.c third_party/stb include/fm_audio.h examples/audio_dma_player.h` show how.
+
+**What the maintainers found themselves after `cf187af`, and what it tells
+you.** While measuring stack frames for the ARM target, one frame led to the
+audio track of a video file, and from there files written by ffmpeg were
+decoded by the library next to ffmpeg's own decode. That comparison, which no
+audit round and no test had made, found: an MP3 track that decoded one frame
+and then failed for ever; IMA and Microsoft ADPCM tracks that decoded to noise;
+Vorbis tracks that never decoded; H.264 pictures 25 dB from the reference
+(wrong colour range); JPEG green wrong in saturated colours; Motion JPEG in an
+`.mp4` not playable. All of that had passed the whole suite under every
+sanitizer, because the suite checked that a format is *recognised* and that
+nothing *crashes*, not that what comes out is *right*. These are fixed
+(commits `7d4d009`, `b3525f7`, `2a45d9d`; tests in `test/audit_v3_tests.h`).
+Draw the conclusion for your part: **wherever the library produces data,
+compare that data with a reference implementation**, on files a real tool
+wrote, before anything else.
+
+**Job 1 — check the fixes (do this first, it is the cheapest way to find a
+defect).** For every earlier finding listed below, decide: fixed, partly fixed,
+not fixed, or fixed but something else broke. A fix that handles exactly the
+reported input and not its neighbours is "partly fixed": vary the input (other
+sizes, other backends, other build switches, 32 bits, threads on, the same
+mistake in the sibling function). Read the test that was added for it
+(`test/audit_v2_tests.h`) and judge whether it would really fail if the fix
+were removed; if you can, remove the fix locally and see.
+
+| Earlier ID | What was wrong | What the fix claims |
+|---|---|---|
+| F1 | crafted Vorbis comment header corrupted memory in `Audio_Open` | refused with `FM_ERR_CORRUPTED`; `third_party/stb/stb_vorbis.c` is **patched locally** — diff it against upstream 1.22 and audit the patch |
+| F2 | MP3 resync advanced one byte at a time | a damaged frame costs about 0.1 s instead of 0.6 s; 2 MiB of non-MP3 data is rejected in milliseconds |
+| F3 | unsupported ADPCM variants decoded to noise | stereo IMA ADPCM is bit-identical to ffmpeg; MS ADPCM is refused |
+| F4 | shared WAV buffer used without a lock (`FM_USE_THREADS=1`) | locked |
+| F5, F6, F16, F17 | AAC path: sample count not clamped, errors reported as end of track, header zeroed, context leak | all four fixed |
+| F7, F19 | Opus 5.1 decoded as stereo noise; header gain ignored | multistream refused; gain applied (both testable only with `FM_USE_OPUS_LIB=1`) |
+| F8 | `Player_GetDuration` wrong for six formats | `FM_AudioInfo.total_frames` added and used |
+| F9 | `Audio_Seek` with NaN / huge times | refused or clamped; `Player_SeekFwd` / `Player_SeekBack` too |
+| F10 | A-law polarity inverted | corrected (**output changed** for every A-law file) |
+| F11, F12, F15 | `Audio_ReadMono` on multichannel; reads smaller than a frame; output counts not written | fixed; `Audio_Read` with room for less than one frame returns `FM_ERR_INVALID_ARGUMENT` |
+| F13, F25 | example DMA player: odd half-buffer, tap order | fixed in `examples/audio_dma_player.h` and its copy in `top_api/` |
+| F14 | FLAC allocation size came from the header | capped by `FM_FLAC_MAX_PCM_BYTES` (40 MiB); Opus files by `FM_OPUS_MAX_FILE_BYTES` (5 MiB) |
+| F18 | Vorbis leak on a corrupt setup header | fixed (visible only under ASan / LeakSanitizer) |
+| F21, F22, F27 | MP3: Xing frame played as audio; seek offsets | Xing frame skipped; CBR seek exact; VBR with Xing approximate (see section 7) |
+| F23, F24, F26 | recorder left empty files; player extension list; media detection | fixed |
+| F28 | decoders called `malloc` directly | every decoder allocation goes through `FM_Allocator` (`FM_ReallocSized` added) |
+| F30 | undefined behaviour in vendored decoders on corrupt input | fixed in stb_vorbis only; dr_flac see section 7 |
+| F20, F29 | chained Ogg; stack use | **not fixed**, documented (section 7) |
+| (own) | WAV writer: data above 4 GiB wrapped the header | `AudioWriter_Close` returns `FM_ERR_TOO_LARGE` above `UINT32_MAX − 36` (no test of its own) |
+
+**Job 2 — audit what is new.** Code written since the last audit has been
+through the fewest eyes. Go through the diff above line by line.
+In this part the diff is the largest of the four (about 30 findings were fixed in
+one pass, which is exactly when new defects get in): the MP3 resync and seek
+rewrite, the IMA ADPCM decoder, the AAC frame path, the local patch to
+`stb_vorbis.c`, the allocator routing of every decoder (does an allocation
+that fails at each point leave the decoder slot free and the file closed?),
+the size caps (off-by-one at exactly the cap, behaviour on 32 bits), and
+`total_frames` for every format against ffprobe.
+Newer still, and yours: the **packet-stream Vorbis decoder** in
+`src/fm_vorbis.c` / `include/fm_vorbis.h` (`FM_Vorbis_StreamOpen`,
+`StreamDecode`, `StreamPending`, `StreamReset`, `StreamClose`), which the
+video layer uses for Vorbis tracks in Matroska and MP4. It frames every packet
+as an Ogg page of its own for stb_vorbis's push interface, carries over the
+bytes the decoder did not take, and keeps PCM that did not fit the caller's
+buffer. Check: every allocation failure in open and decode; packets larger
+than 64 KiB (several lacing pages); the carry growing without bound on a
+stream the decoder never accepts; `StreamReset` in every state; a header set
+that stb_vorbis accepts but that declares more than two channels; and whether
+all of stb_vorbis's memory really goes through `FM_Alloc`. A second local
+patch to `stb_vorbis.c` (two shifts into the sign bit in the push-data
+resync) belongs to it.
+
+**Job 3 — go where nobody has been.** The previous auditor of this part was thorough, and
+left a list of leads that were **not confirmed and that nobody has examined
+since**: VBRI headers; a channel count that changes mid-file; a 14-byte
+`fmt ` chunk; the ADPCM allocation derived from `block_align`; example 33
+(`examples/33_audio_record_with_tap.h`); unregistering a decoder while a
+stream that uses it is open; `aac_find_sync` reading one byte per storage
+call. Start with these. Then note what could not be tested last time: nothing
+ran on ARM, so every stack figure was an x86 figure (the frames are measured
+for Cortex-M7 now, `README.md` "Stack": check them and add the call depth,
+which is not there), and several fixes
+have weak tests (F7 and F19 only in the libopus build, F4 only with threads,
+F18 only under ASan, no test for the stb_vorbis UB fixes or the RIFF size
+check): try to break exactly those.
+
+What is already established (running it again will find nothing): the suite
+passes in 49 build configurations under ASan + UBSan, under ThreadSanitizer
+through three synchronisation ports, and as a 32-bit x86 program built with
+clang, with and without UBSan. Methods most likely to pay off now:
 
 - **Fuzzing** of every parser with ASan + UBSan (libFuzzer or AFL++), seeded
-  from `test/vectors/` and from files you generate.
+  from `test/vectors/` and from files you generate. Say how many executions
+  and what coverage you reached.
 - **Differential testing** against a reference implementation.
-- **A 32-bit build** (`-m32`, if your machine has the multilib packages) of the
-  suite and of your harnesses.
+- **32-bit harnesses**: a 32-bit build exists now (section 3), so size
+  arithmetic near 2^32 can be tested for real instead of argued about. Build
+  your fuzz and fault-injection harnesses for 32 bits too.
 - **Fault injection**: a read or write that fails in the middle, a short read,
-  an allocation that fails, a file truncated at every byte offset.
+  an allocation that fails (every Nth, for every N), a file truncated at every
+  byte offset.
 - **Static analysis** (`gcc -fanalyzer`, clang static analyzer, cppcheck) —
   but triage it: report a warning only after you have confirmed it is real.
-- **Stack measurement** (`-fstack-usage`): frames above about 1 KB in a call
-  path the application reaches.
+- **Stack measurement** (`-fstack-usage` on the host, `-fstack-size-section`
+  for the ARM target, see section 3): frames above about 1 KB in a call path the application reaches.
 - **Careful reading** for: integer overflow in size arithmetic, lengths taken
   from a file and used unchecked, state left half-changed when a function
   returns an error, handles or slots not released on error paths, loops whose
@@ -226,8 +336,32 @@ Per format:
 `docs/REGRESSION_AUDIO_STUTTER.md`). Find any call on the playback path whose
 worst case is much worse than its typical case: a read that scans the rest of
 the file, a seek that decodes from the start, a refill that blocks for several
-storage reads. Measure the stack use of each decoder (`-fstack-usage`): the
-task that decodes has a few kilobytes.
+storage reads. Measure the stack use of each decoder along its whole call
+path (frame sizes: section 3; `README.md` "Stack" has the single frames, the
+largest being 17 KB in minimp3): the task that decodes has a few kilobytes
+unless the application was told otherwise, so check that it is told, in the
+header of every function that needs more.
+
+**Debug levels and log output (new since the last audit).** The library prints
+through `FM_ERR_LOG` (level 1 and up), `FM_EVENT_LOG` (2 and up) and
+`FM_TRACE_LOG` (3); level 0 compiles all of it out. Read the top of
+`include/fm_debug.h` and "Rules for a sink" in `include/fm_log.h`, then check
+the messages of **your** files (`grep -n "FM_ERR_LOG\|FM_EVENT_LOG\|FM_TRACE_LOG\|FM_CHECK" src/fm_audio.c src/fm_flac.c src/fm_vorbis.c src/fm_opus.c src/fm_player.c`):
+
+- A `%s` whose argument comes from a file (a name, a tag, a codec string): can
+  it be NULL, not terminated, or longer than its buffer? Can file content put
+  control characters or a megabyte of text on the user's console?
+- A message on a path that runs per frame, per sample block or per storage
+  read at level 1 or 2 (level 3 is allowed to be slow, levels 1 and 2 are not).
+- An error line for an outcome that is normal (file not found, end of file),
+  and the reverse: a real failure in your part that prints nothing at level 1,
+  so that the user sees only a result code. List the ones that would have cost
+  you time.
+- Behaviour that depends on the level: an expression with a side effect inside
+  a log argument (it disappears at level 0), a variable that is only assigned
+  for a message. Run your harnesses at levels 0 and 3 and compare results.
+- Build your part with `-DFM_DEBUG_LEVEL=0`, `=3` and `-DFM_LOG_DISABLE` under
+  `-Werror`, with each of your `FM_USE_*` switches off.
 
 ## 7. Known limits — do not report these
 
@@ -245,6 +379,28 @@ worse than what is written here.
   I2S / DMA examples are compiled against a stub HAL and their logic is tested
   on the host only.
 
+- Chained Ogg streams: only the first stream is played (F20 of the previous
+  audit).
+- VBR MP3 without a Xing / Info header: duration and seek positions are
+  estimates. With a Xing header: a seek may start up to about 0.15 s late and
+  the reported position is within about 50 ms.
+- MS ADPCM is refused, not decoded.
+- Stack use of the decoders is large. Single frames on Cortex-M7 (clang
+  `-Os`): `mp3dec_decode_frame` 17.4 KB, `drflac_open_with_metadata_private`
+  4.9 KB, everything else below 2.3 KB; `README.md` "Stack" advises 32 KB for a
+  task that plays MP3 or Opus. Whole call paths have not been summed —
+  **doing that is wanted**, repeating that the frames are large is not.
+- The WAV reader refuses Microsoft ADPCM (see the line above) while the video
+  layer decodes it in AVI / MKV tracks (`adpcm_ms_block` in `src/fm_video.c`).
+  The inconsistency is known.
+- dr_flac has signed-overflow undefined behaviour on damaged files; building
+  with `-fwrapv` is the documented advice. A crash or out-of-bounds access
+  that follows from it is still a finding.
+- `.m4a` is MP4 (video auditor's parser) and is not in the player scan.
+- Everything the previous audit reported and the table in section 4 marks as
+  fixed or documented: report it again only if your verdict in Job 1 is not
+  "fixed".
+
 Vendored third-party code (`third_party/`) is not ours to audit line by line.
 A defect inside it counts only if you can reach it through this library's public
 API with a concrete input. A defect in the **glue** — how this library calls the
@@ -252,17 +408,18 @@ third-party code, what it does with the results — is fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_AUDIO.md`. Structure:
+Deliver **one Markdown file** named `AUDIT_AUDIO_V3.md`. Structure:
 
 1. **Summary in Persian** (5 to 10 lines): how many confirmed defects by
-   severity, the single most important one, and what you could not examine.
+   severity, the single most important one, how many of the earlier findings
+   are really fixed, your seven scores, and what you could not examine.
    The rest of the report is in English.
 2. **Audit record**: commit audited, machine and compiler, what you built, which
    methods you used and for how long (for a fuzzer: executions and coverage
-   reached), and whether a 32-bit build was possible.
+   reached), and what you ran as a 32-bit program.
 3. **Table of findings**: ID, severity, one-line title, file:line, status
    (confirmed / suspicion).
-4. **One section per finding**, IDs `AUD-01`, `AUD-02`, ...:
+4. **One section per finding**, IDs `AUD3-01`, `AUD3-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps). S3: wrong error handling — leak of a handle or
@@ -284,6 +441,28 @@ Deliver **one Markdown file** named `AUDIT_AUDIO.md`. Structure:
    it tells us what an empty result is worth.
 7. **Not examined** — everything in your scope you did not get to.
 8. **Outside my scope** — one line each.
+
+9. **Verdict on the earlier findings** — one table: earlier ID, your verdict
+   (fixed / partly fixed / not fixed / fixed but broke something), how you
+   checked (which variants you tried), and whether the test added for it would
+   catch a regression.
+10. **Scores** — so that this round can be compared with the last one and with
+   the next. Give each line a whole number from 0 to 10 and one sentence that
+   names the evidence. Write "not assessed" instead of guessing; a score
+   without evidence behind it is worth nothing.
+
+   | Axis | What 10 means |
+   |---|---|
+   | A. Malformed input | no crash, hang or out-of-bounds access on any input you could construct, after real fuzzing |
+   | B. Correct results | every valid input you tried gives the reference result |
+   | C. Errors and resources | every failure returns the right code, releases what it took and leaves a usable state |
+   | D. Memory and timing | stack frames, allocation sizes and worst-case call times fit a microcontroller and are bounded |
+   | E. Documentation | headers and `README.md` say what the code does, including the limits |
+   | F. Tests | the existing tests of this part would catch a regression in what they cover, and cover what matters |
+   | G. Diagnosability | when something fails, the result code and the log line together tell a user why |
+
+   Then one line: **ready for a product / ready under these conditions (list
+   them) / not ready**, for your part only.
 
 Put harness sources, generator scripts and crashing inputs in an appendix (or
 attach them as files next to the report). Someone must be able to reproduce
