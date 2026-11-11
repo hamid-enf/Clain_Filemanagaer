@@ -20333,7 +20333,7 @@ int main(void)
     RUN_SUITE(test_coverage);
     RUN_SUITE(test_sync_report);
     RUN_SUITE(test_audit_v2_file);
-#if FM_USE_VIDEO
+#if FM_USE_VIDEO && FM_USE_H264
     RUN_SUITE(test_audit_v2_video);
 #endif
 #if FM_USE_IMAGE

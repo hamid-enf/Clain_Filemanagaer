@@ -992,7 +992,7 @@ static void test_audit_v2_file(void)
 /* ================================================================ */
 /* Video part                                                        */
 /* ================================================================ */
-#if FM_USE_VIDEO
+#if FM_USE_VIDEO && FM_USE_H264     /* build_mp4() is the H.264 test helper */
 /* VID-01: MP4 container boxes nested without end */
 static uint8_t g_av2_mp4[4096];
 static uint8_t g_av2_nest[8192];

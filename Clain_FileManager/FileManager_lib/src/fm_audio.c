@@ -3183,7 +3183,8 @@ FM_Result AudioWriter_Close(FM_AudioWriter *w)
     {
         return FM_ERR_NOT_OPEN;
     }
-    if (w->data_bytes > UINT32_MAX)
+    /* the RIFF size field is the data plus 36 bytes of header, in 32 bits */
+    if (w->data_bytes > (uint64_t)UINT32_MAX - 36u)
     {
         (void)File_Close(&w->file);
         return FM_ERR_TOO_LARGE;
