@@ -1121,13 +1121,13 @@ static void test_audit_v2_video(void)
 /* Image part                                                        */
 /* ================================================================ */
 #if FM_USE_IMAGE
+#if FM_USE_PNG
 static uint32_t av2_be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
 }
 
-#if FM_USE_PNG
 /* IMG-01: the chunks of an encoded PNG must add up to the file, and the
  * picture must come back.  Returns 0, or the step that failed. */
 static int av2_png_roundtrip(uint16_t w, uint16_t h)
@@ -1717,6 +1717,7 @@ static size_t av2_build_adts(uint32_t frames)
     return n;
 }
 
+#if FM_USE_FMFS && FM_USE_SAFE_WRITE     /* av2_faulty_mount() */
 /* ---- a mount whose reads / seeks can be made to fail (F6, F17) ---- */
 static FM_FS_FileReadFn av2_real_read;
 static FM_FS_FileSeekFn av2_real_seek;
@@ -1761,6 +1762,7 @@ static FM_Result av2_faulty_read_mount(void)
     }
     return r;
 }
+#endif /* FM_USE_FMFS && FM_USE_SAFE_WRITE */
 
 static void av2_stream_cb(const int16_t *samples, size_t count, void *user)
 {
@@ -1864,6 +1866,14 @@ static void test_audit_v2_audio(void)
 
     printf("\n[External audit v2: audio]\n");
     restore_posix_root();
+    /* helpers whose every user sits behind an FM_USE_* switch */
+    (void)av2_rd32;
+    (void)av2_realloc;
+    (void)av2_load;
+    (void)av2_count_cb;
+    (void)len;
+    (void)frames;
+    (void)info;
 
 #if FM_USE_VORBIS
     /* ---------------- F1 ---------------- */
@@ -2586,7 +2596,7 @@ static void test_audit_v2_audio(void)
         (void)File_Delete("/av2j.aac");
     }
 
-#if FM_USE_FMFS
+#if FM_USE_FMFS && FM_USE_SAFE_WRITE
     TEST("F6: a read error is reported as one, not as the end (AAC, MP3)");
     {
         static const char *const names[] = {
@@ -2681,7 +2691,7 @@ static void test_audit_v2_audio(void)
         fc_drop(0);
         AV2_RESULT(!bad, q, msg);
     }
-#endif /* FM_USE_FMFS */
+#endif /* FM_USE_FMFS && FM_USE_SAFE_WRITE */
     (void)Audio_UnregisterDecoder("AAC");
     (void)File_Delete("/av2.aac");
 
