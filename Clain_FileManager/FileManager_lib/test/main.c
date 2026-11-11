@@ -20426,6 +20426,9 @@ int main(void)
 #if FM_USE_VIDEO && (FM_USE_H264 || FM_USE_MJPEG)
     RUN_SUITE(test_video_picture_colours);
 #endif
+#if FM_USE_IMAGE && FM_USE_JPEG
+    RUN_SUITE(test_jpeg_layouts);
+#endif
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);
 #endif

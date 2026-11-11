@@ -991,11 +991,139 @@ static void test_video_picture_colours(void)
     {
         FAIL(m);
     }
+
+    /* ffmpeg writes 4:2:2 as luma 2x2 / chroma 1x2 and 4:4:4 as 1x2 for
+     * every component; picojpeg knew chroma 1x1 only and refused both. */
+    TEST("MJPEG 4:2:2 as ffmpeg writes it (chroma sampling 1x2) plays");
+    if (av3_patches("/test/vectors/avi_mjpeg422_patches.avi",
+                    FM_VIDEO_CODEC_MJPEG, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
+
+    TEST("MJPEG 4:4:4 as ffmpeg writes it (every component 1x2) plays");
+    if (av3_patches("/test/vectors/avi_mjpeg444_patches.avi",
+                    FM_VIDEO_CODEC_MJPEG, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
 #endif
 }
 
 #endif /* FM_USE_H264 || FM_USE_MJPEG */
 
 #endif /* FM_USE_VIDEO */
+
+/* ------------------------------------------------------------------ */
+/* Still JPEG: sampling layouts                                        */
+/* ------------------------------------------------------------------ */
+#if FM_USE_IMAGE && FM_USE_JPEG
+
+/* Load `jpg`, compare with the reference file (`ref_ch` bytes a pixel;
+ * the library always delivers 3).  Returns the largest difference, or
+ * -1 with `m` filled. */
+static int av3_jpeg_diff(const char *jpg, const char *ref, unsigned w,
+                         unsigned h, unsigned ref_ch, char *m, size_t m_cap)
+{
+    static uint8_t px[40u * 24u * 3u];
+    static uint8_t want[40u * 24u * 3u];
+    FM_Image img;
+    size_t got = 0;
+    size_t i;
+    int worst = 0;
+    FM_Result r;
+
+    memset(&img, 0, sizeof(img));
+    r = File_ReadAll(ref, want, sizeof(want), &got);
+    if (r != FM_OK || got != (size_t)w * h * ref_ch)
+    {
+        (void)snprintf(m, m_cap, "reference: %d, %lu bytes", (int)r,
+                       (unsigned long)got);
+        return -1;
+    }
+    r = Image_Load(jpg, &img, px, sizeof(px));
+    if (r != FM_OK)
+    {
+        (void)snprintf(m, m_cap, "Image_Load -> %d", (int)r);
+        return -1;
+    }
+    if (img.width != w || img.height != h || img.channels != 3u)
+    {
+        (void)snprintf(m, m_cap, "%ux%u, %u channels", (unsigned)img.width,
+                       (unsigned)img.height, (unsigned)img.channels);
+        return -1;
+    }
+    for (i = 0; i < (size_t)w * h * 3u; i++)
+    {
+        int d = (int)px[i] - (int)want[(ref_ch == 3u) ? i : i / 3u];
+
+        if (d < 0)
+        {
+            d = -d;
+        }
+        if (d > worst)
+        {
+            worst = d;
+        }
+    }
+    return worst;
+}
+
+static void test_jpeg_layouts(void)
+{
+    static const struct
+    {
+        const char *what;
+        const char *jpg;
+        const char *ref;
+        unsigned w, h, ref_ch;
+        int limit;
+    } c[3] = {
+        { "JPEG: one component with sampling factors 2x2 and restart markers",
+          "/test/vectors/jpeg_gray_h2v2.jpg",
+          "/test/vectors/jpeg_gray_h2v2.gray", 37u, 21u, 1u, 3 },
+        { "JPEG 4:2:2 with chroma 1x2, 33x17 (odd both ways)",
+          "/test/vectors/jpeg_422_33x17.jpg",
+          "/test/vectors/jpeg_422_33x17.rgb", 33u, 17u, 3u, 5 },
+        { "JPEG 4:4:4 with every component 1x2, 9x17",
+          "/test/vectors/jpeg_444_9x17.jpg",
+          "/test/vectors/jpeg_444_9x17.rgb", 9u, 17u, 3u, 5 }
+    };
+    char m[120];
+    unsigned i;
+
+    for (i = 0u; i < 3u; i++)
+    {
+        int d;
+
+        TEST(c[i].what);
+        d = av3_jpeg_diff(c[i].jpg, c[i].ref, c[i].w, c[i].h, c[i].ref_ch,
+                          m, sizeof(m));
+        if (d < 0)
+        {
+            FAIL(m);
+        }
+        else if (d > c[i].limit)
+        {
+            (void)snprintf(m, sizeof(m), "largest difference %d (limit %d)",
+                           d, c[i].limit);
+            FAIL(m);
+        }
+        else
+        {
+            PASS();
+        }
+    }
+}
+
+#endif /* FM_USE_IMAGE && FM_USE_JPEG */
 
 #endif /* AUDIT_V3_TESTS_H */

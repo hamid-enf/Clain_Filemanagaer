@@ -214,7 +214,15 @@ static uint16 gMaxMCUSPerCol;
 
 static uint16 gNumMCUSRemainingX, gNumMCUSRemainingY;
 
-static uint8 gMCUOrg[6];
+// FileManager patch: 8 entries (was 6), for the layouts with two chroma
+// blocks per component in an MCU; see gChromaV2.
+static uint8 gMCUOrg[8];
+// FileManager patch: 1 when both chroma components have the sampling
+// factors 1x2 (and luma 1x2 or 2x2).  This is how ffmpeg writes 4:4:4 and
+// 4:2:2 MJPEG; the layouts are the 8x16 and 16x16 MCUs of PJPG_YH1V2 and
+// PJPG_YH2V2 with full vertical chroma resolution, and are reported as
+// those scan types.
+static uint8 gChromaV2;
 
 static pjpeg_need_bytes_callback_t g_pNeedBytesCallback;
 static void *g_pCallback_data;
@@ -1117,11 +1125,13 @@ static uint8 initScan(void)
 //------------------------------------------------------------------------------
 static uint8 initFrame(void)
 {
+   gChromaV2 = 0;
+
    if (gCompsInFrame == 1)
    {
-      if ((gCompHSamp[0] != 1) || (gCompVSamp[0] != 1))
-         return PJPG_UNSUPPORTED_SAMP_FACTORS;
-
+      // FileManager patch: the sampling factors of a single component
+      // have no meaning (ITU T.81 A.2.2: the MCU of a scan with one
+      // component is one block), so any are accepted; 2x2 is common.
       gScanType = PJPG_GRAYSCALE;
 
       gMaxBlocksPerMCU = 1;
@@ -1132,11 +1142,52 @@ static uint8 initFrame(void)
    }
    else if (gCompsInFrame == 3)
    {
-      if ( ((gCompHSamp[1] != 1) || (gCompVSamp[1] != 1)) ||
+      if ((gCompHSamp[1] == 1) && (gCompVSamp[1] == 2) &&
+          (gCompHSamp[2] == 1) && (gCompVSamp[2] == 2) &&
+          (gCompVSamp[0] == 2) &&
+          ((gCompHSamp[0] == 1) || (gCompHSamp[0] == 2)) && (!gReduce))
+      {
+         // FileManager patch, see gChromaV2.  The MCU holds the luma
+         // blocks, then two Cb blocks (upper, lower), then two Cr blocks.
+         gChromaV2 = 1;
+
+         if (gCompHSamp[0] == 1)
+         {
+            gScanType = PJPG_YH1V2;       // 4:4:4, MCU 8x16
+
+            gMaxBlocksPerMCU = 6;
+            gMCUOrg[0] = 0;
+            gMCUOrg[1] = 0;
+            gMCUOrg[2] = 1;
+            gMCUOrg[3] = 1;
+            gMCUOrg[4] = 2;
+            gMCUOrg[5] = 2;
+
+            gMaxMCUXSize = 8;
+            gMaxMCUYSize = 16;
+         }
+         else
+         {
+            gScanType = PJPG_YH2V2;       // 4:2:2, MCU 16x16
+
+            gMaxBlocksPerMCU = 8;
+            gMCUOrg[0] = 0;
+            gMCUOrg[1] = 0;
+            gMCUOrg[2] = 0;
+            gMCUOrg[3] = 0;
+            gMCUOrg[4] = 1;
+            gMCUOrg[5] = 1;
+            gMCUOrg[6] = 2;
+            gMCUOrg[7] = 2;
+
+            gMaxMCUXSize = 16;
+            gMaxMCUYSize = 16;
+         }
+      }
+      else if ( ((gCompHSamp[1] != 1) || (gCompVSamp[1] != 1)) ||
          ((gCompHSamp[2] != 1) || (gCompVSamp[2] != 1)) )
          return PJPG_UNSUPPORTED_SAMP_FACTORS;
-
-      if ((gCompHSamp[0] == 1) && (gCompVSamp[0] == 1))
+      else if ((gCompHSamp[0] == 1) && (gCompVSamp[0] == 1))
       {
          gScanType = PJPG_YH1V1;
 
@@ -1499,7 +1550,10 @@ static PJPG_INLINE uint8 subAndClamp(uint8 a, int16 b)
 // always follows the Cb block of the same MCU) subtract both at once.
 // The reduced-size path further down (pjpeg_decode_init(..., reduce = 1),
 // not used by FileManager) still works the old way.
-static int8 gCbG[64];
+// With gChromaV2 an MCU has two Cb blocks before its two Cr blocks: the
+// second pair uses the upper half (gCbGBase = 64).
+static int8 gCbG[128];
+static uint8 gCbGBase;
 /*----------------------------------------------------------------------------*/
 // Cb upsample and accumulate, 4x4 to 8x8
 static void upsampleCb(uint8 srcOfs, uint8 dstOfs)
@@ -1516,7 +1570,7 @@ static void upsampleCb(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
+         gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
@@ -1547,7 +1601,7 @@ static void upsampleCbH(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
+         gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
@@ -1575,7 +1629,7 @@ static void upsampleCbV(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
+         gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
@@ -1619,7 +1673,7 @@ static void upsampleCr(uint8 srcOfs, uint8 dstOfs)
          pDstR[9] = addAndClamp(pDstR[9], crR);
          
          crG = ((cr * 183U) >> 8U) - 91;
-         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
+         crG = (int16)(crG + gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[1] = subAndClamp(pDstG[1], crG);
          pDstG[8] = subAndClamp(pDstG[8], crG);
@@ -1655,7 +1709,7 @@ static void upsampleCrH(uint8 srcOfs, uint8 dstOfs)
          pDstR[1] = addAndClamp(pDstR[1], crR);
          
          crG = ((cr * 183U) >> 8U) - 91;
-         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
+         crG = (int16)(crG + gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[1] = subAndClamp(pDstG[1], crG);
          
@@ -1687,7 +1741,7 @@ static void upsampleCrV(uint8 srcOfs, uint8 dstOfs)
          pDstR[8] = addAndClamp(pDstR[8], crR);
 
          crG = ((cr * 183U) >> 8U) - 91;
-         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
+         crG = (int16)(crG + gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[8] = subAndClamp(pDstG[8], crG);
 
@@ -1732,7 +1786,7 @@ static void convertCb(uint8 dstOfs)
       int16 cbG, cbB;
 
       cbG = ((cb * 88U) >> 8U) - 44U;
-      gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
+      gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
       cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
       *pDstB++ = addAndClamp(pDstB[0], cbB);
@@ -1756,7 +1810,7 @@ static void convertCr(uint8 dstOfs)
       *pDstR++ = addAndClamp(pDstR[0], crR);
 
       crG = ((cr * 183U) >> 8U) - 91;
-      crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
+      crG = (int16)(crG + gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)]);
       *pDstG++ = subAndClamp(pDstG[0], crG);
    }
 }
@@ -1765,7 +1819,45 @@ static void transformBlock(uint8 mcuBlock)
 {
    idctRows();
    idctCols();
-   
+
+   gCbGBase = 0;
+
+   if (gChromaV2)
+   {
+      // FileManager patch, see gChromaV2
+      if (gScanType == PJPG_YH1V2)
+      {
+         // MCU 8x16: Y upper, Y lower, Cb upper, Cb lower, Cr upper, Cr lower
+         switch (mcuBlock)
+         {
+            case 0: copyY(0); break;
+            case 1: copyY(128); break;
+            case 2: convertCb(0); break;
+            case 3: gCbGBase = 64; convertCb(128); break;
+            case 4: convertCr(0); break;
+            case 5: gCbGBase = 64; convertCr(128); break;
+         }
+      }
+      else
+      {
+         // MCU 16x16: four Y, then Cb for the upper 16x8, Cb for the
+         // lower, and the same for Cr; chroma is halved across only
+         switch (mcuBlock)
+         {
+            case 0: copyY(0); break;
+            case 1: copyY(64); break;
+            case 2: copyY(128); break;
+            case 3: copyY(192); break;
+            case 4: upsampleCbH(0, 0); upsampleCbH(4, 64); break;
+            case 5: gCbGBase = 64; upsampleCbH(0, 128); upsampleCbH(4, 192); break;
+            case 6: upsampleCrH(0, 0); upsampleCrH(4, 64); break;
+            case 7: gCbGBase = 64; upsampleCrH(0, 128); upsampleCrH(4, 192); break;
+         }
+      }
+      gCbGBase = 0;
+      return;
+   }
+
    switch (gScanType)
    {
       case PJPG_GRAYSCALE:
