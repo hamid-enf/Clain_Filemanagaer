@@ -282,6 +282,19 @@ make FM_USE_THREADS=1 FM_SYNC_IMPL=cmsis_rtos2 # CMSIS-RTOS2 port
 
 The host build is warning-clean with the repository's strict C99 warning set and is also validated with `-Werror`.
 
+`make check` is the whole host verification: the suite, the FatFS host
+builds, the examples, the port headers, the CMake configurations and a
+**32-bit run** (`make m32`, `tools/check_32bit.sh`).  The 32-bit run
+builds the suite for a target where `size_t` and pointers are 32 bits
+wide, as on the MCU (`make m32 M32=ubsan` does the same under UBSan); it
+needs a compiler that can do that: `pip install ziglang` (used as
+`python3 -m ziglang cc`), `zig` on the PATH, or a `gcc -m32` with its
+32-bit libraries.  Without one it prints `SKIP` and the rest of
+`make check` still runs.
+`make matrix` / `make matrix-asan` build and run 49 feature and
+debug-level combinations; `make tsan` runs the threaded suite under
+ThreadSanitizer.
+
 ## Audio: WAV + MP3
 
 The audio subsystem plays WAV (8/16-bit PCM) and — with `FM_USE_MP3` — decodes
@@ -351,12 +364,30 @@ radio recordings are) plays its first stream only.  `Audio_ReadMono()`
 serves mono and stereo; with more channels it is `FM_ERR_UNSUPPORTED`.
 
 **Stack.** The decoders work on the stack of the task that calls
-`Audio_Open` / `Audio_Read`.  Measured on x86 by an external audit: MP3
-about 19 KB (minimp3 keeps its scratch area there), Opus 24 to 28 KB at
-open, Vorbis about 8 KB, FLAC about 6 KB, WAV about 4 KB.  ARM figures
-differ, the order of magnitude does not: give an audio task that plays
-MP3 or Opus at least 32 KB and measure the high-water mark on the target
-(they have not been measured on one).
+`Audio_Open` / `Audio_Read` (and `Video_ReadAudioFrame` for the audio
+track of a video).  Measured on x86 by an external audit, whole call
+chain: MP3 about 19 KB (minimp3 keeps its scratch area there), Opus 24
+to 28 KB at open, Vorbis about 8 KB, FLAC about 6 KB, WAV about 4 KB.
+
+For a Cortex-M7 build (clang `-Os`) the compiler reports these as the
+largest single stack frames of the library; the functions that call
+them add theirs on top, a few hundred bytes each:
+
+| Function | Frame | Reached from |
+|---|---|---|
+| `mp3dec_decode_frame` (minimp3) | 17.4 KB | `Audio_Read*` on an MP3 file, `Video_ReadAudioFrame` on an MP3 track |
+| `jpeg_encode_common` | 5.1 KB | writing a JPEG (`FM_JPEG_Encode*`, `Image_Save` to `.jpg`) |
+| `drflac_open_with_metadata_private` | 4.9 KB | `Audio_Open` on a FLAC file |
+| `png_inflate` | 2.2 KB | PNG decode |
+| `h264bsdInterpolate*` | 1.9 KB | H.264 decode |
+| image layer otherwise | up to 1.4 KB | `Image_StreamDecode`, `Image_GetInfo`, PNG decode |
+| file layer | up to 1.2 KB | `FM_Transfer_CopyEx`, `Directory_ScanRecursive`, `Directory_Copy`; the tree walks are loops, their stack does not grow with the depth |
+
+These come from the compiler (`-fstack-size-section`), not from a board:
+give a task that plays MP3 or Opus at least 32 KB and measure the
+high-water mark on the target.  To repeat the measurement, compile with
+`-fstack-size-section` and read the `.stack_sizes` section
+(`llvm-readelf --stack-sizes`), or use `-fstack-usage` with GCC.
 
 **Damaged files and the bundled decoders.** `dr_flac` computes its
 predictions in signed 32-bit arithmetic; on a damaged FLAC file these can

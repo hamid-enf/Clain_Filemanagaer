@@ -135,6 +135,15 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
  *
  *   PCM (8/16-bit), A-law, mu-law, ADPCM : decoded here, always available.
  *   MP3                                  : decoded here when FM_USE_MP3=1.
+ *       The decoder state (about 16 KB, FM_Alloc) is taken on the first
+ *       packet and kept until Video_Close.  One MP3 frame is up to 4608
+ *       bytes of PCM: give `cap` at least that.  A packet that holds more
+ *       frames than fit is continued by the next call; with less room
+ *       than one frame the part that does not fit is lost.  A frame whose
+ *       data began in a packet that was not read (the first frames after
+ *       a seek, or after a damaged packet) is returned as silence of the
+ *       same length, so the time line stays whole.  The decode itself
+ *       needs about 18 KB of stack (see the README, "Stack").
  *   AAC, FLAC, Opus, Vorbis              : decoded by the decoder registered
  *       under "AAC" / "FLAC" / "OPUS" / "VORBIS" (Audio_RegisterDecoder;
  *       FileManager_Init registers the built-in ones that are compiled in).

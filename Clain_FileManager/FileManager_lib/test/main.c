@@ -20281,6 +20281,7 @@ static void suite_leak_check(const char *suite)
 #define RUN_SUITE(fn) do { fn(); suite_leak_check(#fn); } while (0)
 
 #include "debug_log_tests.h"
+#include "audit_v3_tests.h"
 
 int main(void)
 {
@@ -20389,6 +20390,9 @@ int main(void)
     RUN_SUITE(test_audit_v2_file);
 #if FM_USE_VIDEO && FM_USE_H264
     RUN_SUITE(test_audit_v2_video);
+#endif
+#if FM_USE_VIDEO && FM_USE_MP3
+    RUN_SUITE(test_video_mp3_track);
 #endif
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);

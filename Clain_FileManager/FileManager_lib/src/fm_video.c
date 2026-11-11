@@ -299,6 +299,12 @@ typedef struct
     size_t        adec_cap;
 #endif
     FM_Bool       audio_nodec_logged; /* "no decoder" reported once   */
+#if FM_USE_MP3
+    /* MP3 track: decoder state and one frame of PCM, kept for the whole
+     * file (FM_Alloc on the first packet, freed on close).  See
+     * video_mp3_read(). */
+    struct FM_VideoMp3 *mp3;
+#endif
 } FM_VideoPriv;
 
 /* Large index tables: move to SDRAM on MCU (saves ~500KB of RAM_D1).
@@ -464,9 +470,26 @@ static const char *video_audio_tag(uint32_t codec)
     }
 }
 
+#if FM_USE_MP3
+/* About 15.8 KB.  It used to be two locals of Video_ReadAudioFrame: a
+ * 16 KB stack frame on top of the 17 KB one minimp3 needs below it. */
+struct FM_VideoMp3
+{
+    mp3dec_t dec;
+    int16_t  pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+};
+#endif
+
 /* Close the track decoder but keep the scratch buffer (seek). */
 static void video_audio_dec_reset(FM_VideoPriv *p)
 {
+#if FM_USE_MP3
+    if (p->mp3 != NULL)
+    {
+        /* a seek is a discontinuity: forget the bit reservoir */
+        mp3dec_init(&p->mp3->dec);
+    }
+#endif
 #if VIDEO_AUDIO_REGISTRY
     if (p->adec_ops != NULL && p->adec_ctx != NULL &&
         p->adec_ops->close != NULL)
@@ -485,6 +508,13 @@ static void video_priv_free(FM_VideoPriv *p)
     if (p != NULL)
     {
         video_audio_dec_reset(p);
+#if FM_USE_MP3
+        if (p->mp3 != NULL)
+        {
+            FM_Free(p->mp3);
+            p->mp3 = NULL;
+        }
+#endif
 #if VIDEO_AUDIO_REGISTRY
         if (p->adec_buf != NULL)
         {
@@ -5501,6 +5531,172 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
 }
 #endif /* VIDEO_AUDIO_REGISTRY */
 
+#if FM_USE_MP3
+/*
+ * MP3 track -> interleaved 16-bit PCM.
+ *
+ * The decoder lives as long as the video.  It used to be created afresh
+ * for every packet, and MP3 frames are not independent: a frame keeps
+ * part of its data in the frames before it (the bit reservoir) and its
+ * output overlaps the previous frame's.  Muxers write one frame per
+ * packet, so with a new decoder each time every frame that used the
+ * reservoir -- nearly all of them -- was rejected: a normal AVI from
+ * ffmpeg decoded its first frame and nothing else.  The rejected packet
+ * was not skipped either, so the same FM_ERR_CORRUPTED came back on
+ * every call and the end of the track was never reached.
+ *
+ * Now:
+ *   - a frame the decoder cannot produce (reservoir not filled yet: the
+ *     first frames of a track, or after a seek) is delivered as silence
+ *     of the same length, so audio and video stay in step;
+ *   - a packet with no frame in it is consumed and reported as
+ *     FM_ERR_CORRUPTED once; the next call continues after it;
+ *   - a packet that holds more frames than `cap` has room for is
+ *     continued by the next call (it used to lose the rest).  One frame
+ *     is up to MINIMP3_MAX_SAMPLES_PER_FRAME samples (4608 bytes); with
+ *     less room than that the part of a frame that does not fit is
+ *     dropped.
+ */
+static FM_Result video_mp3_read(FM_Video *v, FM_VideoPriv *priv,
+                                uint8_t *buf, size_t cap, size_t *size)
+{
+    struct FM_VideoMp3 *m = priv->mp3;
+    uint64_t offset;
+    uint32_t fsize;
+    uint8_t *tmp;
+    size_t cap_samples = cap / 2u;
+    size_t out_samples = 0u;
+    uint32_t pos = 0u;
+    FM_Result r;
+
+    if (cap_samples == 0u)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (m == NULL)
+    {
+        m = (struct FM_VideoMp3 *)FM_Alloc(sizeof(*m));
+        if (m == NULL)
+        {
+            return FM_ERR_NO_MEMORY;
+        }
+        mp3dec_init(&m->dec);
+        priv->mp3 = m;
+    }
+
+    if (priv->audio_part_left != 0u)
+    {
+        /* the rest of the packet the previous call could not finish */
+        offset = priv->audio_part_off;
+        fsize = priv->audio_part_left;
+    }
+    else
+    {
+        if (v->audio_frame_index < priv->audio_count)
+        {
+            offset = priv->audio_frames[v->audio_frame_index].offset;
+            fsize = priv->audio_frames[v->audio_frame_index].size;
+        }
+        else
+        {
+            r = video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
+                                  &offset, &fsize);
+            if (r != FM_OK)
+            {
+                return r;
+            }
+        }
+        /* From here on the packet is taken, whatever is in it. */
+        v->audio_frame_index++;
+    }
+    if (fsize == 0u)
+    {
+        priv->audio_part_left = 0u;
+        return FM_ERR_CORRUPTED;
+    }
+
+    tmp = (uint8_t *)FM_Alloc(fsize);
+    if (tmp == NULL)
+    {
+        priv->audio_part_left = 0u;
+        return FM_ERR_NO_MEMORY;
+    }
+    r = video_read_at(&v->file, offset, tmp, fsize);
+    if (r != FM_OK)
+    {
+        FM_Free(tmp);
+        priv->audio_part_left = 0u;
+        return r;
+    }
+
+    while (pos < fsize)
+    {
+        mp3dec_frame_info_t info;
+        size_t n;
+        int samples;
+
+        /* Room for a whole frame?  If not, and something has been
+         * produced already, leave the rest for the next call. */
+        if (out_samples != 0u &&
+            cap_samples - out_samples < (size_t)MINIMP3_MAX_SAMPLES_PER_FRAME)
+        {
+            break;
+        }
+        memset(&info, 0, sizeof(info));
+        samples = mp3dec_decode_frame(&m->dec, tmp + pos,
+                                      (int)(fsize - pos), m->pcm, &info);
+        if (info.frame_bytes <= 0 ||
+            (uint32_t)info.frame_bytes > fsize - pos)
+        {
+            pos = fsize;                 /* nothing more in this packet */
+            break;
+        }
+        pos += (uint32_t)info.frame_bytes;
+        if (samples > 0 && info.channels > 0)
+        {
+            n = (size_t)samples * (size_t)info.channels;
+        }
+        else if (info.hz > 0 && info.channels > 0 && info.layer == 3)
+        {
+            /* A frame was there but could not be decoded (its data
+             * starts in a frame we never saw).  Its length is known:
+             * keep the time line, play silence. */
+            n = (size_t)((info.hz >= 32000) ? 1152 : 576) *
+                (size_t)info.channels;
+            memset(m->pcm, 0, n * sizeof(m->pcm[0]));
+        }
+        else
+        {
+            continue;                    /* bytes skipped, no frame */
+        }
+        if (n > cap_samples - out_samples)
+        {
+            n = cap_samples - out_samples;
+        }
+        memcpy(buf + out_samples * 2u, m->pcm, n * 2u);
+        out_samples += n;
+    }
+    FM_Free(tmp);
+
+    if (pos < fsize)
+    {
+        priv->audio_part_off = offset + pos;
+        priv->audio_part_left = fsize - pos;
+    }
+    else
+    {
+        priv->audio_part_left = 0u;
+    }
+    if (out_samples == 0u)
+    {
+        priv->audio_part_left = 0u;
+        return FM_ERR_CORRUPTED;
+    }
+    *size = out_samples * 2u;
+    return FM_OK;
+}
+#endif /* FM_USE_MP3 */
+
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size)
 {
@@ -5519,6 +5715,12 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
     {
         return FM_ERR_UNSUPPORTED;
     }
+#if FM_USE_MP3
+    if (priv->audio_codec == FM_VIDEO_AUDIO_MP3)
+    {
+        return video_mp3_read(v, priv, buf, cap, size);
+    }
+#endif
     if (priv->audio_part_left != 0u &&
         priv->audio_codec == FM_VIDEO_AUDIO_PCM)
     {
@@ -5723,38 +5925,6 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
         FM_Free(tmp);
         *size = got_bytes;
     }
-#if FM_USE_MP3
-    else if (priv->audio_codec == FM_VIDEO_AUDIO_MP3)
-    {
-        uint8_t *tmp = (uint8_t*)FM_Alloc(fsize);
-        if (tmp == NULL) return FM_ERR_NO_MEMORY;
-        r = video_read_at(&v->file, offset, tmp, fsize);
-        if (r != FM_OK) { FM_Free(tmp); return r; }
-        mp3dec_t dec; mp3dec_init(&dec);
-        mp3dec_frame_info_t info;
-        int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
-        size_t out_bytes = 0;
-        int pos = 0;
-        int16_t *out = (int16_t*)buf;
-        size_t out_cap_samples = cap / 2u;
-        size_t out_samples = 0;
-        while (pos < (int)fsize && out_samples < out_cap_samples)
-        {
-            int samples = mp3dec_decode_frame(&dec, tmp + pos, (int)fsize - pos, pcm, &info);
-            if (samples <= 0) { pos += (info.frame_bytes ? info.frame_bytes : 1); continue; }
-            size_t copy = (size_t)samples * (size_t)info.channels;
-            if (out_samples + copy > out_cap_samples) copy = out_cap_samples - out_samples;
-            memcpy(out + out_samples, pcm, copy * 2u);
-            out_samples += copy;
-            out_bytes += copy * 2u;
-            pos += info.frame_bytes;
-            if (info.frame_bytes == 0) break;
-        }
-        FM_Free(tmp);
-        if (out_samples == 0) return FM_ERR_CORRUPTED;
-        *size = out_bytes;
-    }
-#endif
     else if (priv->audio_codec == FM_VIDEO_AUDIO_PCM && priv->audio_bits == 8u)
     {
         /* 8-bit unsigned PCM -> 16-bit signed for I2S */
@@ -5865,15 +6035,16 @@ FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index)
     {
         priv->atail.cur_pos = 0u;
     }
-    /* A seek abandons any half-delivered oversized chunk. */
-    priv->audio_part_left = 0u;
     /* ...and is a discontinuity for a stateful decoder: start it afresh
      * rather than let it predict from packets that are no longer
-     * adjacent. */
-    if (sample_index != v->audio_frame_index)
+     * adjacent.  Leaving a half-delivered chunk behind is one too, even
+     * when the index does not move. */
+    if (sample_index != v->audio_frame_index || priv->audio_part_left != 0u)
     {
         video_audio_dec_reset(priv);
     }
+    /* A seek abandons any half-delivered oversized chunk. */
+    priv->audio_part_left = 0u;
     v->audio_frame_index = sample_index;
     return FM_OK;
 }

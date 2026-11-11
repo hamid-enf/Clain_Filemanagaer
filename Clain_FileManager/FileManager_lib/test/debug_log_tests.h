@@ -313,6 +313,14 @@ static void test_debug_levels(void)
         }
     }
 
+#ifdef FM_DEBUG_PRINTF
+    /* The build sends the levelled messages to its own printf-like
+     * function (-DFM_DEBUG_PRINTF=...), not through the sink.  What the
+     * sink sees is then what it sees at OFF: nothing.  The tests below
+     * check exactly that. */
+    lib_level = FM_DEBUG_OFF;
+#endif
+
     TEST("Debug: an error path prints at LOW and above, nothing at OFF");
     {
         FM_Result r;
