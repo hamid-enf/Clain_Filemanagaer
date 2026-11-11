@@ -39,6 +39,34 @@
 #include "fm_eeprom_chips.h"
 #include "fm_board_config.h"
 
+/* CRC-32 for the round-trip checks below.  With FM_USE_CRC=0 the library
+ * has no CRC module, so the example carries the same loop itself
+ * (reflected 0xEDB88320, no init / final XOR: identical results to
+ * CRC_Compute32) instead of breaking the build. */
+#ifndef EX_CRC32
+#if FM_USE_CRC
+#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#else
+static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i;
+    unsigned j;
+
+    for (i = 0; i < len; i++)
+    {
+        crc ^= p[i];
+        for (j = 0; j < 8u; j++)
+        {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#endif
+#endif /* EX_CRC32 */
+
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
 
@@ -103,6 +131,7 @@ static FM_Result EEPROM_examples_begin(FM_EepromChip chip,
     return r;
 }
 
+__attribute__((unused))   /* optional: a project may leave the EEPROM mounted */
 static void EEPROM_examples_end(void)
 {
     if (g_ee_ready)
@@ -182,7 +211,7 @@ typedef struct
 static uint32_t exE_settings_crc(const ExE_Settings *s)
 {
     /* CRC روی همه چیز جز خود فیلد crc */
-    return CRC_Compute32(s, sizeof(*s) - sizeof(uint32_t), 0u);
+    return EX_CRC32(s, sizeof(*s) - sizeof(uint32_t), 0u);
 }
 
 static void exE_2_settings_struct(void)

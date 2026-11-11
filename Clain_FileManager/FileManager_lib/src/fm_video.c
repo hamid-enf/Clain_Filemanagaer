@@ -2601,6 +2601,9 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
     {
         return FM_ERR_IO;
     }
+    /* mp4_walk() fills the box whenever it returns FM_OK; the zeroing is
+     * for compilers that cannot see that (-Wmaybe-uninitialized). */
+    memset(&moov, 0, sizeof(moov));
     r = mp4_walk(v, 0, file_size, "moov", &moov);
     if (r != FM_OK)
     {

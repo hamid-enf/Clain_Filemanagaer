@@ -3625,9 +3625,186 @@ FM_Result AudioRecorder_Open(const char *folder, uint32_t sample_rate,
 
 #else /* FM_USE_AUDIO == 0 */
 
-/* Link-compatible stubs with NO static state (0 bytes .data/.bss): code
- * that still references the decoder registry keeps linking and gets a
- * clean "unsupported" answer instead of an undefined symbol. */
+/* Audio is compiled out.  As with video and images, the public API still
+ * links, so application code that calls it (the board examples, the
+ * music player) does not need #if around every call: each entry point
+ * answers FM_ERR_UNSUPPORTED.  The stubs are stateless: no decoder, no
+ * buffers, 0 bytes of .data/.bss. */
+FM_Result Audio_Open(const char *path, FM_Audio *a)
+{
+    (void)path; (void)a;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Close(FM_Audio *a)
+{
+    (void)a;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_GetInfo(const FM_Audio *a, FM_AudioInfo *info)
+{
+    (void)a; (void)info;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
+                     size_t *read)
+{
+    (void)a; (void)samples; (void)count;
+    if (read != NULL)
+    {
+        *read = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_ReadFrame(FM_Audio *a, int16_t *frame, size_t *channels_read)
+{
+    (void)a; (void)frame;
+    if (channels_read != NULL)
+    {
+        *channels_read = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_ReadMono(FM_Audio *a, int16_t *samples, size_t count,
+                         size_t *read)
+{
+    (void)a; (void)samples; (void)count;
+    if (read != NULL)
+    {
+        *read = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_ReadStereo(FM_Audio *a, int16_t *samples,
+                           size_t frame_count, size_t *frames_read)
+{
+    (void)a; (void)samples; (void)frame_count;
+    if (frames_read != NULL)
+    {
+        *frames_read = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Seek(FM_Audio *a, double seconds)
+{
+    (void)a; (void)seconds;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Mp3Stats(const FM_Audio *a, FM_Mp3Stats *stats)
+{
+    (void)a; (void)stats;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Mp3StatsReset(const FM_Audio *a)
+{
+    (void)a;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_Stream(FM_Audio *a, FM_AudioCallback cb, void *user_data,
+                       size_t chunk_samples)
+{
+    (void)a; (void)cb; (void)user_data; (void)chunk_samples;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_SetCallback(FM_Audio *a, FM_AudioCallback cb,
+                            void *user_data)
+{
+    (void)a; (void)cb; (void)user_data;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioWriter_Create(const char *path, uint32_t sample_rate,
+                             uint16_t channels, uint16_t bits_per_sample,
+                             FM_AudioWriter *w)
+{
+    (void)path; (void)sample_rate; (void)channels; (void)bits_per_sample;
+    (void)w;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioWriter_Write(FM_AudioWriter *w, const int16_t *samples,
+                            size_t count, size_t *written)
+{
+    (void)w; (void)samples; (void)count;
+    if (written != NULL)
+    {
+        *written = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioWriter_Close(FM_AudioWriter *w)
+{
+    (void)w;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_RegisterEncoder(FM_AudioFileFormat format,
+                                const FM_AudioEncoderOps *ops)
+{
+    (void)format; (void)ops;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Audio_UnregisterEncoder(FM_AudioFileFormat format)
+{
+    (void)format;
+    return FM_ERR_UNSUPPORTED;
+}
+
+const FM_AudioEncoderOps *Audio_GetEncoder(FM_AudioFileFormat format)
+{
+    (void)format;
+    return NULL;
+}
+
+FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
+                               FM_AudioFileFormat format,
+                               const FM_AudioEncodeConfig *config)
+{
+    (void)writer; (void)path; (void)format; (void)config;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioFileWriter_WriteFrames(FM_AudioFileWriter *writer,
+                                      const int16_t *pcm,
+                                      size_t frame_count,
+                                      size_t *frames_written)
+{
+    (void)writer; (void)pcm; (void)frame_count;
+    if (frames_written != NULL)
+    {
+        *frames_written = 0;
+    }
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioFileWriter_Close(FM_AudioFileWriter *writer)
+{
+    (void)writer;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result AudioRecorder_Open(const char *folder, uint32_t sample_rate,
+                             uint16_t channels, uint16_t bits_per_sample,
+                             FM_AudioWriter *w, char *path_out,
+                             size_t path_out_size)
+{
+    (void)folder; (void)sample_rate; (void)channels; (void)bits_per_sample;
+    (void)w; (void)path_out; (void)path_out_size;
+    return FM_ERR_UNSUPPORTED;
+}
+
 FM_Result Audio_RegisterDecoder(const char *codec,
                                 const FM_AudioDecoderOps *ops)
 {

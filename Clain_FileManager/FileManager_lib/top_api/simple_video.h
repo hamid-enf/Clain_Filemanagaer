@@ -2201,6 +2201,7 @@ static FM_Bool sv_ext_eq(const char *a, const char *b)
  * extension any more: an .mp4 may carry MJPEG and an .avi may carry
  * H.264, so those are gated on the parsed codec in
  * simple_video_prime_item() after the header has been read. */
+__attribute__((unused))   /* only called with SIMPLE_VIDEO_ENABLE_H264=0 */
 static FM_Bool sv_path_is_h264(const char *path)
 {
     size_t n;
@@ -2377,6 +2378,7 @@ static FM_Result simple_video_start_index(uint32_t index)
                Player_ItemPath(&sv.player, idx),
                File_GetErrorString(r), (int)r,
                (tried + 1u < count) ? " — trying next" : "");
+#if FM_USE_H264   /* the diagnosis below is the H.264 decoder's */
         if (r == FM_ERR_NO_MEMORY)
         {
             const FM_H264Diag *d = H264_GetLastError();
@@ -2407,6 +2409,7 @@ static FM_Result simple_video_start_index(uint32_t index)
                        (unsigned long)d->activate_fail);
             }
         }
+#endif /* FM_USE_H264 */
     }
     FM_Log("SimpleVideo: no playable video, stopping\n");
     (void)SimpleVideo_Stop();

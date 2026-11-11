@@ -139,6 +139,13 @@
 
 /* macro for debug printing, used only if compiler flag _DEBUG_PRINT is
  * defined */
+/* FileManager: an application-wide -DDEBUG (STM32CubeIDE defines it in
+ * the Debug configuration) is an unrelated, object-like macro.  Drop it
+ * here instead of redefining it, which every file of the decoder
+ * reported as a warning.  Nothing in h264bsd tests `#ifdef DEBUG`. */
+#ifdef DEBUG
+#undef DEBUG
+#endif
 #ifdef _DEBUG_PRINT
 #define DEBUG(args) printf args
 #else

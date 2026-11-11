@@ -451,9 +451,13 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
      * not be reported like a damaged frame (see the end of the loop). */
     FM_Bool saw_slice = FM_FALSE;
 
+    /* The values h264bsd writes through a pointer are declared with its
+     * own `u32` (unsigned int).  On arm-none-eabi uint32_t is
+     * `unsigned long`: the same size, but a different type, which GCC
+     * reports as -Wincompatible-pointer-types (an error from GCC 14). */
     while (len > 0)
     {
-        uint32_t read_bytes = 0;
+        u32 read_bytes = 0;
         uint32_t res;
 
         /* Count parameter-set NALs as they are handed over, so the
@@ -495,14 +499,14 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
 
         if (res == H264BSD_PIC_RDY)
         {
-            uint32_t pic_id;
-            uint32_t is_idr;
-            uint32_t num_err_mbs;
-            uint32_t crop_flag;
-            uint32_t left;
-            uint32_t top;
-            uint32_t cw;
-            uint32_t ch;
+            u32 pic_id;
+            u32 is_idr;
+            u32 num_err_mbs;
+            u32 crop_flag;
+            u32 left;
+            u32 top;
+            u32 cw;
+            u32 ch;
             uint32_t buf_w = h264bsdPicWidth(h->storage) * 16u;
             uint32_t buf_h = h264bsdPicHeight(h->storage) * 16u;
             uint8_t *pic = h264bsdNextOutputPicture(h->storage, &pic_id,

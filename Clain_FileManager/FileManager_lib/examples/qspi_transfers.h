@@ -63,6 +63,34 @@
 #include "fm_board_config.h"
 #include "fm_log.h"
 
+/* CRC-32 for the round-trip checks below.  With FM_USE_CRC=0 the library
+ * has no CRC module, so the example carries the same loop itself
+ * (reflected 0xEDB88320, no init / final XOR: identical results to
+ * CRC_Compute32) instead of breaking the build. */
+#ifndef EX_CRC32
+#if FM_USE_CRC
+#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#else
+static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i;
+    unsigned j;
+
+    for (i = 0; i < len; i++)
+    {
+        crc ^= p[i];
+        for (j = 0; j < 8u; j++)
+        {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#endif
+#endif /* EX_CRC32 */
+
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
 
@@ -234,14 +262,14 @@ void exT_3_verify_roundtrip(void)
     {
         src[i] = (uint8_t)((i * 31u) ^ (i >> 3));
     }
-    c1 = CRC_Compute32(src, sizeof(src), 0u);
+    c1 = EX_CRC32(src, sizeof(src), 0u);
 
     q_step("RAM -> QSPI",
            FM_Transfer_SaveFile("/qspi/rt.bin", src, sizeof(src)));
     q_step("QSPI -> RAM",
            FM_Transfer_LoadFile("/qspi/rt.bin", dst, sizeof(dst), &got));
 
-    c2 = CRC_Compute32(dst, got, 0u);
+    c2 = EX_CRC32(dst, got, 0u);
     printf("  %lu bytes, CRC %08lX -> %08lX : %s\n",
            (unsigned long)got, (unsigned long)c1, (unsigned long)c2,
            (c1 == c2) ? "IDENTICAL" : "CORRUPTED");

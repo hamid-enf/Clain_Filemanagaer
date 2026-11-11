@@ -1789,7 +1789,11 @@ static void convertCb(uint8 dstOfs)
       gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
       cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
-      *pDstB++ = addAndClamp(pDstB[0], cbB);
+      /* FileManager: was `*pDstB++ = addAndClamp(pDstB[0], cbB);`, which
+       * reads and increments pDstB without a sequence point between
+       * them (undefined order, GCC -Wsequence-point). */
+      *pDstB = addAndClamp(pDstB[0], cbB);
+      pDstB++;
    }
 }
 /*----------------------------------------------------------------------------*/
@@ -1807,11 +1811,13 @@ static void convertCr(uint8 dstOfs)
       int16 crR, crG;
 
       crR = (cr + ((cr * 103U) >> 8U)) - 179;
-      *pDstR++ = addAndClamp(pDstR[0], crR);
+      *pDstR = addAndClamp(pDstR[0], crR);   /* FileManager: see convertCb */
+      pDstR++;
 
       crG = ((cr * 183U) >> 8U) - 91;
       crG = (int16)(crG + gCbG[gCbGBase + (uint8)(pSrc - gCoeffBuf - 1)]);
-      *pDstG++ = subAndClamp(pDstG[0], crG);
+      *pDstG = subAndClamp(pDstG[0], crG);   /* FileManager: see convertCb */
+      pDstG++;
    }
 }
 /*----------------------------------------------------------------------------*/

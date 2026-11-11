@@ -127,9 +127,16 @@ APP_STEP App_LibraryBegin(void)
     FileManager_Init();
 
     /* یک بار کافی است. مقدار برگشتی FM_Result است: 0 یعنی FM_OK (فعال
-     * شد)، نه «غیرفعال». */
+     * شد)، نه «غیرفعال».
+     * FM_ENABLE_HW_JPEG = 0 (fm_board_config.h): واحد JPEG سخت‌افزاری وصل
+     * نمی‌شود و JPEG/MJPEG با دیکودر نرم‌افزاری باز می‌شوند. */
+#if FM_ENABLE_HW_JPEG
     hw_img = SimpleImage_UseHwJpeg(&hjpeg);
     hw_vid = SimpleVideo_UseHwJpeg();
+#else
+    hw_img = FM_ERR_UNSUPPORTED;
+    hw_vid = FM_ERR_UNSUPPORTED;
+#endif
     printf("hwjpeg img=%s vid=%s\n",
            (hw_img == FM_OK) ? "on" : File_GetErrorString(hw_img),
            (hw_vid == FM_OK) ? "on" : File_GetErrorString(hw_vid));

@@ -379,11 +379,14 @@ void exQ_4_file_directory(void)
 /* exQ_5 — JSON                                                          */
 /*----------------------------------------------------------------------*/
 
+#if FM_USE_JSON
 static char     qs_text[256];
 static uint32_t qs_tokens[FM_JSON_TOKEN_BUFFER_SIZE / 4];
+#endif /* FM_USE_JSON */
 
 void exQ_5_file_json(void)
 {
+#if FM_USE_JSON
     /* 1. نوشتن */
     {
         char buf[256];
@@ -451,12 +454,16 @@ void exQ_5_file_json(void)
                      s_text, sizeof(s_text), s_tokens, sizeof(s_tokens));
         printf("[api] baud = %d\n", (int)baud);
     }
+#else
+    printf("exQ_5 JSON: skipped (FM_USE_JSON=0)\n");
+#endif /* FM_USE_JSON */
 }
 
 /*----------------------------------------------------------------------*/
 /* exQ_6 — Text Line Editing                                             */
 /*----------------------------------------------------------------------*/
 
+#if FM_USE_TEXT
 static void qs_show(const char *label, const char *path)
 {
     char buf[512];
@@ -464,9 +471,11 @@ static void qs_show(const char *label, const char *path)
     File_ReadText(path, buf, sizeof(buf), NULL);
     printf("%s\n\n", buf);
 }
+#endif /* FM_USE_TEXT */
 
 void exQ_6_file_text_line_edit(void)
 {
+#if FM_USE_TEXT
     size_t n;
 
     File_WriteText("/qspi/cfg.txt",
@@ -500,21 +509,27 @@ void exQ_6_file_text_line_edit(void)
             printf("  %d: %s\n", ++i, line);
         if (f) File_Close(f);
     }
+#else
+    printf("exQ_6 text line edit: skipped (FM_USE_TEXT=0)\n");
+#endif /* FM_USE_TEXT */
 }
 
 /*----------------------------------------------------------------------*/
 /* exQ_7 — Crash-Safe Writes                                             */
 /*----------------------------------------------------------------------*/
 
+#if FM_USE_SAFE_WRITE
 static void qs_show2(const char *label)
 {
     char buf[256];
     File_ReadText("/qspi/settings.txt", buf, sizeof(buf), NULL);
     printf("  %s => \"%s\"\n", label, buf);
 }
+#endif /* FM_USE_SAFE_WRITE */
 
 void exQ_7_file_Crash_Safe_Writes(void)
 {
+#if FM_USE_SAFE_WRITE
     File_WriteText("/qspi/settings.txt", "version=1");
     qs_show2("Initial");
 
@@ -536,6 +551,9 @@ void exQ_7_file_Crash_Safe_Writes(void)
 
     File_Recover("/qspi/settings.txt");
     printf("  Recover done (no stale .fm_tmp).\n");
+#else
+    printf("exQ_7 crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
+#endif /* FM_USE_SAFE_WRITE */
 }
 
 /*----------------------------------------------------------------------*/
@@ -544,6 +562,7 @@ void exQ_7_file_Crash_Safe_Writes(void)
 
 void exQ_8_file_Data_Logger(void)
 {
+#if FM_USE_DATA_LOGGER
     FM_Logger lg;
     FM_LoggerConfig cfg;
     FM_LoggerInfo info;
@@ -612,6 +631,9 @@ void exQ_8_file_Data_Logger(void)
         }
         if (d) Directory_Close(d);
     }
+#else
+    printf("exQ_8 data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
+#endif /* FM_USE_DATA_LOGGER */
 }
 
 /*----------------------------------------------------------------------*/
@@ -620,6 +642,7 @@ void exQ_8_file_Data_Logger(void)
 
 void exQ_9_file_crc_cheaksum(void)
 {
+#if FM_USE_CRC
     const char *data = "123456789";
     size_t len = strlen(data);
 
@@ -627,10 +650,11 @@ void exQ_9_file_crc_cheaksum(void)
 
     printf("CRC16-CCITT  = 0x%04X\n", CRC_Calculate16(data, len));
     printf("CRC16-MODBUS = 0x%04X\n", CRC_Compute16Modbus(data, len, 0xFFFF));
-    printf("CRC32        = 0x%08X  (check: 0xCBF43926)\n",
-           CRC_Calculate32(data, len));
+    printf("CRC32        = 0x%08lX  (check: 0xCBF43926)\n",
+           (unsigned long)CRC_Calculate32(data, len));
     printf("Checksum8    = 0x%02X\n", CRC_Checksum8(data, len));
-    printf("Checksum32   = 0x%08X\n", CRC_Checksum32(data, len));
+    printf("Checksum32   = 0x%08lX\n",
+           (unsigned long)CRC_Checksum32(data, len));
 
     {
         char text[256];
@@ -638,9 +662,12 @@ void exQ_9_file_crc_cheaksum(void)
 
         File_WriteText("/qspi/data.bin", "important sensor data");
         File_ReadAll("/qspi/data.bin", text, sizeof(text), &rd);
-        printf("\nFile CRC32 = 0x%08X (%lu bytes)\n",
-               CRC_Calculate32(text, rd), (unsigned long)rd);
+        printf("\nFile CRC32 = 0x%08lX (%lu bytes)\n",
+               (unsigned long)CRC_Calculate32(text, rd), (unsigned long)rd);
     }
+#else
+    printf("exQ_9 CRC / checksum: skipped (FM_USE_CRC=0)\n");
+#endif /* FM_USE_CRC */
 }
 
 /*----------------------------------------------------------------------*/

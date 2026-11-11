@@ -251,6 +251,7 @@ static int SdramAlloc_Owns(const void *p)
 }
 
 /* Total pool size in bytes. */
+__attribute__((unused))   /* optional helper: not every project calls it */
 static size_t SdramAlloc_TotalBytes(void)
 {
     return (size_t)SDRAM_ALLOC_BYTES;

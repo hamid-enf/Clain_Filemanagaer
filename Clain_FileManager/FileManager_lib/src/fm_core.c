@@ -510,6 +510,13 @@ FM_Result FileManager_MountMemory(FM_Storage *storage, FM_FS *fs,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
+#if !FM_USE_RAMDISK
+    /* The RAM-disk driver is compiled out: say so, rather than leave an
+     * undefined MemoryStorage_Init for the linker. */
+    (void)capacity; (void)block_size; (void)read_only;
+    r = FM_ERR_UNSUPPORTED;
+    return r;
+#else
     r = MemoryStorage_Init(storage, name, address, capacity, block_size,
                            read_only);
     if (r != FM_OK)
@@ -547,6 +554,7 @@ FM_Result FileManager_MountMemory(FM_Storage *storage, FM_FS *fs,
         (void)Storage_Unregister(name);
     }
     return r;
+#endif /* FM_USE_RAMDISK */
 }
 
 FM_Result FileManager_MountStorage(FM_Storage *storage, FM_FS *fs)

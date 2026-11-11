@@ -104,8 +104,8 @@ void info(void)
 {
     printf("info\n");
     SimpleAudio_Info(&i);
-    printf("bit:%d - channels:%d - codec:%s  - duration:%0.2f -  name:%s -  playlist_count:%u -  playlist_index:%u  -sample_rate:%u  - volume_pct:%d  \n",i.bits,i.channels,i.codec,i.duration,
-    		i.name,i.playlist_count,i.playlist_index,i.sample_rate,i.volume_pct);
+    printf("bit:%d - channels:%d - codec:%s  - duration:%0.2f -  name:%s -  playlist_count:%lu -  playlist_index:%lu  -sample_rate:%lu  - volume_pct:%d  \n",i.bits,i.channels,i.codec,i.duration,
+    		i.name,(unsigned long)i.playlist_count,(unsigned long)i.playlist_index,(unsigned long)i.sample_rate,i.volume_pct);
 }
 
 void vol50(void)

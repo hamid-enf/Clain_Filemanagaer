@@ -41,6 +41,34 @@
 #include "fm_media.h"
 #include "fm_log.h"
 
+/* CRC-32 for the round-trip checks below.  With FM_USE_CRC=0 the library
+ * has no CRC module, so the example carries the same loop itself
+ * (reflected 0xEDB88320, no init / final XOR: identical results to
+ * CRC_Compute32) instead of breaking the build. */
+#ifndef EX_CRC32
+#if FM_USE_CRC
+#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#else
+static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i;
+    unsigned j;
+
+    for (i = 0; i < len; i++)
+    {
+        crc ^= p[i];
+        for (j = 0; j < 8u; j++)
+        {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#endif
+#endif /* EX_CRC32 */
+
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
 
@@ -97,7 +125,7 @@ static FM_Result exm_crc32_file(const char *path, uint32_t *crc_out)
         r = File_Read(f, buf, sizeof(buf), &got);
         if (r != FM_OK && r != FM_ERR_EOF) { File_Close(f); return r; }
         if (got == 0) break;
-        crc = CRC_Compute32(buf, got, crc);
+        crc = EX_CRC32(buf, got, crc);
         if (r == FM_ERR_EOF) break;
     }
     (void)File_Close(f);

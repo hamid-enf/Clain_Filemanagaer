@@ -95,6 +95,34 @@
 #include "fm_cache.h"
 #include "fm_log.h"
 
+/* CRC-32 for the round-trip checks below.  With FM_USE_CRC=0 the library
+ * has no CRC module, so the example carries the same loop itself
+ * (reflected 0xEDB88320, no init / final XOR: identical results to
+ * CRC_Compute32) instead of breaking the build. */
+#ifndef EX_CRC32
+#if FM_USE_CRC
+#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#else
+static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i;
+    unsigned j;
+
+    for (i = 0; i < len; i++)
+    {
+        crc ^= p[i];
+        for (j = 0; j < 8u; j++)
+        {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#endif
+#endif /* EX_CRC32 */
+
 #define printf FM_Log
 
 /* گام‌های تست با نام یکتا - با e_step ی هدرهای دیگر (مثل 28) تداخل نکند */
@@ -697,14 +725,14 @@ void exF_2_file_ops(void)
     {
         blob[i] = (uint8_t)(i * 13u + 5u);
     }
-    crc_w = CRC_Compute32(blob, sizeof(blob), 0u);
+    crc_w = EX_CRC32(blob, sizeof(blob), 0u);
     ex33_step("write 1K",
            File_WriteAll(EX33_MOUNT_PATH "/blob.bin",
                          blob, (uint32_t)sizeof(blob)));
     ex33_step("read 1K",
            File_ReadAll(EX33_MOUNT_PATH "/blob.bin",
                         back, sizeof(back), NULL));
-    crc_r = CRC_Compute32(back, sizeof(back), 0u);
+    crc_r = EX_CRC32(back, sizeof(back), 0u);
     printf("  CRC 1K: %08lX -> %08lX : %s\n",
            (unsigned long)crc_w, (unsigned long)crc_r,
            (crc_w == crc_r) ? "IDENTICAL" : "CORRUPTED");
@@ -795,7 +823,7 @@ void exF_4_ram_roundtrip(void)
     {
         src[i] = (uint8_t)((i * 31u) ^ (i >> 3));
     }
-    c1 = CRC_Compute32(src, sizeof(src), 0u);
+    c1 = EX_CRC32(src, sizeof(src), 0u);
 
     ex33_step("RAM -> flash",
            FM_Transfer_SaveFile(EX33_MOUNT_PATH "/rt.bin",
@@ -803,7 +831,7 @@ void exF_4_ram_roundtrip(void)
     ex33_step("flash -> RAM",
            FM_Transfer_LoadFile(EX33_MOUNT_PATH "/rt.bin",
                                 dst, sizeof(dst), &got));
-    c2 = CRC_Compute32(dst, got, 0u);
+    c2 = EX_CRC32(dst, got, 0u);
     printf("  %lu bytes, CRC %08lX -> %08lX : %s\n",
            (unsigned long)got, (unsigned long)c1, (unsigned long)c2,
            (c1 == c2 && got == sizeof(src)) ? "IDENTICAL" : "CORRUPTED");

@@ -297,6 +297,7 @@ static void ex_4_file_directory(void)
 /* ------------------------------------------------------------------ */
 static void ex_5_file_json(void)
 {
+#if FM_USE_JSON
     ex_file_begin();
     if (!g_file_ready) return;
 
@@ -367,11 +368,15 @@ static void ex_5_file_json(void)
     }
 
     ex_file_end();
+#else
+    printf("ex_5 JSON: skipped (FM_USE_JSON=0)\n");
+#endif /* FM_USE_JSON */
 }
 
 /* ------------------------------------------------------------------ */
 /* ex_6 — Text Line Editing                                           */
 /* ------------------------------------------------------------------ */
+#if FM_USE_TEXT
 static void txt_show(const char *label, const char *path)
 {
     char buf[512];
@@ -379,9 +384,11 @@ static void txt_show(const char *label, const char *path)
     File_ReadText(path, buf, sizeof(buf), NULL);
     printf("%s\n\n", buf);
 }
+#endif /* FM_USE_TEXT */
 
 static void ex_6_file_text_line_edit(void)
 {
+#if FM_USE_TEXT
     size_t n;
 
     ex_file_begin();
@@ -420,20 +427,26 @@ static void ex_6_file_text_line_edit(void)
     }
 
     ex_file_end();
+#else
+    printf("ex_6 text line edit: skipped (FM_USE_TEXT=0)\n");
+#endif /* FM_USE_TEXT */
 }
 
 /* ------------------------------------------------------------------ */
 /* ex_7 — Safe / Crash-Safe Writes                                    */
 /* ------------------------------------------------------------------ */
+#if FM_USE_SAFE_WRITE
 static void safe_show(const char *label)
 {
     char buf[256];
     File_ReadText("/settings.txt", buf, sizeof(buf), NULL);
     printf("  %s => \"%s\"\n", label, buf);
 }
+#endif /* FM_USE_SAFE_WRITE */
 
 static void ex_7_file_Crash_Safe_Writes(void)
 {
+#if FM_USE_SAFE_WRITE
     ex_file_begin();
     if (!g_file_ready) return;
 
@@ -456,6 +469,9 @@ static void ex_7_file_Crash_Safe_Writes(void)
     printf("  Recover done (no stale .fm_tmp).\n");
 
     ex_file_end();
+#else
+    printf("ex_7 crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
+#endif /* FM_USE_SAFE_WRITE */
 }
 
 /* ------------------------------------------------------------------ */
@@ -463,6 +479,7 @@ static void ex_7_file_Crash_Safe_Writes(void)
 /* ------------------------------------------------------------------ */
 static void ex_8_file_Data_Logger(void)
 {
+#if FM_USE_DATA_LOGGER
     FM_Logger lg;
     FM_LoggerConfig cfg;
     FM_LoggerInfo info;
@@ -533,6 +550,9 @@ static void ex_8_file_Data_Logger(void)
     }
 
     ex_file_end();
+#else
+    printf("ex_8 data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
+#endif /* FM_USE_DATA_LOGGER */
 }
 
 /* ------------------------------------------------------------------ */
@@ -540,6 +560,7 @@ static void ex_8_file_Data_Logger(void)
 /* ------------------------------------------------------------------ */
 static void ex_9_file_crc_cheaksum(void)
 {
+#if FM_USE_CRC
     const char *data = "123456789";
     size_t len = strlen(data);
 
@@ -547,10 +568,11 @@ static void ex_9_file_crc_cheaksum(void)
 
     printf("CRC16-CCITT  = 0x%04X\n", CRC_Calculate16(data, len));
     printf("CRC16-MODBUS = 0x%04X\n", CRC_Compute16Modbus(data, len, 0xFFFF));
-    printf("CRC32        = 0x%08X  (check: 0xCBF43926)\n",
-           CRC_Calculate32(data, len));
+    printf("CRC32        = 0x%08lX  (check: 0xCBF43926)\n",
+           (unsigned long)CRC_Calculate32(data, len));
     printf("Checksum8    = 0x%02X\n", CRC_Checksum8(data, len));
-    printf("Checksum32   = 0x%08X\n", CRC_Checksum32(data, len));
+    printf("Checksum32   = 0x%08lX\n",
+           (unsigned long)CRC_Checksum32(data, len));
 
     ex_file_begin();
     if (!g_file_ready) return;
@@ -561,11 +583,14 @@ static void ex_9_file_crc_cheaksum(void)
 
         File_WriteText("/data.bin", "important sensor data");
         File_ReadAll("/data.bin", text, sizeof(text), &rd);
-        printf("\nFile CRC32 = 0x%08X (%lu bytes)\n",
-               CRC_Calculate32(text, rd), (unsigned long)rd);
+        printf("\nFile CRC32 = 0x%08lX (%lu bytes)\n",
+               (unsigned long)CRC_Calculate32(text, rd), (unsigned long)rd);
     }
 
     ex_file_end();
+#else
+    printf("ex_9 CRC / checksum: skipped (FM_USE_CRC=0)\n");
+#endif /* FM_USE_CRC */
 }
 
 /* ------------------------------------------------------------------ */
