@@ -443,6 +443,78 @@ static int lfs_flags(uint32_t mode)
     return flags;
 }
 
+/* littlefs keeps nothing in common between two handles of one file:
+ * each has its own copy of the size and of the block list, taken when it
+ * was opened.  A second writer therefore does not see what the first one
+ * wrote, and whichever of them is synced last wins -- the other one's
+ * data is gone, with every call reporting success.  A reader next to a
+ * writer is no better off: the blocks its copy points at are free as
+ * far as the allocator is concerned as soon as the writer has replaced
+ * them, and are handed out again.
+ *
+ * So a file that is open for writing has exactly one handle here: the
+ * open that would add a second one is refused with FM_ERR_BUSY.  Any
+ * number of read-only handles is fine. */
+static FM_Bool lfs_same_file(const lfs_file_t *a, const lfs_file_t *b)
+{
+    if (a->id != b->id)
+    {
+        return FM_FALSE;
+    }
+    return ((a->m.pair[0] == b->m.pair[0] && a->m.pair[1] == b->m.pair[1]) ||
+            (a->m.pair[0] == b->m.pair[1] && a->m.pair[1] == b->m.pair[0]))
+           ? FM_TRUE : FM_FALSE;
+}
+
+static FM_Bool lfs_handle_writes(const lfs_file_t *f)
+{
+    return ((f->flags & LFS_O_WRONLY) == LFS_O_WRONLY ||
+            (f->flags & LFS_O_TRUNC) != 0) ? FM_TRUE : FM_FALSE;
+}
+
+/* Slot `i` is reserved and not open yet; it is borrowed for a look at
+ * the file (read-only, so closing it again changes nothing). */
+static FM_Bool lfs_open_conflict(LittleFS_Ctx *ctx, uint32_t i,
+                                 const char *lpath, uint32_t mode)
+{
+    FM_Bool writes = (mode & (FM_OPEN_WRITE | FM_OPEN_TRUNCATE))
+                     ? FM_TRUE : FM_FALSE;
+    FM_Bool conflict = FM_FALSE;
+    FM_Bool candidates = FM_FALSE;
+    uint32_t j;
+
+    for (j = 0; j < FM_MAX_OPEN_FILES; j++)
+    {
+        if (j != i && ctx->file_used[j] &&
+            (writes || lfs_handle_writes(&ctx->files[j])))
+        {
+            candidates = FM_TRUE;
+            break;
+        }
+    }
+    if (!candidates)
+    {
+        return FM_FALSE;
+    }
+    if (lfs_file_opencfg(&ctx->lfs, &ctx->files[i], lpath, LFS_O_RDONLY,
+                         &ctx->file_cfg[i]) != LFS_ERR_OK)
+    {
+        return FM_FALSE;    /* not there (yet): nobody else has it open */
+    }
+    for (j = 0; j < FM_MAX_OPEN_FILES; j++)
+    {
+        if (j != i && ctx->file_used[j] &&
+            (writes || lfs_handle_writes(&ctx->files[j])) &&
+            lfs_same_file(&ctx->files[i], &ctx->files[j]))
+        {
+            conflict = FM_TRUE;
+            break;
+        }
+    }
+    (void)lfs_file_close(&ctx->lfs, &ctx->files[i]);
+    return conflict;
+}
+
 static FM_Result lfs_fs_file_open(FM_FS *fs, void *fh, const char *path,
                                   uint32_t mode)
 {
@@ -477,6 +549,13 @@ static FM_Result lfs_fs_file_open(FM_FS *fs, void *fh, const char *path,
     memset(&ctx->file_cfg[i], 0, sizeof(ctx->file_cfg[i]));
     ctx->file_cfg[i].buffer = &ctx->file_buf[i * FM_LFS_CACHE_SIZE];
 
+    if (lfs_open_conflict(ctx, i, lpath, mode))
+    {
+        FM_Lock();
+        ctx->file_used[i] = 0;
+        FM_Unlock();
+        return FM_ERR_BUSY;
+    }
     err = lfs_file_opencfg(&ctx->lfs, &ctx->files[i], lpath, lfs_flags(mode),
                            &ctx->file_cfg[i]);
     if (err != LFS_ERR_OK)
@@ -526,6 +605,10 @@ static FM_Result lfs_fs_file_read(FM_FS *fs, void *fh, void *buf,
     {
         return FM_ERR_NOT_OPEN;
     }
+    if ((ctx->files[h->index].flags & LFS_O_RDONLY) != LFS_O_RDONLY)
+    {
+        return FM_ERR_ACCESS;      /* littlefs asserts on this */
+    }
     r = lfs_file_read(&ctx->lfs, &ctx->files[h->index], buf, len);
     if (r < 0)
     {
@@ -546,6 +629,11 @@ static FM_Result lfs_fs_file_write(FM_FS *fs, void *fh, const void *buf,
     if (fh == NULL || !h->used)
     {
         return FM_ERR_NOT_OPEN;
+    }
+    if ((ctx->files[h->index].flags & LFS_O_WRONLY) != LFS_O_WRONLY)
+    {
+        if (written) *written = 0;
+        return FM_ERR_ACCESS;      /* littlefs asserts on this */
     }
     r = lfs_file_write(&ctx->lfs, &ctx->files[h->index], buf, len);
     if (r < 0)
@@ -632,6 +720,11 @@ static FM_Result lfs_fs_file_truncate(FM_FS *fs, void *fh, uint64_t size)
     if (size > (uint64_t)UINT32_MAX)
     {
         return FM_ERR_TOO_LARGE;
+    }
+    /* littlefs asserts on this (lfs.c, lfs_file_truncate_) */
+    if ((ctx->files[h->index].flags & LFS_O_WRONLY) != LFS_O_WRONLY)
+    {
+        return FM_ERR_ACCESS;
     }
     err = lfs_file_truncate(&ctx->lfs, &ctx->files[h->index], (lfs_off_t)size);
     return lfs_map_err(err);

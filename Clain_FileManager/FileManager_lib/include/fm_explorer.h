@@ -33,6 +33,9 @@ typedef struct
     FM_ExplorerSort sort;
     char      history[FM_EXPLORER_MAX_DEPTH][FM_PATH_MAX];
     uint32_t  depth;              /* history depth (0 = at root)        */
+    FM_Bool   truncated;          /* the directory holds more matching
+                                   * entries than FM_MAX_EXPLORER_ITEMS;
+                                   * items[] is only the first part     */
 } FM_Explorer;
 
 FM_Result Explorer_Open(FM_Explorer *ex, const char *path);
@@ -49,6 +52,9 @@ const FM_DirEntry *Explorer_GetCurrentItem(const FM_Explorer *ex);
 const FM_DirEntry *Explorer_GetItem(const FM_Explorer *ex, uint32_t index);
 uint32_t Explorer_GetItemCount(const FM_Explorer *ex);
 FM_Bool  Explorer_IsDir(const FM_Explorer *ex, uint32_t index);
+/* FM_TRUE when the listing stops at FM_MAX_EXPLORER_ITEMS although the
+ * directory has more: show "..." rather than pretend it is complete. */
+FM_Bool  Explorer_IsTruncated(const FM_Explorer *ex);
 
 FM_Result Explorer_SetFilters(FM_Explorer *ex, FM_Bool only_files,
                               FM_Bool only_dirs, const char *ext,

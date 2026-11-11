@@ -20227,6 +20227,8 @@ static void suite_leak_check(const char *suite)
     g_suite_pool_base = used;
 }
 
+#include "audit_v2_tests.h"
+
 #define RUN_SUITE(fn) do { fn(); suite_leak_check(#fn); } while (0)
 
 int main(void)
@@ -20330,6 +20332,7 @@ int main(void)
     RUN_SUITE(test_regressions);
     RUN_SUITE(test_coverage);
     RUN_SUITE(test_sync_report);
+    RUN_SUITE(test_audit_v2_file);
 #if FM_USE_THREADS && FM_HOST_BUILD
     RUN_SUITE(test_threads);
     RUN_SUITE(test_threads_wide);

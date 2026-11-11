@@ -52,6 +52,7 @@ static FM_Result sys2fm(int sys_err)
     case ENOTEMPTY: return FM_ERR_NOT_EMPTY;
     case EBUSY:   return FM_ERR_BUSY;
     case EROFS:   return FM_ERR_READ_ONLY;
+    case EINVAL:  return FM_ERR_INVALID_ARGUMENT;  /* e.g. seek before 0 */
     default:      return FM_ERR_IO;
     }
 }
@@ -118,6 +119,18 @@ static FM_Result posix_file_open(FM_FS *fs, void *fh, const char *path,
     path = strip_slash(path);
     fd = open(path, open_flags(mode), 0644);
     if (fd < 0) { return sys2fm(errno); }
+    /* open(2) opens a directory read-only without complaint; the other
+     * adapters answer FM_ERR_IS_DIRECTORY and so must this one, or
+     * File_Open hands out a handle every read of which fails. */
+    {
+        struct stat sb;
+
+        if (fstat(fd, &sb) == 0 && S_ISDIR(sb.st_mode))
+        {
+            (void)close(fd);
+            return FM_ERR_IS_DIRECTORY;
+        }
+    }
     pf->fd = fd;
     pf->used = 1;
     (void)fs;

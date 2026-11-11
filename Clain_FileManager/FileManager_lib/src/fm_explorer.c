@@ -65,6 +65,7 @@ static FM_Result explorer_load(FM_Explorer *ex)
 
     ex->count = 0;
     ex->cursor = 0;
+    ex->truncated = FM_FALSE;
 
     d = Directory_Open(ex->cwd);
     if (d == NULL)
@@ -97,6 +98,9 @@ static FM_Result explorer_load(FM_Explorer *ex)
         }
         if (n >= FM_MAX_EXPLORER_ITEMS)
         {
+            /* more than fits: say so (Explorer_IsTruncated) instead of
+             * presenting the first part as the whole directory */
+            ex->truncated = FM_TRUE;
             break;
         }
         ex->items[n++] = e;
@@ -181,12 +185,17 @@ FM_Result Explorer_Enter(FM_Explorer *ex)
     {
         return FM_ERR_TOO_LARGE;
     }
-    /* push history */
-    if (ex->depth < FM_EXPLORER_MAX_DEPTH)
+    /* push history; when it is full the oldest entry goes, so that
+     * Explorer_Back still leads to where this step came from (it used
+     * to skip the push, and Back then jumped several levels up) */
+    if (ex->depth >= FM_EXPLORER_MAX_DEPTH)
     {
-        (void)strcpy(ex->history[ex->depth], ex->cwd);
-        ex->depth++;
+        memmove(ex->history[0], ex->history[1],
+                sizeof(ex->history) - sizeof(ex->history[0]));
+        ex->depth = FM_EXPLORER_MAX_DEPTH - 1u;
     }
+    (void)strcpy(ex->history[ex->depth], ex->cwd);
+    ex->depth++;
     (void)strcpy(ex->cwd, full);
     return explorer_load(ex);
 }
@@ -300,6 +309,11 @@ FM_Bool Explorer_IsDir(const FM_Explorer *ex, uint32_t index)
         return FM_FALSE;
     }
     return (item->type == FM_ITEM_DIR) ? FM_TRUE : FM_FALSE;
+}
+
+FM_Bool Explorer_IsTruncated(const FM_Explorer *ex)
+{
+    return (ex != NULL && ex->truncated) ? FM_TRUE : FM_FALSE;
 }
 
 FM_Result Explorer_SetFilters(FM_Explorer *ex, FM_Bool only_files,

@@ -330,6 +330,7 @@ static FM_Result storage_mount_locked(FM_Storage *s, const char *name)
 {
     FM_Result r;
 
+    (void)name;     /* only the log lines use it; none at FM_DEBUG_LEVEL 0 */
     if (!FM_Storage_IsPresent(s))
     {
         FM_ERR_LOG("mount %s: not present", name);

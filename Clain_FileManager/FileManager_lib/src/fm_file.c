@@ -5,6 +5,7 @@
 
 #define FM_DEBUG_TAG "file"
 #include "fm_debug.h"
+#include "fm_log.h"          /* FM_Log is called even at FM_DEBUG_LEVEL 0 */
 #include "fm_internal.h"
 #include "fm_cache.h"
 #include <string.h>
@@ -38,6 +39,37 @@ static FM_Result fop_write(FM_File *f, const void *buf, uint32_t len,
     FM_Mount_Lock(f->mount);
     r = f->fs->ops.file_write(f->fs, f->fh, buf, len, put);
     FM_Mount_Unlock(f->mount);
+    return r;
+}
+
+/* Append: ask the backend where the file ends, go there and write, all
+ * under one hold of the mount lock.  The handle's own f->size is only a
+ * snapshot -- another handle (a second task, the logger, File_AppendAll)
+ * may have grown the file since, and writing at the remembered offset
+ * would overwrite that data and still report FM_OK.  *end receives the
+ * offset the bytes were written at. */
+static FM_Result fop_write_end(FM_File *f, const void *buf, uint32_t len,
+                               uint32_t *put, uint64_t *end)
+{
+    FM_Result r;
+    uint64_t size = f->size;
+
+    FM_Mount_Lock(f->mount);
+    r = FM_OK;
+    if (f->fs->ops.file_size != NULL)
+    {
+        r = f->fs->ops.file_size(f->fs, f->fh, &size);
+    }
+    if (r == FM_OK && f->fs->ops.file_seek != NULL)
+    {
+        r = f->fs->ops.file_seek(f->fs, f->fh, (int64_t)size, FM_SEEK_SET);
+    }
+    if (r == FM_OK)
+    {
+        r = f->fs->ops.file_write(f->fs, f->fh, buf, len, put);
+    }
+    FM_Mount_Unlock(f->mount);
+    *end = size;
     return r;
 }
 
@@ -209,8 +241,10 @@ static FM_Result file_read_backend(FM_File *f, void *buf, uint32_t len,
     return r;
 }
 
+/* at_end != NULL: every chunk is appended (see fop_write_end) and
+ * *at_end receives the offset just behind the last byte written. */
 static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
-                                    uint32_t *put)
+                                    uint32_t *put, uint64_t *at_end)
 {
     const uint8_t *in = (const uint8_t *)buf;
     uint32_t total = 0;
@@ -218,6 +252,12 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
 
     if (file_direct_ok(buf, len))
     {
+        if (at_end != NULL)
+        {
+            r = fop_write_end(f, buf, len, put, at_end);
+            *at_end += *put;
+            return r;
+        }
         return fop_write(f, buf, len, put);
     }
     while (total < len)
@@ -231,7 +271,15 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
         }
         bounce_lock();
         memcpy(g_file_bounce, in + total, chunk);
-        r = fop_write(f, g_file_bounce, chunk, &wr);
+        if (at_end != NULL)
+        {
+            r = fop_write_end(f, g_file_bounce, chunk, &wr, at_end);
+            *at_end += wr;
+        }
+        else
+        {
+            r = fop_write(f, g_file_bounce, chunk, &wr);
+        }
         bounce_unlock();
         total += wr;
         if (r != FM_OK || wr == 0u)
@@ -244,7 +292,19 @@ static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
 }
 #else
 #define file_read_backend(f, buf, len, got)  fop_read((f), (buf), (len), (got))
-#define file_write_backend(f, buf, len, put) fop_write((f), (buf), (len), (put))
+static FM_Result file_write_backend(FM_File *f, const void *buf, uint32_t len,
+                                    uint32_t *put, uint64_t *at_end)
+{
+    FM_Result r;
+
+    if (at_end != NULL)
+    {
+        r = fop_write_end(f, buf, len, put, at_end);
+        *at_end += *put;
+        return r;
+    }
+    return fop_write(f, buf, len, put);
+}
 #endif
 
 /* The adapter file handles (e.g. POSIX `int fd`) are stored in the byte
@@ -1187,10 +1247,18 @@ FM_Result File_Read(FM_File *f, void *buf, uint32_t len, uint32_t *read)
     return r;
 }
 
-FM_Result File_Write(FM_File *f, const void *buf, uint32_t len,
-                     uint32_t *written)
+/* at_end: write behind the last byte the file has now, wherever the
+ * handle's position is.  That is File_Append, and every File_Write on a
+ * handle opened with FM_OPEN_APPEND (what O_APPEND and LFS_O_APPEND do
+ * on their own; FMFS and FatFs only positioned the handle at open, so
+ * the same program wrote to different places on different backends). */
+static FM_Result file_write_common(FM_File *f, const void *buf, uint32_t len,
+                                   uint32_t *written, FM_Bool at_end)
 {
     FM_Result r;
+    uint32_t local_written = 0;
+    uint32_t *written_ptr = (written != NULL) ? written : &local_written;
+    uint64_t end = 0;
 
     if (f == NULL || !f->used || buf == NULL)
     {
@@ -1204,56 +1272,53 @@ FM_Result File_Write(FM_File *f, const void *buf, uint32_t len,
     {
         return FM_ERR_UNSUPPORTED;
     }
-    if (written != NULL)
-    {
-        *written = 0;
-    }
+    *written_ptr = 0;
 #if FM_USE_CACHE
     cache_lock();
     cache_invalidate_same_file(f);
     cache_unlock();
 #endif
+    if (at_end)
     {
-        uint32_t local_written = 0;
-        uint32_t *written_ptr = (written != NULL) ? written : &local_written;
-
-        r = file_write_backend(f, buf, len, written_ptr);
-        if (r == FM_OK)
+        r = file_write_backend(f, buf, len, written_ptr, &end);
+        if (r == FM_OK || *written_ptr != 0u)
         {
-            f->pos += *written_ptr;
+            f->pos = end;
             if (f->pos > f->size)
             {
                 f->size = f->pos;
             }
         }
+        return r;
+    }
+    r = file_write_backend(f, buf, len, written_ptr, NULL);
+    if (r == FM_OK)
+    {
+        f->pos += *written_ptr;
+        if (f->pos > f->size)
+        {
+            f->size = f->pos;
+        }
     }
     return r;
+}
+
+FM_Result File_Write(FM_File *f, const void *buf, uint32_t len,
+                     uint32_t *written)
+{
+    FM_Bool at_end = FM_FALSE;
+
+    if (f != NULL && f->used && (f->mode & FM_OPEN_APPEND))
+    {
+        at_end = FM_TRUE;
+    }
+    return file_write_common(f, buf, len, written, at_end);
 }
 
 FM_Result File_Append(FM_File *f, const void *buf, uint32_t len,
                       uint32_t *written)
 {
-    FM_Result r;
-
-    if (f == NULL || !f->used)
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    if (!(f->mode & FM_OPEN_WRITE))
-    {
-        return FM_ERR_ACCESS;
-    }
-    if (f->fs->ops.file_seek != NULL)
-    {
-        r = fop_seek(f, (int64_t)f->size,
-                                 FM_SEEK_SET);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        f->pos = f->size;
-    }
-    return File_Write(f, buf, len, written);
+    return file_write_common(f, buf, len, written, FM_TRUE);
 }
 
 FM_Result File_Seek(FM_File *f, int64_t offset, FM_SeekOrigin origin)
@@ -1323,6 +1388,13 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
     if (f == NULL || !f->used)
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    /* Truncating is a write.  Without this check the adapters disagreed
+     * on a read-only handle: FMFS FM_ERR_ACCESS, POSIX FM_ERR_IO, and
+     * littlefs an LFS_ASSERT -- that is abort(), a reset on a target. */
+    if (!(f->mode & FM_OPEN_WRITE))
+    {
+        return FM_ERR_ACCESS;
     }
     if (f->fs->ops.file_truncate == NULL)
     {

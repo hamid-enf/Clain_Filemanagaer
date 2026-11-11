@@ -217,6 +217,37 @@ int main(void)
         }
 
         File_Delete("/adv.bin");
+
+        /* External audit v2, FILE-03: truncating must not move the file
+         * position (the adapter has to move it for f_truncate, and used
+         * to leave it at the cut). */
+        f = File_Open("/pos.bin", FM_OPEN_READ | FM_OPEN_WRITE |
+                                  FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+        TEST("File_Truncate keeps the position (below the cut)");
+        CHECK_TRUE(f != NULL, "open failed");
+        r = File_Write(f, "AAAABBBBCCCC", 12, NULL);
+        if (r == FM_OK) r = File_Seek(f, 2, FM_SEEK_SET);
+        if (r == FM_OK) r = File_Truncate(f, 8);
+        if (r == FM_OK) r = File_Tell(f, &pos);
+        CHECK(r, "write/seek/truncate/tell");
+        CHECK_TRUE(pos == 2, "position moved to the cut");
+        got = 0;
+        r = File_Read(f, b4, 4, &got);
+        CHECK(r, "File_Read");
+        CHECK_TRUE(got == 4 && memcmp(b4, "AABB", 4) == 0,
+                   "read after truncate came from the wrong offset");
+
+        TEST("File_Truncate pulls a position behind the cut back to it");
+        r = File_Seek(f, 7, FM_SEEK_SET);
+        if (r == FM_OK) r = File_Truncate(f, 5);
+        if (r == FM_OK) r = File_Tell(f, &pos);
+        CHECK(r, "seek/truncate/tell");
+        CHECK_TRUE(pos == 5, "position not at the new end");
+        r = File_Size(f, &sz);
+        CHECK(r, "File_Size");
+        CHECK_TRUE(sz == 5, "size != 5");
+        File_Close(f);
+        File_Delete("/pos.bin");
         FS_Unmount("/");
     }
 

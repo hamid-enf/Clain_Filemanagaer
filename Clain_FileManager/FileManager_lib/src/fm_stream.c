@@ -146,7 +146,8 @@ FM_Result Stream_InitFile(FM_Stream *s, FM_File *f)
         {
             ctx = &g_file_pool[i];
             ctx->busy = FM_TRUE;
-                    break;
+            ctx->stream = s;    /* what stream_is_bound() looks for */
+            break;
         }
     }
     FM_Unlock();

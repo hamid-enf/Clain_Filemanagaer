@@ -528,11 +528,25 @@ static FM_Result fatfs_file_truncate(FM_FS *fs, void *fh, uint64_t size)
     FatFS_Ctx *ctx = fatfs_ctx(fs);
     FatFSFileHandle *h = (FatFSFileHandle *)fh;
     FRESULT fr;
+    FSIZE_t back;
 
     if (fh == NULL || !h->used) return FM_ERR_NOT_OPEN;
+    /* f_truncate() cuts at the file position, so the position has to be
+     * moved there first -- and put back afterwards: truncating must not
+     * move it (ftruncate does not, nor do the other adapters), or the
+     * next read or write lands at the cut instead of where the caller
+     * was. */
+    back = f_tell(ctx->files[h->index]);
     fr = f_lseek(ctx->files[h->index], (FSIZE_t)size);
     if (fr != FR_OK) return fatfs_map_err(fr);
-    return fatfs_map_err(f_truncate(ctx->files[h->index]));
+    fr = f_truncate(ctx->files[h->index]);
+    if (back > (FSIZE_t)size) back = (FSIZE_t)size;
+    if (fr != FR_OK)
+    {
+        (void)f_lseek(ctx->files[h->index], back);
+        return fatfs_map_err(fr);
+    }
+    return fatfs_map_err(f_lseek(ctx->files[h->index], back));
 }
 
 static FM_Result fatfs_file_flush(FM_FS *fs, void *fh)

@@ -20,6 +20,7 @@ FM_Result Text_ReadLine(FM_File *f, char *line, size_t line_size,
     size_t n = 0;
     FM_Bool overflow = FM_FALSE;
     FM_Bool had_data = FM_FALSE;
+    size_t pending_cr = 0;
 
     if (f == NULL || line == NULL || line_size == 0)
     {
@@ -57,11 +58,43 @@ FM_Result Text_ReadLine(FM_File *f, char *line, size_t line_size,
         }
         if (c == '\r')
         {
-            continue; /* strip CR (CRLF files) */
+            /* Only the CR of a CRLF line end (or one that is the last
+             * byte of the file) is dropped.  A CR anywhere else is data:
+             * dropping it changed the text, and Text_Replace /
+             * Text_InsertLine / Text_DeleteLine, which copy the file
+             * line by line, deleted it from the file for good. */
+            pending_cr++;
+            continue;
+        }
+        while (pending_cr > 0)
+        {
+            pending_cr--;
+            if (n + 1 < line_size)
+            {
+                line[n++] = '\r';
+            }
+            else
+            {
+                overflow = FM_TRUE;
+            }
         }
         if (n + 1 < line_size)
         {
             line[n++] = c;
+        }
+        else
+        {
+            overflow = FM_TRUE;
+        }
+    }
+    /* the line ended: one CR belongs to the line end, the others before
+     * it are text */
+    while (pending_cr > 1)
+    {
+        pending_cr--;
+        if (n + 1 < line_size)
+        {
+            line[n++] = '\r';
         }
         else
         {

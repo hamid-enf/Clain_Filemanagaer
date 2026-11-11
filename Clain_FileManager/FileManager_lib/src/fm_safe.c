@@ -97,11 +97,18 @@ FM_Result File_SafeReplace(const char *path, const void *data, size_t size)
     }
     if (r == FM_OK)
     {
+        /* Closing is where FatFs and littlefs commit what is still in
+         * their buffers, and where a card error surfaces.  A temp file
+         * whose close failed is not known to be whole and must not
+         * replace the good file. */
         r = File_Close(f);
     }
     else
     {
         (void)File_Close(f);
+    }
+    if (r != FM_OK)
+    {
         (void)File_Delete(tmp);
         FM_Core_SetLastError(r);
         return r;
@@ -230,10 +237,24 @@ FM_Result File_Transaction(const char *path, const void *data, size_t size)
     {
         if (existed)
         {
-            /* restore original from backup */
-            (void)File_Copy(bak, path, NULL, NULL);
+            /* Put the original back.  Renaming the backup into place
+             * needs no free space and cannot stop half way; copying it
+             * is the fallback for an adapter that cannot rename over an
+             * existing file.  The backup is given up only when one of
+             * the two worked -- on a full volume or a card that has
+             * just gone it is the last copy of the data there is, and
+             * it stays where it is ("<path>.fm_tmp.bak"). */
+            FM_Result back = File_Rename(bak, path);
+
+            if (back != FM_OK)
+            {
+                back = File_Copy(bak, path, NULL, NULL);
+                if (back == FM_OK)
+                {
+                    (void)File_Delete(bak);
+                }
+            }
         }
-        (void)File_Delete(bak);
         FM_Core_SetLastError(r);
         return r;
     }
