@@ -872,6 +872,218 @@ static void test_video_vorbis_track(void)
 #endif /* FM_USE_AUDIO && FM_USE_VORBIS */
 
 /* ------------------------------------------------------------------ */
+/* Sizes from a damaged index; a read that fails for lack of memory     */
+/* ------------------------------------------------------------------ */
+static size_t   g_av3_alloc_max;      /* largest block asked for        */
+static unsigned g_av3_alloc_calls;
+static unsigned g_av3_alloc_fail;     /* refuse this call (1-based)     */
+
+static void *av3_alloc(size_t n, void *ctx)
+{
+    (void)ctx;
+    g_av3_alloc_calls++;
+    if (n > g_av3_alloc_max)
+    {
+        g_av3_alloc_max = n;
+    }
+    if (g_av3_alloc_calls == g_av3_alloc_fail || n > ((size_t)64u << 20))
+    {
+        return NULL;
+    }
+    return malloc(n);
+}
+
+static void av3_free(void *q, void *ctx)
+{
+    (void)ctx;
+    free(q);
+}
+
+/* Copy the MP4 `src` to `dst` with the first entry of its `nth` (0-based)
+ * sample-size table set to `value`. */
+static FM_Bool av3_patch_stsz(const char *src, const char *dst, unsigned nth,
+                              uint32_t value)
+{
+    size_t len = 0;
+    size_t i;
+    unsigned seen = 0u;
+
+    if (File_ReadAll(src, g_av3_file, sizeof(g_av3_file), &len) != FM_OK)
+    {
+        return FM_FALSE;
+    }
+    for (i = 4u; i + 20u <= len; i++)
+    {
+        if (memcmp(g_av3_file + i, "stsz", 4) == 0 && seen++ == nth)
+        {
+            /* type, version + flags, uniform size (0), count, entries */
+            uint8_t *e = g_av3_file + i + 16u;
+
+            if (g_av3_file[i + 8u] != 0u || g_av3_file[i + 11u] != 0u)
+            {
+                return FM_FALSE;         /* a uniform size: no table */
+            }
+            e[0] = (uint8_t)(value >> 24);
+            e[1] = (uint8_t)(value >> 16);
+            e[2] = (uint8_t)(value >> 8);
+            e[3] = (uint8_t)value;
+            return (File_WriteAll(dst, g_av3_file, len) == FM_OK)
+                       ? FM_TRUE : FM_FALSE;
+        }
+    }
+    return FM_FALSE;
+}
+
+static void test_video_damaged_sizes(void)
+{
+    static FM_Video v;
+    FM_Allocator saved = *FM_Allocator_Get();
+    FM_Allocator mine = { av3_alloc, NULL, NULL, av3_free, NULL };
+    char m[160];
+    FM_Result r;
+
+#if FM_USE_H264
+    TEST("A video frame size of 4 GB in the index is not allocated");
+    if (!av3_patch_stsz("/test/vectors/mp4_h264_patches.mp4",
+                        "/av3_bad_video.mp4", 0u, 0xF8000000u))
+    {
+        FAIL("cannot build the file");
+    }
+    else
+    {
+        static uint8_t rgb[64u * 48u * 3u];
+        FM_Result dr = FM_OK;
+
+        g_av3_alloc_max = 0u;
+        g_av3_alloc_calls = 0u;
+        g_av3_alloc_fail = 0u;
+        (void)FM_Allocator_Set(&mine);
+        memset(&v, 0, sizeof(v));
+        r = Video_Open("/av3_bad_video.mp4", &v);
+        if (r == FM_OK)
+        {
+            dr = Video_DecodeFrame(&v, rgb, sizeof(rgb));
+            (void)Video_Close(&v);
+        }
+        (void)FM_Allocator_Set(&saved);
+        if (r == FM_OK && dr == FM_ERR_EOF &&
+            g_av3_alloc_max < ((size_t)1u << 20))
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m),
+                           "open %d, decode %d, largest request %lu bytes",
+                           (int)r, (int)dr, (unsigned long)g_av3_alloc_max);
+            FAIL(m);
+        }
+        (void)File_Delete("/av3_bad_video.mp4");
+    }
+#endif
+
+#if FM_USE_MP3
+    TEST("An audio packet size of 4 GB in the index is not allocated");
+    if (!av3_patch_stsz("/test/vectors/mp4_mp3_delay.mp4",
+                        "/av3_bad_audio.mp4", 1u, 0xF8000000u))
+    {
+        FAIL("cannot build the file");
+    }
+    else
+    {
+        static uint8_t pcm[8192];
+        FM_Result ar = FM_OK;
+        size_t n = 0;
+
+        g_av3_alloc_max = 0u;
+        g_av3_alloc_calls = 0u;
+        g_av3_alloc_fail = 0u;
+        (void)FM_Allocator_Set(&mine);
+        memset(&v, 0, sizeof(v));
+        r = Video_Open("/av3_bad_audio.mp4", &v);
+        if (r == FM_OK)
+        {
+            ar = Video_ReadAudioFrame(&v, pcm, sizeof(pcm), &n);
+            (void)Video_Close(&v);
+        }
+        (void)FM_Allocator_Set(&saved);
+        if (r == FM_OK && ar == FM_ERR_EOF &&
+            g_av3_alloc_max < ((size_t)1u << 20))
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m),
+                           "open %d, read %d, largest request %lu bytes",
+                           (int)r, (int)ar, (unsigned long)g_av3_alloc_max);
+            FAIL(m);
+        }
+        (void)File_Delete("/av3_bad_audio.mp4");
+    }
+
+    TEST("MP3 track: a read that fails for memory loses nothing");
+    {
+        Av3Run whole;
+        Av3Run run;
+        uint32_t crc;
+        FM_Result r1 = FM_OK;
+        FM_Result r2 = FM_OK;
+        uint32_t at = 0u;
+        size_t n = 0;
+
+        r = av3_decode("/test/vectors/avi_mp3.avi", 4608u, &whole);
+        crc = av3_crc32(g_av3_pcm, whole.bytes);
+        memset(&run, 0, sizeof(run));
+        memset(&v, 0, sizeof(v));
+        if (r == FM_OK)
+        {
+            r = Video_Open("/test/vectors/avi_mp3.avi", &v);
+        }
+        if (r == FM_OK)
+        {
+            static uint8_t pcm[4608];
+
+            /* the decoder state is the first block the track asks for,
+             * the packet buffer the second */
+            g_av3_alloc_max = 0u;
+            g_av3_alloc_calls = 0u;
+            g_av3_alloc_fail = 1u;
+            (void)FM_Allocator_Set(&mine);
+            r1 = Video_ReadAudioFrame(&v, pcm, sizeof(pcm), &n);
+            g_av3_alloc_fail = 3u;
+            r2 = Video_ReadAudioFrame(&v, pcm, sizeof(pcm), &n);
+            g_av3_alloc_fail = 0u;
+            at = v.audio_frame_index;
+            av3_drain(&v, 4608u, 500u, &run);
+            (void)Video_Close(&v);
+            (void)FM_Allocator_Set(&saved);
+        }
+        if (r == FM_OK && r1 == FM_ERR_NO_MEMORY && r2 == FM_ERR_NO_MEMORY &&
+            at == 0u && whole.bytes != 0u && run.bytes == whole.bytes &&
+            run.bad == 0u && av3_crc32(g_av3_pcm, run.bytes) == crc)
+        {
+            PASS();
+        }
+        else
+        {
+            (void)snprintf(m, sizeof(m),
+                           "open %d, reads %d and %d, then at packet %lu; "
+                           "%lu of %lu bytes", (int)r, (int)r1, (int)r2,
+                           (unsigned long)at, (unsigned long)run.bytes,
+                           (unsigned long)whole.bytes);
+            FAIL(m);
+        }
+    }
+#endif
+    (void)m;
+    (void)r;
+    (void)v;
+    (void)mine;
+    (void)saved;
+}
+
+/* ------------------------------------------------------------------ */
 /* The picture: colours                                                */
 /* ------------------------------------------------------------------ */
 #if FM_USE_H264 || FM_USE_MJPEG

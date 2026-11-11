@@ -171,6 +171,7 @@ typedef struct
     uint8_t      *rgb_scratch;
     size_t        rgb_scratch_cap;
     FM_Bool       nodec_logged;      /* "no video decoder" said once  */
+    uint64_t      file_size;         /* at open; 0 = not known        */
 #if VIDEO_AUDIO_REGISTRY
     /* Compressed-track decoder, opened on the first packet and kept for
      * the life of the video (re-created after a seek).  Stateful codecs
@@ -452,6 +453,22 @@ static void video_priv_free(FM_VideoPriv *p)
         p->in_use = FM_FALSE;
         FM_Unlock();
     }
+}
+
+/* Does the index entry (offset, size) lie inside the file?  The sizes
+ * in a container's index go straight into an allocation and a read; a
+ * damaged entry asked for gigabytes before the read could fail.  A range
+ * that is not in the file is treated like the read it would have been:
+ * the end of the data. */
+static FM_Bool video_in_file(const FM_VideoPriv *priv, uint64_t offset,
+                             uint64_t size)
+{
+    if (priv == NULL || priv->file_size == 0u)
+    {
+        return FM_TRUE;                  /* size not known: let the read say */
+    }
+    return (offset <= priv->file_size && size <= priv->file_size - offset)
+               ? FM_TRUE : FM_FALSE;
 }
 
 /* Return a scratch buffer of at least `need` bytes that lives as long as
@@ -4348,6 +4365,10 @@ FM_Result Video_Open(const char *path, FM_Video *v)
     }
     else
     {
+        if (v->priv != NULL)
+        {
+            ((FM_VideoPriv *)v->priv)->file_size = size;
+        }
         FM_EVENT_LOG("opened %s (%ux%u, %lu fps, %lu frames)", path,
                      (unsigned)v->info.width, (unsigned)v->info.height,
                      (unsigned long)v->info.fps,
@@ -4946,6 +4967,10 @@ FM_Result Video_DecodeFrame(FM_Video *v, void *pixels_out,
             if (r != FM_OK)
             {
                 return (r == FM_ERR_EOF) ? FM_ERR_CORRUPTED : r;
+            }
+            if (!video_in_file(priv, off, fsize))
+            {
+                return FM_ERR_EOF;       /* the index points past the file */
             }
             cap = fsize;
             if (priv->avc1)
@@ -5641,14 +5666,24 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
 static FM_Result video_audio_locate(FM_Video *v, FM_VideoPriv *priv,
                                     uint64_t *offset, uint32_t *fsize)
 {
+    FM_Result r = FM_OK;
+
     if (v->audio_frame_index < priv->audio_count)
     {
         *offset = priv->audio_frames[v->audio_frame_index].offset;
         *fsize = priv->audio_frames[v->audio_frame_index].size;
-        return FM_OK;
     }
-    return video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
-                             offset, fsize);
+    else
+    {
+        r = video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
+                              offset, fsize);
+    }
+    if (r == FM_OK && !video_in_file(priv, *offset, *fsize))
+    {
+        /* an index entry that points past the file: see video_in_file() */
+        r = FM_ERR_EOF;
+    }
+    return r;
 }
 
 #if VIDEO_VORBIS_STREAM
@@ -5838,6 +5873,7 @@ static FM_Result video_mp3_read(FM_Video *v, FM_VideoPriv *priv,
     size_t cap_samples = cap / 2u;
     size_t out_samples = 0u;
     uint32_t pos = 0u;
+    FM_Bool fresh = FM_FALSE;            /* a packet not yet counted */
     FM_Result r;
 
     if (cap_samples == 0u)
@@ -5868,27 +5904,36 @@ static FM_Result video_mp3_read(FM_Video *v, FM_VideoPriv *priv,
         {
             return r;
         }
-        /* From here on the packet is taken, whatever is in it. */
-        v->audio_frame_index++;
+        fresh = FM_TRUE;
     }
     if (fsize == 0u)
     {
+        if (fresh)
+        {
+            v->audio_frame_index++;
+        }
         priv->audio_part_left = 0u;
         return FM_ERR_CORRUPTED;
     }
 
+    /* Memory and I/O errors take nothing: the same call can be repeated.
+     * (The packet used to be counted before it was read, so a failed
+     * allocation dropped it, and the rest of a packet in progress.) */
     tmp = (uint8_t *)FM_Alloc(fsize);
     if (tmp == NULL)
     {
-        priv->audio_part_left = 0u;
         return FM_ERR_NO_MEMORY;
     }
     r = video_read_at(&v->file, offset, tmp, fsize);
     if (r != FM_OK)
     {
         FM_Free(tmp);
-        priv->audio_part_left = 0u;
         return r;
+    }
+    if (fresh)
+    {
+        /* From here on the packet is taken, whatever is in it. */
+        v->audio_frame_index++;
     }
 
     while (pos < fsize)
@@ -6211,23 +6256,12 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
             return FM_OK;
         }
     }
-    if (v->audio_frame_index < priv->audio_count)
+    /* From the index, or past its end straight out of the container
+     * (AVI movi list / MKV clusters / MP4 sample tables). */
+    r = video_audio_locate(v, priv, &offset, &fsize);
+    if (r != FM_OK)
     {
-        offset = priv->audio_frames[v->audio_frame_index].offset;
-        fsize = priv->audio_frames[v->audio_frame_index].size;
-    }
-    else
-    {
-        /* Past the prebuilt index: stream the remaining packets straight
-         * out of the container (AVI movi list / MKV clusters).  Tracks
-         * with more packets than the index holds used to go silent
-         * here. */
-        r = video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
-                              &offset, &fsize);
-        if (r != FM_OK)
-        {
-            return r;
-        }
+        return r;
     }
 
     if (video_audio_tag(priv->audio_codec) != NULL)

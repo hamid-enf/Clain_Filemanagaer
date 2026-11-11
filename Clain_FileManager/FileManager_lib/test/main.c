@@ -20423,6 +20423,9 @@ int main(void)
 #if FM_USE_VIDEO && FM_USE_AUDIO && FM_USE_VORBIS
     RUN_SUITE(test_video_vorbis_track);
 #endif
+#if FM_USE_VIDEO
+    RUN_SUITE(test_video_damaged_sizes);
+#endif
 #if FM_USE_VIDEO && (FM_USE_H264 || FM_USE_MJPEG)
     RUN_SUITE(test_video_picture_colours);
 #endif
