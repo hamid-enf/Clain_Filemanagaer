@@ -13236,7 +13236,15 @@ static void test_video_report(void)
                   0x00 },
                 /* no esds at all: the entry's figures, announced as LC */
                 { 0, 0x00, { 0x00, 0x00, 0x00 }, FM_VIDEO_AUDIO_AAC, 8000u, 2,
-                  0x6C }
+                  0x6C },
+                /* Vorbis in an "mp4a" entry (ffmpeg): it used to be
+                 * announced as AAC */
+                { 1, 0xDD, { 0x00, 0x00, 0x00 }, FM_VIDEO_AUDIO_VORBIS, 8000u,
+                  2, 0x00 },
+                /* AC-3: not a codec this library has; no audio track,
+                 * rather than "AAC" in ADTS frames */
+                { 1, 0xA5, { 0x00, 0x00, 0x00 }, FM_VIDEO_AUDIO_NONE, 0u, 0,
+                  0x00 }
             };
             static uint8_t mb[4096];
             uint8_t esds[sizeof(esds_t)];
@@ -13272,7 +13280,22 @@ static void test_video_report(void)
                 if (r == FM_OK) r = Video_Open("/vr_esds.mp4", &vid);
                 if (r == FM_OK)
                 {
-                    r = Video_GetAudioInfo(&vid, &ai);
+                    if (cs[ci].codec == FM_VIDEO_AUDIO_NONE)
+                    {
+                        FM_Bool has = FM_TRUE;
+
+                        r = Video_HasAudio(&vid, &has);
+                        if (r == FM_OK && has)
+                        {
+                            printf("[case %u: the track was kept] ",
+                                   (unsigned)ci);
+                            r = FM_ERR_INVALID_FORMAT;
+                        }
+                    }
+                    else
+                    {
+                        r = Video_GetAudioInfo(&vid, &ai);
+                    }
                     if (r == FM_OK && ((int)ai.codec != cs[ci].codec ||
                                        ai.sample_rate != cs[ci].rate ||
                                        ai.channels != cs[ci].ch))
@@ -20393,6 +20416,12 @@ int main(void)
 #endif
 #if FM_USE_VIDEO && FM_USE_MP3
     RUN_SUITE(test_video_mp3_track);
+#endif
+#if FM_USE_VIDEO
+    RUN_SUITE(test_video_adpcm_track);
+#endif
+#if FM_USE_VIDEO && FM_USE_AUDIO && FM_USE_VORBIS
+    RUN_SUITE(test_video_vorbis_track);
 #endif
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);

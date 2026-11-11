@@ -4458,13 +4458,17 @@ static int vorbis_search_for_page_pushdata(vorb *f, uint8 *data, int data_len)
                n = f->page_crc_tests++;
                f->scan[n].bytes_left = len-j;
                f->scan[n].crc_so_far = crc;
-               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + (data[i+25]<<24);
+               // FileManager patch: (uint32) on the top byte, here and two
+               // lines down.  A byte >= 0x80 shifted left by 24 as an int is
+               // undefined behaviour (upstream has the cast in the pull-data
+               // twin of this line only).
+               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + ((uint32)data[i+25]<<24);
                // if the last frame on a page is continued to the next, then
                // we can't recover the sample_loc immediately
                if (data[i+27+data[i+26]-1] == 255)
                   f->scan[n].sample_loc = ~0;
                else
-                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + (data[i+ 9]<<24);
+                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + ((uint32)data[i+ 9]<<24);
                f->scan[n].bytes_done = i+j;
                if (f->page_crc_tests == STB_VORBIS_PUSHDATA_CRC_COUNT)
                   break;

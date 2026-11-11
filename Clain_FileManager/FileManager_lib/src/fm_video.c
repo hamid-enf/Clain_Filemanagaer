@@ -34,6 +34,7 @@
 #endif
 #include <string.h>
 #include "fm_audio.h"
+#include "fm_vorbis.h"
 #if FM_USE_MP3
 #include "minimp3.h"
 #endif
@@ -44,130 +45,10 @@
  * registry.  Without the audio subsystem there is no registry, so the
  * whole decode path (and its lookup tables) is compiled out. */
 #define VIDEO_AUDIO_REGISTRY   (FM_USE_AUDIO)
-/* MKV keeps the three Vorbis headers in CodecPrivate without Ogg framing;
- * the built-in stb_vorbis decoder wants an Ogg stream, so one is
- * synthesised.  Needs 1 KB of CRC table: only when that decoder exists. */
-#define VIDEO_VORBIS_OGG_SYNTH (FM_USE_AUDIO && FM_USE_VORBIS)
-
-#if VIDEO_VORBIS_OGG_SYNTH
-/* Ogg CRC for Vorbis synthesis (same as in stb_vorbis) */
-static uint32_t ogg_crc_table[256];
-static void ogg_crc_init(void)
-{
-    static int inited = 0;
-    if (inited) return;
-    inited = 1;
-    for (int i=0;i<256;i++) {
-        uint32_t r = (uint32_t)i << 24;
-        for (int j=0;j<8;j++) r = (r & 0x80000000u) ? (r << 1) ^ 0x04C11DB7u : (r << 1);
-        ogg_crc_table[i] = r;
-    }
-}
-static uint32_t ogg_crc(const uint8_t *data, size_t len)
-{
-    uint32_t crc = 0;
-    ogg_crc_init();
-    for (size_t i=0;i<len;i++) crc = (crc << 8) ^ ogg_crc_table[((crc >> 24) ^ data[i]) & 0xFF];
-    return crc;
-}
-/* Build a minimal Ogg Vorbis file from MKV CodecPrivate + one audio packet.
- * MKV private: [0]=packets-1 (2), then Xiph lacing for first n-1 packets,
- * then packets. We extract the 3 Vorbis headers and the packet.
- * Returns FM_OK and *out_ogg is FM_Alloc'd with *out_len.
- * Caller must FM_Free. */
-static FM_Result vorbis_build_ogg_from_mkv(const uint8_t *priv, uint32_t priv_size,
-                                           const uint8_t *pkt, uint32_t pkt_size,
-                                           uint8_t **out_ogg, uint32_t *out_len)
-{
-    if (!priv || !pkt || !out_ogg || !out_len || priv_size < 1u) return FM_ERR_INVALID_ARGUMENT;
-    uint8_t n = priv[0];
-    uint32_t count = (uint32_t)n + 1u;
-    if (count != 3u) return FM_ERR_INVALID_FORMAT; /* Vorbis expects 3 headers */
-    /* parse Xiph lengths */
-    uint32_t pos = 1u;
-    uint32_t lens[3] = {0};
-    for (uint32_t i=0;i<count-1u;i++) {
-        uint32_t len = 0;
-        while (pos < priv_size) {
-            uint8_t b = priv[pos++];
-            len += b;
-            if (b != 255u) break;
-        }
-        if (pos > priv_size) return FM_ERR_CORRUPTED;
-        lens[i] = len;
-    }
-    lens[count-1u] = priv_size - pos;
-    /* verify sum */
-    uint32_t sum = lens[0]+lens[1]+lens[2];
-    if (sum != priv_size - (1u + (count-1u)) && sum != priv_size - pos + lens[count-1u]) {
-        /* Fallback: try simple 16-bit BE lengths (some muxers) */
-        if (priv_size >= 5u) {
-            lens[0] = ((uint32_t)priv[1]<<8)|priv[2];
-            lens[1] = ((uint32_t)priv[3]<<8)|priv[4];
-            lens[2] = priv_size - 5u;
-            pos = 5u;
-        } else return FM_ERR_CORRUPTED;
-    }
-    /* check that packet data matches */
-    if (pos + lens[0] + lens[1] + lens[2] > priv_size) return FM_ERR_CORRUPTED;
-    const uint8_t *h0 = priv + pos;
-    const uint8_t *h1 = h0 + lens[0];
-    const uint8_t *h2 = h1 + lens[1];
-    /* Build Ogg: 2 pages: first with 3 headers (continued), second with packet */
-    uint32_t page1_data = lens[0]+lens[1]+lens[2];
-    uint32_t page2_data = pkt_size;
-    uint32_t page1_segs = (page1_data + 254u)/255u;
-    if (page1_segs > 255u) return FM_ERR_TOO_LARGE;
-    uint32_t page2_segs = (page2_data + 254u)/255u;
-    if (page2_segs > 255u) return FM_ERR_TOO_LARGE;
-    uint32_t total = 27+page1_segs+page1_data + 27+page2_segs+page2_data;
-    uint8_t *out = (uint8_t*)FM_Alloc(total);
-    if (!out) return FM_ERR_NO_MEMORY;
-    uint32_t off = 0;
-    /* Page 1 */
-    memcpy(out+off, "OggS", 4); off+=4;
-    out[off++] = 0; /* version */
-    out[off++] = 0x02; /* BOS */
-    out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; /* granule 0 */
-    out[off++]=0x01; out[off++]=0; out[off++]=0; out[off++]=0; /* serial 1 */
-    out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; /* seq 0 */
-    out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; /* crc placeholder */
-    out[off++] = (uint8_t)page1_segs;
-    uint32_t p = 0;
-    for (uint32_t i=0;i<page1_segs;i++) {
-        uint8_t seg = (page1_data - p > 255u) ? 255u : (uint8_t)(page1_data - p);
-        out[off++] = seg; p += seg;
-    }
-    uint32_t crc_pos1 = 22;
-    memcpy(out+off, h0, lens[0]); off+=lens[0];
-    memcpy(out+off, h1, lens[1]); off+=lens[1];
-    memcpy(out+off, h2, lens[2]); off+=lens[2];
-    uint32_t crc1 = ogg_crc(out, off);
-    out[crc_pos1]= (uint8_t)(crc1 &0xFF); out[crc_pos1+1]=(uint8_t)((crc1>>8)&0xFF); out[crc_pos1+2]=(uint8_t)((crc1>>16)&0xFF); out[crc_pos1+3]=(uint8_t)((crc1>>24)&0xFF);
-    /* Page 2 */
-    uint32_t page2_start = off;
-    memcpy(out+off, "OggS",4); off+=4;
-    out[off++]=0;
-    out[off++]=0x04; /* EOS */
-    out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0; /* granule = samples */
-    out[off++]=0x01; out[off++]=0; out[off++]=0; out[off++]=0;
-    out[off++]=0x01; out[off++]=0; out[off++]=0; out[off++]=0; /* seq 1 */
-    uint32_t crc_pos2 = page2_start+22;
-    out[off++]=0; out[off++]=0; out[off++]=0; out[off++]=0;
-    out[off++] = (uint8_t)page2_segs;
-    p=0;
-    for (uint32_t i=0;i<page2_segs;i++) {
-        uint8_t seg = (page2_data - p > 255u) ? 255u : (uint8_t)(page2_data - p);
-        out[off++] = seg; p+=seg;
-    }
-    memcpy(out+off, pkt, pkt_size); off+=pkt_size;
-    uint32_t crc2 = ogg_crc(out+page2_start, off-page2_start);
-    out[crc_pos2]= (uint8_t)(crc2 &0xFF); out[crc_pos2+1]=(uint8_t)((crc2>>8)&0xFF); out[crc_pos2+2]=(uint8_t)((crc2>>16)&0xFF); out[crc_pos2+3]=(uint8_t)((crc2>>24)&0xFF);
-    *out_ogg = out;
-    *out_len = off;
-    return FM_OK;
-}
-#endif /* VIDEO_VORBIS_OGG_SYNTH */
+/* Vorbis in MKV / WebM: the three header packets sit in CodecPrivate,
+ * the audio packets follow one by one.  The built-in decoder has a
+ * packet-stream interface for exactly that (fm_vorbis.h). */
+#define VIDEO_VORBIS_STREAM (FM_USE_AUDIO && FM_USE_VORBIS)
 
 #define FMRV_HEADER_SIZE 24u
 /* Annex-B parameter-set prefix (SPS/PPS, plus VPS for HEVC whose three
@@ -250,6 +131,8 @@ typedef struct
     uint32_t      audio_rate;
     uint16_t      audio_channels;
     uint16_t      audio_bits;        /* PCM only                      */
+    uint16_t      audio_wav_tag;     /* ADPCM: 0x0011 IMA, 0x0002 MS  */
+    uint16_t      audio_block_align; /* ADPCM: bytes per block        */
     uint8_t       audio_aot;         /* AAC audio object type (0 = not
                                       * known: treated as AAC-LC)     */
     FM_Bool       audio_pcm_be;      /* 16-bit PCM stored big-endian  */
@@ -304,6 +187,12 @@ typedef struct
      * file (FM_Alloc on the first packet, freed on close).  See
      * video_mp3_read(). */
     struct FM_VideoMp3 *mp3;
+#endif
+#if VIDEO_VORBIS_STREAM
+    /* Vorbis track: the stream decoder, opened on the first packet and
+     * kept until close.  See video_vorbis_read(). */
+    FM_VorbisStream *vorbis;
+    FM_Result        vorbis_error;   /* != FM_OK: the headers were refused */
 #endif
 } FM_VideoPriv;
 
@@ -490,6 +379,13 @@ static void video_audio_dec_reset(FM_VideoPriv *p)
         mp3dec_init(&p->mp3->dec);
     }
 #endif
+#if VIDEO_VORBIS_STREAM
+    if (p->vorbis != NULL)
+    {
+        /* the same for Vorbis; the codebooks are kept */
+        FM_Vorbis_StreamReset(p->vorbis);
+    }
+#endif
 #if VIDEO_AUDIO_REGISTRY
     if (p->adec_ops != NULL && p->adec_ctx != NULL &&
         p->adec_ops->close != NULL)
@@ -513,6 +409,13 @@ static void video_priv_free(FM_VideoPriv *p)
         {
             FM_Free(p->mp3);
             p->mp3 = NULL;
+        }
+#endif
+#if VIDEO_VORBIS_STREAM
+        if (p->vorbis != NULL)
+        {
+            FM_Vorbis_StreamClose(p->vorbis);
+            p->vorbis = NULL;
         }
 #endif
 #if VIDEO_AUDIO_REGISTRY
@@ -1139,6 +1042,8 @@ static FM_Result avi_parse_header(FM_Video *v, const AviLayout *lay,
                         else if (tag == 0x0011u || tag == 0x0002u) /* IMA/MS ADPCM */
                         {
                             priv->audio_codec = FM_VIDEO_AUDIO_ADPCM;
+                            priv->audio_wav_tag = tag;
+                            priv->audio_block_align = video_rd16(strf + 12);
                             priv->audio_channels = video_rd16(strf + 2);
                             priv->audio_rate = video_rd32(strf + 4);
                             priv->audio_bits = 16u;
@@ -1717,6 +1622,8 @@ static uint32_t mp4_parse_esds(FM_Video *v, FM_VideoPriv *priv,
     uint32_t n = 0u;
     uint32_t i = 4u;            /* version + flags */
     uint32_t oti = 0u;
+    uint64_t esds_off = 0u;     /* file offset of d[0] */
+    uint64_t esds_len = 0u;     /* bytes in the box, may exceed sizeof(d) */
     FM_Bool found = FM_FALSE;
 
     /* QuickTime sound description versions 1 / 2 are longer */
@@ -1743,6 +1650,8 @@ static uint32_t mp4_parse_esds(FM_Video *v, FM_VideoPriv *priv,
                 if (video_read_at(&v->file, b.data, d, n) == FM_OK)
                 {
                     found = FM_TRUE;
+                    esds_off = b.data;
+                    esds_len = len;
                 }
                 break;
             }
@@ -1807,6 +1716,17 @@ static uint32_t mp4_parse_esds(FM_Video *v, FM_VideoPriv *priv,
         {
             uint32_t aot = 0u;
 
+            if (oti == 0xDDu)
+            {
+                /* Vorbis: the descriptor is the three header packets,
+                 * laced as in a Matroska CodecPrivate.  They are some
+                 * KB, far more than d[] holds: read them from the file. */
+                uint64_t room = (esds_len > i) ? esds_len - i : 0u;
+
+                (void)video_audio_private_load(v, priv, esds_off + i,
+                                               (len < room) ? len : room);
+                break;
+            }
             if (len > n - i) len = n - i;
             if ((oti == 0x40u || oti == 0u || (oti >= 0x66u && oti <= 0x68u)) &&
                 video_asc_parse(d + i, len, &aot, rate, channels))
@@ -2132,7 +2052,28 @@ static FM_Result mp4_parse_audio_trak(FM_Video *v, const Mp4Box *trak,
                         priv->audio_codec = FM_VIDEO_AUDIO_MP3;
                         if (rate == 0u) { rate = 44100u; }
                     }
-                    have_mp4a = FM_TRUE;
+                    else if (oti == 0xDDu)
+                    {
+                        /* Vorbis in an "mp4a" entry (what ffmpeg writes) */
+                        priv->audio_codec = FM_VIDEO_AUDIO_VORBIS;
+                        if (rate == 0u) { rate = 44100u; }
+                    }
+                    if (oti == 0u || oti == 0x40u ||
+                        (oti >= 0x66u && oti <= 0x69u) || oti == 0x6Bu ||
+                        oti == 0xDDu)
+                    {
+                        have_mp4a = FM_TRUE;
+                    }
+                    else
+                    {
+                        /* AC-3, DTS, QCELP, ...: anything else used to be
+                         * announced as AAC and handed out in ADTS
+                         * frames.  No track is better than a wrong one. */
+                        priv->audio_codec = FM_VIDEO_AUDIO_NONE;
+                        FM_ERR_LOG("mp4: audio object type 0x%02X not "
+                                   "supported -- track ignored",
+                                   (unsigned)oti);
+                    }
                 }
                 else if (memcmp(entry.type, ".mp3", 4) == 0 ||
                          memcmp(entry.type, "mp3 ", 4) == 0)
@@ -2627,53 +2568,154 @@ static int16_t ulaw_decode(uint8_t u)
     return (u & 0x80u) ? (int16_t)(0x84 - t) : (int16_t)(t - 0x84);
 }
 
-/* IMA ADPCM -> PCM (mono, 4-bit nibbles, step table like WAV) */
+/*
+ * ADPCM as WAV, AVI and MKV (A_MS/ACM) carry it: the stream is a row of
+ * blocks of nBlockAlign bytes, each decodable on its own.
+ *
+ * This used to be one routine that took a whole chunk for a single mono
+ * IMA block.  A stereo track came out as noise (both channels' headers
+ * and data read as one channel), a chunk with several blocks decoded
+ * the later block headers as samples, and Microsoft ADPCM (tag 2), a
+ * different codec altogether, was run through the IMA tables: full-scale
+ * noise.  Both formats are now decoded block by block and compared
+ * sample for sample with ffmpeg (test/audit_v3_tests.h).
+ */
 static const int16_t adpcm_step[89] = {
     7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767
 };
 static const int8_t adpcm_index[16] = { -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8 };
-static size_t adpcm_decode_block(const uint8_t *src, size_t src_bytes, int16_t *dst, size_t dst_cap)
+
+static void adpcm_put(uint8_t *dst, size_t frame, uint32_t ch, uint32_t c,
+                      int32_t s)
 {
-    int32_t pred = 0;
-    int32_t step = 7;
-    int32_t idx = 0;
-    size_t out = 0;
-    size_t i;
-    FM_Bool first = FM_TRUE;
-    if (src_bytes >= 4u)
+    uint8_t *p = dst + (frame * ch + c) * 2u;
+
+    p[0] = (uint8_t)((uint32_t)s & 0xFFu);
+    p[1] = (uint8_t)(((uint32_t)s >> 8) & 0xFFu);
+}
+
+/* Frames one block of `n` bytes holds. */
+static size_t adpcm_block_frames(uint16_t tag, uint32_t ch, size_t n)
+{
+    if (tag == 0x0002u)
     {
-        pred = (int16_t)(src[0] | (src[1] << 8));
-        idx  = src[2];
-        if (idx < 0) idx = 0;
-        if (idx > 88) idx = 88;
-        step = adpcm_step[idx];
-        src += 4; src_bytes -= 4;
-        if (out < dst_cap) dst[out++] = (int16_t)pred;
-        first = FM_FALSE;
+        return (n < 7u * ch) ? 0u : 2u + ((n - 7u * ch) * 2u) / ch;
     }
-    for (i = 0; i < src_bytes && out < dst_cap; i++)
+    return (n < 4u * ch) ? 0u : 1u + 8u * ((n - 4u * ch) / (4u * ch));
+}
+
+/* IMA: per channel a 4-byte header (first sample, step index), then
+ * 4 bytes = 8 samples for each channel in turn, low nibble first. */
+static void adpcm_ima_block(const uint8_t *src, size_t n, uint32_t ch,
+                            uint8_t *dst)
+{
+    int32_t pred[2];
+    int32_t idx[2];
+    size_t frames = 1u;
+    size_t pos = 4u * ch;
+    uint32_t c;
+
+    for (c = 0u; c < ch; c++)
     {
-        uint8_t b = src[i];
-        uint32_t n;
-        for (n = 0; n < 2u && out < dst_cap; n++)
+        pred[c] = (int16_t)video_rd16(src + 4u * c);
+        idx[c] = (src[4u * c + 2u] > 88u) ? 88 : (int32_t)src[4u * c + 2u];
+        adpcm_put(dst, 0u, ch, c, pred[c]);
+    }
+    while (pos + 4u * ch <= n)
+    {
+        for (c = 0u; c < ch; c++)
         {
-            uint8_t nib = (n == 0u) ? (b & 0x0Fu) : (b >> 4);
-            int32_t diff = step >> 3;
-            if (nib & 1) diff += step >> 2;
-            if (nib & 2) diff += step >> 1;
-            if (nib & 4) diff += step;
-            if (nib & 8) pred -= diff; else pred += diff;
-            if (pred < -32768) pred = -32768;
-            if (pred >  32767) pred =  32767;
-            idx += adpcm_index[nib & 0x0Fu];
-            if (idx < 0) idx = 0;
-            if (idx > 88) idx = 88;
-            step = adpcm_step[idx];
-            dst[out++] = (int16_t)pred;
-            if (first) { first = FM_FALSE; }
+            uint32_t k;
+
+            for (k = 0u; k < 8u; k++)
+            {
+                uint8_t byte = src[pos + 4u * c + (k >> 1)];
+                uint32_t nib = ((k & 1u) != 0u) ? ((uint32_t)byte >> 4)
+                                                : ((uint32_t)byte & 0x0Fu);
+                int32_t step = adpcm_step[idx[c]];
+                int32_t diff = step >> 3;
+
+                if ((nib & 1u) != 0u) { diff += step >> 2; }
+                if ((nib & 2u) != 0u) { diff += step >> 1; }
+                if ((nib & 4u) != 0u) { diff += step; }
+                pred[c] = ((nib & 8u) != 0u) ? pred[c] - diff : pred[c] + diff;
+                if (pred[c] < -32768) { pred[c] = -32768; }
+                if (pred[c] > 32767)  { pred[c] = 32767; }
+                idx[c] += adpcm_index[nib];
+                if (idx[c] < 0)  { idx[c] = 0; }
+                if (idx[c] > 88) { idx[c] = 88; }
+                adpcm_put(dst, frames + k, ch, c, pred[c]);
+            }
+        }
+        pos += 4u * ch;
+        frames += 8u;
+    }
+}
+
+/* Microsoft ADPCM: per channel a predictor number, a step and two
+ * samples; then one nibble per sample, high nibble first, the channels
+ * taking turns.  A predictor number outside the standard seven makes
+ * the block silence (FM_FALSE). */
+static FM_Bool adpcm_ms_block(const uint8_t *src, size_t n, uint32_t ch,
+                              uint8_t *dst)
+{
+    static const int16_t coef1[7] = { 256, 512, 0, 192, 240, 460, 392 };
+    static const int16_t coef2[7] = { 0, -256, 0, 64, 0, -208, -232 };
+    static const int16_t adapt[16] = { 230, 230, 230, 230, 307, 409, 512, 614,
+                                       768, 614, 512, 409, 307, 230, 230, 230 };
+    int32_t k1[2];
+    int32_t k2[2];
+    int32_t delta[2];
+    int32_t s1[2];
+    int32_t s2[2];
+    size_t total = adpcm_block_frames(0x0002u, ch, n);
+    size_t frame = 2u;
+    size_t pos = 7u * ch;
+    uint32_t c;
+    uint32_t turn = 0u;
+
+    for (c = 0u; c < ch; c++)
+    {
+        if (src[c] > 6u)
+        {
+            memset(dst, 0, total * ch * 2u);
+            return FM_FALSE;
+        }
+        k1[c] = coef1[src[c]];
+        k2[c] = coef2[src[c]];
+        delta[c] = (int16_t)video_rd16(src + ch + 2u * c);
+        s1[c] = (int16_t)video_rd16(src + 3u * ch + 2u * c);
+        s2[c] = (int16_t)video_rd16(src + 5u * ch + 2u * c);
+        adpcm_put(dst, 0u, ch, c, s2[c]);
+        adpcm_put(dst, 1u, ch, c, s1[c]);
+    }
+    while (frame < total)
+    {
+        uint8_t byte = src[pos + (turn >> 1)];
+        uint32_t nib = ((turn & 1u) != 0u) ? ((uint32_t)byte & 0x0Fu)
+                                           : ((uint32_t)byte >> 4);
+        int32_t pred;
+
+        c = turn % ch;
+        pred = (s1[c] * k1[c] + s2[c] * k2[c]) / 256;
+        pred += (((nib & 8u) != 0u) ? (int32_t)nib - 16 : (int32_t)nib) *
+                delta[c];
+        if (pred < -32768) { pred = -32768; }
+        if (pred > 32767)  { pred = 32767; }
+        s2[c] = s1[c];
+        s1[c] = pred;
+        /* the step comes from the file: keep the products inside 32 bits */
+        delta[c] = (int32_t)(((int64_t)adapt[nib] * delta[c]) / 256);
+        if (delta[c] < 16)      { delta[c] = 16; }
+        if (delta[c] > INT32_MAX / 768) { delta[c] = INT32_MAX / 768; }
+        adpcm_put(dst, frame, ch, c, pred);
+        turn++;
+        if (c + 1u == ch)
+        {
+            frame++;
         }
     }
-    return out * 2u; /* bytes */
+    return FM_TRUE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3069,6 +3111,8 @@ static void mkv_setup_audio(FM_Video *v, FM_VideoPriv *priv,
             else if (tag == 0x0011u || tag == 0x0002u)
             {
                 codec = FM_VIDEO_AUDIO_ADPCM;
+                priv->audio_wav_tag = tag;
+                priv->audio_block_align = video_rd16(wf + 12);
             }
         }
     }
@@ -5301,8 +5345,12 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info)
     case FM_VIDEO_AUDIO_PCM:
     case FM_VIDEO_AUDIO_ALAW:
     case FM_VIDEO_AUDIO_ULAW:
-    case FM_VIDEO_AUDIO_ADPCM:
         info->decodable = FM_TRUE;
+        break;
+    case FM_VIDEO_AUDIO_ADPCM:
+        /* mono and stereo; see video_adpcm_read() */
+        info->decodable = (priv->audio_channels >= 1u &&
+                           priv->audio_channels <= 2u) ? FM_TRUE : FM_FALSE;
         break;
     case FM_VIDEO_AUDIO_MP3:
         info->decodable = FM_USE_MP3 ? FM_TRUE : FM_FALSE;
@@ -5404,9 +5452,6 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
     uint8_t *tmp;
     FM_Result r;
     FM_Result dr;
-#if VIDEO_VORBIS_OGG_SYNTH
-    uint8_t *ogg = NULL;
-#endif
 
     if (out_cap_samples == 0u)
     {
@@ -5466,41 +5511,10 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
         }
         in = tmp;
         in_len = fsize;
-#if VIDEO_VORBIS_OGG_SYNTH
-        if (priv->audio_codec == FM_VIDEO_AUDIO_VORBIS &&
-            priv->audio_private_size > 0u &&
-            !(fsize >= 4u && memcmp(tmp, "OggS", 4) == 0))
-        {
-            uint32_t ogg_len = 0;
-
-            r = vorbis_build_ogg_from_mkv(video_audio_private(priv),
-                                          priv->audio_private_size,
-                                          tmp, fsize, &ogg, &ogg_len);
-            if (r == FM_ERR_NO_MEMORY)
-            {
-                return r;
-            }
-            if (r != FM_OK || ogg == NULL)
-            {
-                /* CodecPrivate is not three Xiph-laced headers: the
-                 * packet cannot be framed, so it cannot be decoded. */
-                v->audio_frame_index++;
-                return FM_ERR_CORRUPTED;
-            }
-            in = ogg;
-            in_len = ogg_len;
-        }
-#endif
     }
 
     dr = ops->decode(priv->adec_ctx, in, in_len, (int16_t *)buf,
                      out_cap_samples, &out_samples);
-#if VIDEO_VORBIS_OGG_SYNTH
-    if (ogg != NULL)
-    {
-        FM_Free(ogg);
-    }
-#endif
     v->audio_frame_index++;
     if ((dr == FM_OK || dr == FM_ERR_EOF) && out_samples > 0u)
     {
@@ -5530,6 +5544,172 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
     return FM_ERR_UNSUPPORTED;
 }
 #endif /* VIDEO_AUDIO_REGISTRY */
+
+/* Where the next audio packet is: from the index, or past its end by
+ * walking the container. */
+static FM_Result video_audio_locate(FM_Video *v, FM_VideoPriv *priv,
+                                    uint64_t *offset, uint32_t *fsize)
+{
+    if (v->audio_frame_index < priv->audio_count)
+    {
+        *offset = priv->audio_frames[v->audio_frame_index].offset;
+        *fsize = priv->audio_frames[v->audio_frame_index].size;
+        return FM_OK;
+    }
+    return video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
+                             offset, fsize);
+}
+
+#if VIDEO_VORBIS_STREAM
+/* MKV CodecPrivate of a Vorbis track: the byte 2, the lengths of the
+ * first two header packets in Xiph lacing (255, 255, ..., rest), then
+ * the three packets. */
+static FM_Bool vorbis_private_split(const uint8_t *p, uint32_t size,
+                                    const uint8_t *hdr[3], uint32_t len[3])
+{
+    uint32_t pos = 1u;
+    uint32_t i;
+
+    if (p == NULL || size < 3u || p[0] != 2u)
+    {
+        return FM_FALSE;
+    }
+    for (i = 0u; i < 2u; i++)
+    {
+        uint32_t l = 0u;
+        uint8_t b;
+
+        do
+        {
+            if (pos >= size)
+            {
+                return FM_FALSE;
+            }
+            b = p[pos++];
+            l += b;
+            if (l > size)
+            {
+                return FM_FALSE;
+            }
+        } while (b == 255u);
+        len[i] = l;
+    }
+    if (len[0] > size - pos || len[1] >= size - pos - len[0])
+    {
+        return FM_FALSE;
+    }
+    len[2] = size - pos - len[0] - len[1];
+    hdr[0] = p + pos;
+    hdr[1] = hdr[0] + len[0];
+    hdr[2] = hdr[1] + len[1];
+    return FM_TRUE;
+}
+
+/*
+ * Vorbis track -> interleaved 16-bit PCM.
+ *
+ * This used to wrap the headers and ONE packet in a made-up Ogg file
+ * and open a new decoder on it, for every packet.  A Vorbis packet has
+ * no output of its own (it overlaps the one before), and the made-up
+ * file put the three headers into one Ogg packet, which the decoder
+ * refuses: every call returned FM_ERR_CORRUPTED, for every MKV / WebM
+ * file with Vorbis sound.  The stream decoder keeps its state.
+ *
+ * A packet without output (the first of a stream, the first two after a
+ * seek, a damaged one) is passed over: the call goes on to the next
+ * packet, up to eight of them, before it reports FM_ERR_CORRUPTED.
+ */
+static FM_Result video_vorbis_read(FM_Video *v, FM_VideoPriv *priv,
+                                   uint8_t *buf, size_t cap, size_t *size)
+{
+    uint64_t offset;
+    uint32_t fsize;
+    uint32_t tries;
+    FM_Result r;
+
+    if (cap < 4u)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (priv->vorbis == NULL && priv->vorbis_error == FM_OK)
+    {
+        const uint8_t *hdr[3];
+        uint32_t len[3];
+
+        if (!vorbis_private_split(video_audio_private(priv),
+                                  priv->audio_private_size, hdr, len))
+        {
+            r = FM_ERR_CORRUPTED;
+        }
+        else
+        {
+            r = FM_Vorbis_StreamOpen(hdr, len, &priv->vorbis);
+        }
+        if (r == FM_ERR_NO_MEMORY)
+        {
+            return r;                    /* may work on a later call */
+        }
+        if (r != FM_OK)
+        {
+            priv->vorbis_error = r;
+            FM_ERR_LOG("vorbis track: headers not usable (%d)", (int)r);
+        }
+    }
+    if (priv->vorbis == NULL)
+    {
+        /* Nothing to decode with.  The packets are still passed over
+         * one a call, so that a reader arrives at FM_ERR_EOF. */
+        r = video_audio_locate(v, priv, &offset, &fsize);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        v->audio_frame_index++;
+        return priv->vorbis_error;
+    }
+    if (FM_Vorbis_StreamPending(priv->vorbis) != 0u)
+    {
+        /* the rest of a packet that was larger than the caller's buffer */
+        return FM_Vorbis_StreamDecode(priv->vorbis, NULL, 0u, buf, cap, size);
+    }
+    for (tries = 0u; tries < 8u; tries++)
+    {
+        uint8_t *tmp;
+
+        r = video_audio_locate(v, priv, &offset, &fsize);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (fsize == 0u)
+        {
+            v->audio_frame_index++;
+            continue;
+        }
+        tmp = video_audio_scratch(priv, fsize);
+        if (tmp == NULL)
+        {
+            return FM_ERR_NO_MEMORY;
+        }
+        r = video_read_at(&v->file, offset, tmp, fsize);
+        if (r != FM_OK)
+        {
+            return r;                    /* nothing consumed: retry */
+        }
+        v->audio_frame_index++;
+        r = FM_Vorbis_StreamDecode(priv->vorbis, tmp, fsize, buf, cap, size);
+        if (r == FM_ERR_NO_MEMORY)
+        {
+            return r;
+        }
+        if (r == FM_OK && *size != 0u)
+        {
+            return FM_OK;
+        }
+    }
+    return FM_ERR_CORRUPTED;
+}
+#endif /* VIDEO_VORBIS_STREAM */
 
 #if FM_USE_MP3
 /*
@@ -5592,19 +5772,10 @@ static FM_Result video_mp3_read(FM_Video *v, FM_VideoPriv *priv,
     }
     else
     {
-        if (v->audio_frame_index < priv->audio_count)
+        r = video_audio_locate(v, priv, &offset, &fsize);
+        if (r != FM_OK)
         {
-            offset = priv->audio_frames[v->audio_frame_index].offset;
-            fsize = priv->audio_frames[v->audio_frame_index].size;
-        }
-        else
-        {
-            r = video_tail_locate(v, priv, FM_TRUE, v->audio_frame_index,
-                                  &offset, &fsize);
-            if (r != FM_OK)
-            {
-                return r;
-            }
+            return r;
         }
         /* From here on the packet is taken, whatever is in it. */
         v->audio_frame_index++;
@@ -5697,6 +5868,130 @@ static FM_Result video_mp3_read(FM_Video *v, FM_VideoPriv *priv,
 }
 #endif /* FM_USE_MP3 */
 
+/*
+ * ADPCM track -> interleaved 16-bit PCM, whole blocks at a time.
+ *
+ * `cap` must hold one block (FM_ERR_TOO_LARGE otherwise, nothing is
+ * consumed).  A chunk with more blocks than fit is continued by the
+ * next call.
+ */
+static FM_Result video_adpcm_read(FM_Video *v, FM_VideoPriv *priv,
+                                  uint8_t *buf, size_t cap, size_t *size)
+{
+    uint32_t ch = priv->audio_channels;
+    uint16_t tag = priv->audio_wav_tag;
+    FM_Bool resumed = (priv->audio_part_left != 0u) ? FM_TRUE : FM_FALSE;
+    uint64_t offset;
+    uint32_t fsize;
+    uint32_t ba;
+    uint32_t take;
+    uint32_t pos;
+    size_t block_bytes;
+    size_t nblocks;
+    size_t out = 0u;
+    uint8_t *tmp;
+    FM_Result r;
+
+    if (ch < 1u || ch > 2u)
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    if (resumed)
+    {
+        offset = priv->audio_part_off;
+        fsize = priv->audio_part_left;
+    }
+    else
+    {
+        r = video_audio_locate(v, priv, &offset, &fsize);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+    }
+
+    ba = priv->audio_block_align;
+    if (ba == 0u || ba > fsize)
+    {
+        ba = fsize;                      /* the chunk is one (short) block */
+    }
+    block_bytes = adpcm_block_frames(tag, ch, ba) * ch * 2u;
+    if (block_bytes == 0u)
+    {
+        /* not even a block header */
+        if (!resumed)
+        {
+            v->audio_frame_index++;
+        }
+        priv->audio_part_left = 0u;
+        return FM_ERR_CORRUPTED;
+    }
+    if (cap < block_bytes)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (!resumed)
+    {
+        v->audio_frame_index++;
+    }
+
+    nblocks = cap / block_bytes;
+    take = fsize;
+    if ((uint64_t)nblocks * ba < (uint64_t)fsize)
+    {
+        take = (uint32_t)nblocks * ba;
+    }
+    tmp = (uint8_t *)FM_Alloc(take);
+    if (tmp == NULL)
+    {
+        priv->audio_part_left = 0u;
+        return FM_ERR_NO_MEMORY;
+    }
+    r = video_read_at(&v->file, offset, tmp, take);
+    if (r != FM_OK)
+    {
+        FM_Free(tmp);
+        priv->audio_part_left = 0u;
+        return r;
+    }
+    for (pos = 0u; pos < take; pos += ba)
+    {
+        uint32_t n = (take - pos < ba) ? take - pos : ba;
+        size_t frames = adpcm_block_frames(tag, ch, n);
+
+        if (frames == 0u)
+        {
+            break;                       /* a tail shorter than a header */
+        }
+        if (tag == 0x0002u)
+        {
+            (void)adpcm_ms_block(tmp + pos, n, ch, buf + out);
+        }
+        else
+        {
+            adpcm_ima_block(tmp + pos, n, ch, buf + out);
+        }
+        out += frames * ch * 2u;
+    }
+    FM_Free(tmp);
+
+    if (take < fsize)
+    {
+        priv->audio_part_off = offset + take;
+        priv->audio_part_left = fsize - take;
+    }
+    else
+    {
+        priv->audio_part_left = 0u;
+    }
+    if (out == 0u)
+    {
+        return FM_ERR_CORRUPTED;
+    }
+    *size = out;
+    return FM_OK;
+}
+
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size)
 {
@@ -5719,6 +6014,21 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
     if (priv->audio_codec == FM_VIDEO_AUDIO_MP3)
     {
         return video_mp3_read(v, priv, buf, cap, size);
+    }
+#endif
+    if (priv->audio_codec == FM_VIDEO_AUDIO_ADPCM)
+    {
+        return video_adpcm_read(v, priv, buf, cap, size);
+    }
+#if VIDEO_VORBIS_STREAM
+    /* The built-in Vorbis decoder, and the headers from the container.
+     * (A decoder the application registered under "VORBIS" in its place
+     * gets the bare packets through the registry, below.) */
+    if (priv->audio_codec == FM_VIDEO_AUDIO_VORBIS &&
+        priv->audio_private_size != 0u &&
+        Audio_GetDecoder("VORBIS") == FM_Vorbis_GetOps())
+    {
+        return video_vorbis_read(v, priv, buf, cap, size);
     }
 #endif
     if (priv->audio_part_left != 0u &&
@@ -5912,18 +6222,6 @@ FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
         }
         FM_Free(tmp);
         *size = need;
-    }
-    else if (priv->audio_codec == FM_VIDEO_AUDIO_ADPCM)
-    {
-        uint8_t *tmp = (uint8_t*)FM_Alloc(fsize);
-        size_t max_out = (cap/2u);
-        size_t got_bytes;
-        if (tmp == NULL) return FM_ERR_NO_MEMORY;
-        r = video_read_at(&v->file, offset, tmp, fsize);
-        if (r != FM_OK) { FM_Free(tmp); return r; }
-        got_bytes = adpcm_decode_block(tmp, fsize, (int16_t*)buf, max_out);
-        FM_Free(tmp);
-        *size = got_bytes;
     }
     else if (priv->audio_codec == FM_VIDEO_AUDIO_PCM && priv->audio_bits == 8u)
     {

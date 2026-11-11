@@ -108,11 +108,11 @@ typedef enum
     FM_VIDEO_AUDIO_PCM,           /* AVI "01wb" (8/16/24-bit PCM)    */
     FM_VIDEO_AUDIO_MP3,           /* AVI 0x0055 / MP4 ".mp3"         */
     FM_VIDEO_AUDIO_FLAC,          /* MP4 "fLaC" / MKV A_FLAC         */
-    FM_VIDEO_AUDIO_VORBIS,        /* MP4 "vorb" / MKV A_VORBIS       */
+    FM_VIDEO_AUDIO_VORBIS,        /* MKV A_VORBIS / MP4 "mp4a" 0xDD  */
     FM_VIDEO_AUDIO_OPUS,          /* MP4 "Opus" / MKV A_OPUS         */
     FM_VIDEO_AUDIO_ALAW,          /* AVI 0x0006 aLaw                 */
     FM_VIDEO_AUDIO_ULAW,          /* AVI 0x0007 muLaw                */
-    FM_VIDEO_AUDIO_ADPCM          /* AVI 0x0011 IMA / 0x0002 MS      */
+    FM_VIDEO_AUDIO_ADPCM          /* AVI, MKV: 0x0011 IMA / 0x0002 MS */
 } FM_VideoAudioCodec;
 
 typedef struct
@@ -131,10 +131,15 @@ typedef struct
 /* True if the container has an audio track. */
 FM_Result Video_HasAudio(const FM_Video *v, FM_Bool *has);
 FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
-/* Read the next audio packet into buf as interleaved 16-bit PCM.
+/* Read the next audio packet into buf as interleaved 16-bit PCM
+ * (little-endian).
  *
- *   PCM (8/16-bit), A-law, mu-law, ADPCM : decoded here, always available.
- *   MP3                                  : decoded here when FM_USE_MP3=1.
+ *   PCM (8/16-bit), A-law, mu-law : decoded here, always available.
+ *   IMA ADPCM, Microsoft ADPCM    : decoded here, mono and stereo, whole
+ *       blocks at a time.  `cap` must hold one block (4 * nBlockAlign
+ *       bytes is always enough).  A chunk with more blocks than fit is
+ *       continued by the next call.
+ *   MP3                           : decoded here when FM_USE_MP3=1.
  *       The decoder state (about 16 KB, FM_Alloc) is taken on the first
  *       packet and kept until Video_Close.  One MP3 frame is up to 4608
  *       bytes of PCM: give `cap` at least that.  A packet that holds more
@@ -144,21 +149,43 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
  *       a seek, or after a damaged packet) is returned as silence of the
  *       same length, so the time line stays whole.  The decode itself
  *       needs about 18 KB of stack (see the README, "Stack").
- *   AAC, FLAC, Opus, Vorbis              : decoded by the decoder registered
- *       under "AAC" / "FLAC" / "OPUS" / "VORBIS" (Audio_RegisterDecoder;
- *       FileManager_Init registers the built-in ones that are compiled in).
- *       The decoder is opened on the first packet and kept until
- *       Video_Close / Video_SeekAudio.
+ *   Vorbis                        : decoded here when FM_USE_VORBIS=1,
+ *       from Matroska / WebM (A_VORBIS) and from an MP4 "mp4a" entry of
+ *       object type 0xDD.  The stream decoder (fm_vorbis.h) is opened on
+ *       the first packet and kept until Video_Close; its memory is what
+ *       stb_vorbis needs for the stream's codebooks.  Any `cap` from 4
+ *       bytes works: what does not fit is handed out by the next calls.
+ *       The first packet of a stream, and the first two after a seek,
+ *       have no output; the call passes over them.
+ *   AAC, FLAC, Opus               : decoded by the decoder registered
+ *       under "AAC" / "FLAC" / "OPUS" (Audio_RegisterDecoder;
+ *       FileManager_Init registers the built-in ones that are compiled
+ *       in).  The decoder is opened on the first packet and kept until
+ *       Video_Close / Video_SeekAudio.  A decoder registered under
+ *       "VORBIS" in place of the built-in one is used the same way.
  *
  * When no decoder is registered:
  *   AAC               -> the raw sample is returned prefixed with a 7-byte
  *                        ADTS header (*size includes it): a valid .aac
  *                        stream for extraction, NOT PCM.
- *   FLAC/Opus/Vorbis  -> FM_ERR_UNSUPPORTED (nothing is written).
- * FM_AudioTrackInfo.decodable tells the two situations apart up front.
+ *   FLAC/Opus/Vorbis  -> FM_ERR_UNSUPPORTED (nothing is written, nothing
+ *                        is consumed).
+ * FM_AudioTrackInfo.decodable tells the two situations apart up front:
+ * look at it before the read loop.
  *
- * A packet the decoder rejects returns FM_ERR_CORRUPTED and is skipped, so
- * the next call continues with the following packet. */
+ * Results:
+ *   FM_OK             *size bytes were written.
+ *   FM_ERR_EOF        the track has ended.
+ *   FM_ERR_CORRUPTED  a packet was refused.  It has been passed over: the
+ *                     next call continues with the following one.
+ *   FM_ERR_TOO_LARGE  `cap` is too small for this track's smallest unit
+ *                     (see above).  Nothing was consumed: call again
+ *                     with a larger buffer.
+ *   FM_ERR_UNSUPPORTED  no decoder (decodable == FM_FALSE).  Nothing is
+ *                     consumed: a loop that only stops at FM_ERR_EOF
+ *                     would not end.
+ *   FM_ERR_NO_MEMORY, FM_ERR_IO  nothing was consumed; the call can be
+ *                     repeated. */
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size);
 FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index);

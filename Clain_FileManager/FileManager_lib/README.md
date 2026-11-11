@@ -419,21 +419,49 @@ Video_DecodeFrame(&v, rgb, sizeof(rgb)); /* H.264/MJPEG -> RGB888 */
 Video_Close(&v);
 ```
 
-The **audio track is demuxed separately** (not decoded in-place): MP4 `mp4a`
-(AAC) frames are returned with a 7-byte ADTS header (playable as-is), and AVI
-PCM (`01wb`) frames are returned raw — mono or stereo per the container:
+The **audio track** is read with its own calls, independent of the
+picture, and comes out as interleaved 16-bit PCM:
 
 ```c
 FM_AudioTrackInfo ti;
-uint8_t frame[1024];
+static uint8_t pcm[8192];
 size_t size = 0;
 
 Video_GetAudioInfo(&v, &ti);            /* codec, channels, sample_rate */
-while (Video_ReadAudioFrame(&v, frame, sizeof(frame), &size) == FM_OK)
+if (ti.decodable)
 {
-    /* AAC (with ADTS) or PCM; feed an audio sink / save to file */
+    while (Video_ReadAudioFrame(&v, pcm, sizeof(pcm), &size) == FM_OK)
+    {
+        /* size bytes of PCM for the DAC / I2S */
+    }
 }
 ```
+
+| Track | In | Decoded by | Notes |
+|---|---|---|---|
+| PCM 8/16-bit, A-law, mu-law | AVI, MKV, MP4/MOV, FLV | the video layer | |
+| IMA ADPCM, Microsoft ADPCM | AVI, MKV (`A_MS/ACM`) | the video layer | mono and stereo; the buffer must hold one block (4 x `nBlockAlign` bytes is enough) |
+| MP3 | AVI, MP4, MKV, FLV | minimp3 (`FM_USE_MP3`) | buffer of 4608 bytes or more; 16 KB of heap while the file is open; 18 KB of stack |
+| FLAC | MP4, MKV | dr_flac (`FM_USE_FLAC`) | |
+| Vorbis | MKV / WebM, MP4 | stb_vorbis (`FM_USE_VORBIS`) | heap for the stream's codebooks (some hundred KB) while the file is open |
+| Opus | MP4, MKV / WebM | libopus (`FM_USE_OPUS_LIB`) | without it `decodable` is false |
+| AAC | MP4, MKV, FLV, AVI | a decoder you register under `"AAC"` | without one `decodable` is false and each call returns the raw frame behind a 7-byte ADTS header: a valid `.aac` stream, not PCM |
+
+`decodable` says up front whether PCM will come out.  The results of
+`Video_ReadAudioFrame` and what each of them leaves consumed are listed
+at its declaration in `fm_video.h`.
+
+**How this is checked.**  Files written by ffmpeg, one per row and
+container above, are decoded by the library and by ffmpeg and the PCM is
+compared: PCM, G.711, both ADPCM kinds and FLAC are identical byte for
+byte; MP3 and Vorbis are within one LSB.  The library does not remove
+the encoder delay that MP4 and MKV declare for MP3 (1105 samples, 25 ms:
+its output is ffmpeg's with that much in front) nor the pre-skip of Opus
+(312 samples at 48 kHz).  The test suite keeps small files for MP3,
+ADPCM and Vorbis (`tools/gen_video_audio_vectors.py`,
+`test/audit_v3_tests.h`).  Not recognised: 24-bit PCM written as
+`WAVE_FORMAT_EXTENSIBLE` in an AVI (the clip opens without an audio
+track), AC-3, DTS and ALAC (the same).
 
 Notes:
 
@@ -470,9 +498,10 @@ Notes:
   (`twos`, byte-swapped while reading), `alaw`/`ulaw`.  For `mp4a` the
   `esds` box decides what the track is: AAC object type, sampling rate and
   channels come from the AudioSpecificConfig (the sample entry cannot hold
-  96 kHz and says nothing about the type), and an MPEG-1/2 audio track
-  (MP3 in `mp4a`) is reported as MP3.  ALAC is not offered as an audio
-  track.
+  96 kHz and says nothing about the type); an MPEG-1/2 audio track
+  (MP3 in `mp4a`) is reported as MP3, object type 0xDD as Vorbis, and any
+  other object type (AC-3, DTS, ...) is not offered as an audio track.
+  Neither is ALAC.
 * **AAC without a registered decoder** is passed through with an ADTS
   header per packet.  The header carries the real object type (it used to
   announce AAC Main for everything); HE-AAC is signalled as its AAC-LC
