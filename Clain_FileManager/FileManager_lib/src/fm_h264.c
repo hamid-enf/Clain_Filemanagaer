@@ -120,7 +120,14 @@ FM_Result H264_GetOutputSize(void *ctx, uint16_t *width, uint16_t *height)
 }
 
 /* ------------------------------------------------------------------ */
-/* YUV420p -> RGB888 (BT.601 full range, integer math)                 */
+/* YUV420p -> RGB888 (BT.601, integer math)                             */
+/*                                                                      */
+/* H.264 luma is 16..235 and chroma 16..240 ("video range") unless the  */
+/* stream's VUI sets video_full_range_flag; a stream without VUI is     */
+/* video range.  Converting such a picture with the full-range matrix   */
+/* (as this file did for every stream) gives black at 16 and white at   */
+/* 235: a flat, grey picture, about 25 dB away from the reference       */
+/* decoder's output.                                                    */
 /* ------------------------------------------------------------------ */
 static int clamp8(int v)
 {
@@ -138,7 +145,8 @@ static int clamp8(int v)
  * offset, with the padding the encoder wanted hidden shown instead. */
 static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
                              uint32_t left, uint32_t top,
-                             uint32_t crop_w, uint32_t crop_h, uint8_t *rgb)
+                             uint32_t crop_w, uint32_t crop_h,
+                             FM_Bool full_range, uint8_t *rgb)
 {
     const uint8_t *Y = yuv;
     const uint8_t *U = yuv + (size_t)w * h;
@@ -159,10 +167,26 @@ static void yuv420_to_rgb888(const uint8_t *yuv, uint32_t w, uint32_t h,
             int yy = yrow[sx];
             int uu = urow[sx / 2u] - 128;
             int vv = vrow[sx / 2u] - 128;
-            int r = yy + ((359 * vv) >> 8);
-            int g = yy - ((88 * uu + 183 * vv) >> 8);
-            int b = yy + ((454 * uu) >> 8);
+            int r;
+            int g;
+            int b;
             uint8_t *p = rgb + ((size_t)y * crop_w + x) * 3u;
+
+            if (full_range)
+            {
+                r = yy + ((359 * vv) >> 8);
+                g = yy - ((88 * uu + 183 * vv) >> 8);
+                b = yy + ((454 * uu) >> 8);
+            }
+            else
+            {
+                /* 255/219 on luma, 255/224 on chroma, rounded */
+                const int c = 298 * (yy - 16) + 128;
+
+                r = (c + 409 * vv) >> 8;
+                g = (c - 100 * uu - 208 * vv) >> 8;
+                b = (c + 516 * uu) >> 8;
+            }
 
             p[0] = (uint8_t)clamp8(r);
             p[1] = (uint8_t)clamp8(g);
@@ -503,6 +527,7 @@ static FM_Result h264_decode_attempt(H264Ctx *h, const uint8_t *stream,
                 return FM_ERR_TOO_LARGE;
             }
             yuv420_to_rgb888(pic, buf_w, buf_h, left, top, cw, ch,
+                             (FM_Bool)(h264bsdVideoRange(h->storage) != 0u),
                              (uint8_t *)frame_out);
             h->out_w = (uint16_t)cw;
             h->out_h = (uint16_t)ch;

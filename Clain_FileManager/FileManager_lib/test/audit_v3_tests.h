@@ -37,6 +37,29 @@
  * prints).  MP3 and Vorbis go through floating point; their output was
  * within one LSB of ffmpeg's when the fixes were made, and is checked
  * here for length and for the tone being whole.
+ *
+ * The picture
+ * -----------
+ * The same comparison for the picture (ffmpeg files, every frame next to
+ * ffmpeg's own decode) found:
+ *
+ *   H.264            25 dB from the reference: every stream was converted
+ *                    to RGB as full range, and nearly every stream is
+ *                    video range (16..235) -- black came out as 16, white
+ *                    as 235
+ *   JPEG / MJPEG     37 dB: picojpeg clamped green between its two chroma
+ *                    terms; saturated blue had green 15 (third_party/
+ *                    picojpeg/picojpeg.c, "FileManager patch").  This is
+ *                    the still-image decoder too.
+ *   MJPEG in an MP4  not playable: ffmpeg writes it as an "mp4v" entry
+ *                    of object type 0x6C, which was taken for MPEG-4
+ *
+ * After the fixes H.264 is at 48 dB and MJPEG at 50 dB (what is left is
+ * rounding and chroma upsampling).  Vectors: four patches, white and
+ * black over red and blue, 64x48 --
+ *   mp4_h264_patches.mp4       video range
+ *   mp4_h264_patches_full.mp4  full range, flagged in the VUI
+ *   mp4_mjpeg_patches.mp4      Motion JPEG as "mp4v"
  */
 #ifndef AUDIT_V3_TESTS_H
 #define AUDIT_V3_TESTS_H
@@ -847,6 +870,131 @@ static void test_video_vorbis_track(void)
     }
 }
 #endif /* FM_USE_AUDIO && FM_USE_VORBIS */
+
+/* ------------------------------------------------------------------ */
+/* The picture: colours                                                */
+/* ------------------------------------------------------------------ */
+#if FM_USE_H264 || FM_USE_MJPEG
+
+#define AV3_PATCH_W   64u
+#define AV3_PATCH_H   48u
+
+static uint8_t g_av3_rgb[AV3_PATCH_W * AV3_PATCH_H * 3u];
+
+/* Decode the first frame of `path` (the four-patch picture) and compare
+ * the middle of each patch with its colour.  Returns FM_TRUE when all
+ * four are within `tol`; `m` gets the first one that is not. */
+static FM_Bool av3_patches(const char *path, FM_VideoCodec codec, int tol,
+                           char *m, size_t m_cap)
+{
+    static const struct
+    {
+        const char *name;
+        uint8_t x, y;
+        uint8_t rgb[3];
+    } want[4] = {
+        { "white", 16u, 12u, { 255u, 255u, 255u } },
+        { "black", 48u, 12u, {   0u,   0u,   0u } },
+        { "red",   16u, 36u, { 255u,   0u,   0u } },
+        { "blue",  48u, 36u, {   0u,   0u, 255u } }
+    };
+    FM_Video v;
+    FM_VideoInfo vi;
+    FM_Result r;
+    unsigned i;
+    FM_Bool ok = FM_TRUE;
+
+    memset(&v, 0, sizeof(v));
+    memset(&vi, 0, sizeof(vi));
+    r = Video_Open(path, &v);
+    if (r != FM_OK)
+    {
+        (void)snprintf(m, m_cap, "open -> %d", (int)r);
+        return FM_FALSE;
+    }
+    (void)Video_GetInfo(&v, &vi);
+    if (vi.codec != codec || vi.width != AV3_PATCH_W ||
+        vi.height != AV3_PATCH_H)
+    {
+        (void)snprintf(m, m_cap, "codec %d, %ux%u", (int)vi.codec,
+                       (unsigned)vi.width, (unsigned)vi.height);
+        (void)Video_Close(&v);
+        return FM_FALSE;
+    }
+    memset(g_av3_rgb, 0x55, sizeof(g_av3_rgb));
+    r = Video_DecodeFrame(&v, g_av3_rgb, sizeof(g_av3_rgb));
+    (void)Video_Close(&v);
+    if (r != FM_OK)
+    {
+        (void)snprintf(m, m_cap, "decode -> %d", (int)r);
+        return FM_FALSE;
+    }
+    for (i = 0u; i < 4u && ok; i++)
+    {
+        const uint8_t *px = g_av3_rgb +
+                            ((size_t)want[i].y * AV3_PATCH_W + want[i].x) * 3u;
+        unsigned c;
+
+        for (c = 0u; c < 3u; c++)
+        {
+            int d = (int)px[c] - (int)want[i].rgb[c];
+
+            if (d > tol || d < -tol)
+            {
+                (void)snprintf(m, m_cap, "%s is %u,%u,%u", want[i].name,
+                               (unsigned)px[0], (unsigned)px[1],
+                               (unsigned)px[2]);
+                ok = FM_FALSE;
+                break;
+            }
+        }
+    }
+    return ok;
+}
+
+static void test_video_picture_colours(void)
+{
+    char m[120];
+
+#if FM_USE_H264
+    TEST("H.264: a video-range stream gives black 0 and white 255");
+    if (av3_patches("/test/vectors/mp4_h264_patches.mp4",
+                    FM_VIDEO_CODEC_H264, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
+
+    TEST("H.264: a full-range stream (VUI flag) is not stretched");
+    if (av3_patches("/test/vectors/mp4_h264_patches_full.mp4",
+                    FM_VIDEO_CODEC_H264, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
+#endif
+
+#if FM_USE_MJPEG
+    TEST("MJPEG in MP4 (mp4v, object type 0x6C) plays; saturated blue has no green");
+    if (av3_patches("/test/vectors/mp4_mjpeg_patches.mp4",
+                    FM_VIDEO_CODEC_MJPEG, 3, m, sizeof(m)))
+    {
+        PASS();
+    }
+    else
+    {
+        FAIL(m);
+    }
+#endif
+}
+
+#endif /* FM_USE_H264 || FM_USE_MJPEG */
 
 #endif /* FM_USE_VIDEO */
 

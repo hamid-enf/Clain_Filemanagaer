@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Make the small video files whose AUDIO track test/audit_v3_tests.h decodes.
+"""Make the small video files that test/audit_v3_tests.h decodes.
+
+Audio track:
 
     test/vectors/avi_mp3.avi             MP3, one frame per chunk (as every
                                          muxer writes it)
@@ -9,11 +11,21 @@
     test/vectors/avi_adpcm_ms.avi        Microsoft ADPCM, stereo
     test/vectors/mkv_vorbis.mkv          Vorbis in Matroska
 
+Picture (four patches: white, black / red, blue; 64x48, two frames):
+
+    test/vectors/mp4_h264_patches.mp4       H.264 baseline, video range
+                                            (16..235, what every encoder
+                                            writes unless told otherwise)
+    test/vectors/mp4_h264_patches_full.mp4  the same, full range, said so
+                                            in the VUI
+    test/vectors/mp4_mjpeg_patches.mp4      Motion JPEG in an .mp4: an
+                                            "mp4v" entry of object type 0x6C
+
 For the two ADPCM files it prints the length and CRC-32 of the PCM that
 ffmpeg decodes from them: ADPCM is integer arithmetic, the library has to
 produce exactly those bytes, and the test compares against these numbers.
 
-Needs ffmpeg with libmp3lame and libvorbis: on the PATH, in $FFMPEG, or
+Needs ffmpeg with libmp3lame, libvorbis and libx264: on the PATH, in $FFMPEG, or
 from "pip install imageio-ffmpeg".
 
     python3 tools/gen_video_audio_vectors.py
@@ -105,6 +117,22 @@ def make(ff, name, rate, seconds, audio_args, container_args=()):
     return path
 
 
+PATCHES = ("color=c=white:s=32x24:r=5:d=0.4[a];"
+           "color=c=black:s=32x24:r=5:d=0.4[b];"
+           "color=c=red:s=32x24:r=5:d=0.4[c];"
+           "color=c=blue:s=32x24:r=5:d=0.4[d];"
+           "[a][b]hstack[t];[c][d]hstack[u];[t][u]vstack[o]")
+
+
+def make_patches(ff, name, video_args):
+    path = os.path.join(OUT, name)
+    subprocess.check_call([
+        ff, "-hide_banner", "-loglevel", "error", "-y",
+        "-filter_complex", PATCHES, "-map", "[o]"] + list(video_args) +
+        ["-an", "-bitexact", "-flags", "+bitexact", path])
+    return path
+
+
 def reference_pcm(ff, path):
     return subprocess.check_output([
         ff, "-hide_banner", "-loglevel", "error", "-i", path, "-vn",
@@ -141,6 +169,16 @@ def main():
     p = make(ff, "mkv_vorbis.mkv", 22050, "1",
              ["-c:a", "libvorbis", "-q:a", "1", "-ac", "2"])
     made.append(p)
+
+    x264 = ["-c:v", "libx264", "-profile:v", "baseline", "-g", "2"]
+    made.append(make_patches(ff, "mp4_h264_patches.mp4",
+                             x264 + ["-pix_fmt", "yuv420p"]))
+    made.append(make_patches(ff, "mp4_h264_patches_full.mp4",
+                             x264 + ["-pix_fmt", "yuvj420p",
+                                     "-color_range", "pc"]))
+    made.append(make_patches(ff, "mp4_mjpeg_patches.mp4",
+                             ["-c:v", "mjpeg", "-q:v", "3",
+                              "-pix_fmt", "yuvj420p"]))
 
     for p in made:
         print("%-44s %6d bytes" % (os.path.relpath(p), os.path.getsize(p)))

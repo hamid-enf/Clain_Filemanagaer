@@ -404,7 +404,9 @@ FLV containers into a per-frame index and hands frame payloads to a pluggable
 codec:
 
 * **H.264** — vendored [h264bsd](https://github.com/oneam/h264bsd)
-  (Apache-2.0 + MIT) → RGB888.
+  (Apache-2.0 + MIT) → RGB888.  **Baseline profile only**: a Main or High
+  profile stream (CABAC, B-frames) opens, and every frame is then refused
+  with `FM_ERR_INVALID_FORMAT`.  Encode with `-profile:v baseline`.
 * **MJPEG** — vendored [picojpeg](https://github.com/richgel999/picojpeg)
   (public domain) → RGB888, for USB cameras / ESP32-CAM.
 
@@ -471,6 +473,15 @@ Notes:
 * MP4/avc1 sample payloads are converted to Annex-B automatically; AVI H.264
   frames are auto-detected (start-code or length-prefixed).
 * picojpeg decodes baseline sequential JPEG only and is not thread-safe.
+  Chroma layouts: grey, 4:4:4, 4:2:2, 4:4:0 and 4:2:0 in the usual form
+  (chroma sampling factors 1x1).  ffmpeg writes its 4:2:2 and 4:4:4 Motion
+  JPEG with a vertical factor of 2 on every component; picojpeg refuses
+  that (`FM_ERR_INVALID_FORMAT` on every frame): encode with
+  `-pix_fmt yuvj420p`.  This holds for JPEG stills too.
+* Colour: H.264 is converted with the BT.601 matrix, video range
+  (16..235) unless the stream's VUI says full range; JPEG is full range.
+  Against ffmpeg's decode of the same files the picture is at 48 dB
+  (H.264) and 50 dB (MJPEG) PSNR; raw video is identical.
 * The container frame/sample index is static (sized by `FM_VIDEO_MAX_FRAMES`
   and `FM_VIDEO_MAX_AUDIO_FRAMES`).  A clip with more frames or audio packets
   than that is **not cut short**: `frame_count` / `sample_count` report the
@@ -501,7 +512,8 @@ Notes:
   96 kHz and says nothing about the type); an MPEG-1/2 audio track
   (MP3 in `mp4a`) is reported as MP3, object type 0xDD as Vorbis, and any
   other object type (AC-3, DTS, ...) is not offered as an audio track.
-  Neither is ALAC.
+  Neither is ALAC.  The same for the picture: an `mp4v` entry of object
+  type 0x6C is Motion JPEG (how ffmpeg writes MJPEG into an `.mp4`).
 * **AAC without a registered decoder** is passed through with an ADTS
   header per packet.  The header carries the real object type (it used to
   announce AAC Main for everything); HE-AAC is signalled as its AAC-LC

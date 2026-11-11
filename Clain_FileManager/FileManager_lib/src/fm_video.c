@@ -1602,6 +1602,85 @@ static uint32_t mp4_table_count(const Mp4Box *box, uint64_t table_off,
     return (count > room) ? (uint32_t)room : count;
 }
 
+/* objectTypeIndication of an "mp4v" sample entry (0 = no esds found).
+ * "mp4v" is a wrapper like "mp4a": the esds says what is inside.
+ * 0x20 is MPEG-4 Visual, 0x60..0x65 MPEG-2, 0x6C JPEG (how ffmpeg
+ * writes Motion JPEG into an .mp4). */
+static uint32_t mp4_visual_object_type(FM_Video *v, const Mp4Box *entry)
+{
+    uint64_t pos = entry->data + 78u;       /* VisualSampleEntry fields */
+    uint64_t end = entry->start + entry->size;
+    uint8_t d[40];
+    uint32_t n;
+    uint32_t i = 4u;                        /* version + flags */
+    uint32_t pass;
+
+    for (;;)
+    {
+        Mp4Box b;
+        uint64_t len;
+
+        if (pos + 8u > end || mp4_box_at(v, pos, end, &b) != FM_OK)
+        {
+            return 0u;
+        }
+        if (memcmp(b.type, "esds", 4) != 0)
+        {
+            pos = b.start + b.size;
+            continue;
+        }
+        len = b.start + b.size - b.data;
+        n = (len > sizeof(d)) ? (uint32_t)sizeof(d) : (uint32_t)len;
+        if (video_read_at(&v->file, b.data, d, n) != FM_OK)
+        {
+            return 0u;
+        }
+        break;
+    }
+    /* ES_Descriptor (3), then DecoderConfigDescriptor (4) inside it */
+    for (pass = 0u; pass < 2u; pass++)
+    {
+        uint32_t tag;
+        uint32_t k;
+
+        if (i >= n)
+        {
+            return 0u;
+        }
+        tag = d[i++];
+        for (k = 0u; k < 4u && i < n; k++)
+        {
+            if ((d[i++] & 0x80u) == 0u)
+            {
+                break;
+            }
+        }
+        if (pass == 0u)
+        {
+            uint32_t flags;
+
+            if (tag != 0x03u || i + 3u > n)
+            {
+                return 0u;
+            }
+            flags = d[i + 2u];
+            i += 3u;
+            if ((flags & 0x80u) != 0u) i += 2u;             /* dependsOn */
+            if ((flags & 0x40u) != 0u)                      /* URL       */
+            {
+                if (i >= n) return 0u;
+                i += 1u + d[i];
+            }
+            if ((flags & 0x20u) != 0u) i += 2u;             /* OCR       */
+        }
+        else if (tag != 0x04u || i >= n)
+        {
+            return 0u;
+        }
+    }
+    return d[i];
+}
+
 /* The "esds" box of an mp4a sample entry: what the track really is.
  *
  *   ES_Descriptor (3) > DecoderConfigDescriptor (4): objectTypeIndication
@@ -2417,8 +2496,20 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
                     else if (memcmp(entry.type, "mp4v", 4) == 0)
                     {
                         uint8_t dims2[4];
+                        uint32_t oti = mp4_visual_object_type(v, &entry);
 
-                        v->info.codec = FM_VIDEO_CODEC_MPEG4;
+                        if (oti == 0x6Cu)
+                        {
+                            v->info.codec = FM_VIDEO_CODEC_MJPEG;
+                        }
+                        else if (oti >= 0x60u && oti <= 0x65u)
+                        {
+                            v->info.codec = FM_VIDEO_CODEC_MPEG2;
+                        }
+                        else
+                        {
+                            v->info.codec = FM_VIDEO_CODEC_MPEG4;
+                        }
                         if (video_read_at(&v->file, entry.data + 24, dims2, 4) == FM_OK)
                         {
                             width = video_be16(dims2);

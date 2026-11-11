@@ -1488,13 +1488,25 @@ static PJPG_INLINE uint8 subAndClamp(uint8 a, int16 b)
 // 198/256
 //B = Y + 1.772 (Cb-128)
 /*----------------------------------------------------------------------------*/
+// FileManager patch: the green channel.
+// G = Y - 0.344 (Cb-128) - 0.714 (Cr-128) was applied in two steps, each
+// clamped to 0..255: first the Cb term (in the Cb functions), then the Cr
+// term.  When the first step leaves the range and the second comes back,
+// what the clamp cut off is lost: saturated blue (Y 29, Cb 255, Cr 107)
+// came out with green 15 instead of 0, saturated colours in general with
+// green up to 44 off.  Now the Cb functions keep their term here, one
+// value per chroma sample of the block, and the Cr functions (the Cr block
+// always follows the Cb block of the same MCU) subtract both at once.
+// The reduced-size path further down (pjpeg_decode_init(..., reduce = 1),
+// not used by FileManager) still works the old way.
+static int8 gCbG[64];
+/*----------------------------------------------------------------------------*/
 // Cb upsample and accumulate, 4x4 to 8x8
 static void upsampleCb(uint8 srcOfs, uint8 dstOfs)
 {
    // Cb - affects G and B
    uint8 x, y;
    int16* pSrc = gCoeffBuf + srcOfs;
-   uint8* pDstG = gMCUBufG + dstOfs;
    uint8* pDstB = gMCUBufB + dstOfs;
    for (y = 0; y < 4; y++)
    {
@@ -1504,10 +1516,7 @@ static void upsampleCb(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         pDstG[0] = subAndClamp(pDstG[0], cbG);
-         pDstG[1] = subAndClamp(pDstG[1], cbG);
-         pDstG[8] = subAndClamp(pDstG[8], cbG);
-         pDstG[9] = subAndClamp(pDstG[9], cbG);
+         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
@@ -1515,12 +1524,10 @@ static void upsampleCb(uint8 srcOfs, uint8 dstOfs)
          pDstB[8] = addAndClamp(pDstB[8], cbB);
          pDstB[9] = addAndClamp(pDstB[9], cbB);
 
-         pDstG += 2;
          pDstB += 2;
       }
 
       pSrc = pSrc - 4 + 8;
-      pDstG = pDstG - 8 + 16;
       pDstB = pDstB - 8 + 16;
    }
 }   
@@ -1531,7 +1538,6 @@ static void upsampleCbH(uint8 srcOfs, uint8 dstOfs)
    // Cb - affects G and B
    uint8 x, y;
    int16* pSrc = gCoeffBuf + srcOfs;
-   uint8* pDstG = gMCUBufG + dstOfs;
    uint8* pDstB = gMCUBufB + dstOfs;
    for (y = 0; y < 8; y++)
    {
@@ -1541,14 +1547,12 @@ static void upsampleCbH(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         pDstG[0] = subAndClamp(pDstG[0], cbG);
-         pDstG[1] = subAndClamp(pDstG[1], cbG);
+         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
          pDstB[1] = addAndClamp(pDstB[1], cbB);
 
-         pDstG += 2;
          pDstB += 2;
       }
 
@@ -1562,7 +1566,6 @@ static void upsampleCbV(uint8 srcOfs, uint8 dstOfs)
    // Cb - affects G and B
    uint8 x, y;
    int16* pSrc = gCoeffBuf + srcOfs;
-   uint8* pDstG = gMCUBufG + dstOfs;
    uint8* pDstB = gMCUBufB + dstOfs;
    for (y = 0; y < 4; y++)
    {
@@ -1572,18 +1575,15 @@ static void upsampleCbV(uint8 srcOfs, uint8 dstOfs)
          int16 cbG, cbB;
 
          cbG = ((cb * 88U) >> 8U) - 44U;
-         pDstG[0] = subAndClamp(pDstG[0], cbG);
-         pDstG[8] = subAndClamp(pDstG[8], cbG);
+         gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
          cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
          pDstB[0] = addAndClamp(pDstB[0], cbB);
          pDstB[8] = addAndClamp(pDstB[8], cbB);
 
-         ++pDstG;
          ++pDstB;
       }
 
-      pDstG = pDstG - 8 + 16;
       pDstB = pDstB - 8 + 16;
    }
 }   
@@ -1619,6 +1619,7 @@ static void upsampleCr(uint8 srcOfs, uint8 dstOfs)
          pDstR[9] = addAndClamp(pDstR[9], crR);
          
          crG = ((cr * 183U) >> 8U) - 91;
+         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[1] = subAndClamp(pDstG[1], crG);
          pDstG[8] = subAndClamp(pDstG[8], crG);
@@ -1654,6 +1655,7 @@ static void upsampleCrH(uint8 srcOfs, uint8 dstOfs)
          pDstR[1] = addAndClamp(pDstR[1], crR);
          
          crG = ((cr * 183U) >> 8U) - 91;
+         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[1] = subAndClamp(pDstG[1], crG);
          
@@ -1685,6 +1687,7 @@ static void upsampleCrV(uint8 srcOfs, uint8 dstOfs)
          pDstR[8] = addAndClamp(pDstR[8], crR);
 
          crG = ((cr * 183U) >> 8U) - 91;
+         crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
          pDstG[0] = subAndClamp(pDstG[0], crG);
          pDstG[8] = subAndClamp(pDstG[8], crG);
 
@@ -1720,7 +1723,6 @@ static void copyY(uint8 dstOfs)
 static void convertCb(uint8 dstOfs)
 {
    uint8 i;
-   uint8* pDstG = gMCUBufG + dstOfs;
    uint8* pDstB = gMCUBufB + dstOfs;
    int16* pSrc = gCoeffBuf;
 
@@ -1730,7 +1732,7 @@ static void convertCb(uint8 dstOfs)
       int16 cbG, cbB;
 
       cbG = ((cb * 88U) >> 8U) - 44U;
-      *pDstG++ = subAndClamp(pDstG[0], cbG);
+      gCbG[(uint8)(pSrc - gCoeffBuf - 1)] = (int8)cbG;
 
       cbB = (cb + ((cb * 198U) >> 8U)) - 227U;
       *pDstB++ = addAndClamp(pDstB[0], cbB);
@@ -1754,6 +1756,7 @@ static void convertCr(uint8 dstOfs)
       *pDstR++ = addAndClamp(pDstR[0], crR);
 
       crG = ((cr * 183U) >> 8U) - 91;
+      crG = (int16)(crG + gCbG[(uint8)(pSrc - gCoeffBuf - 1)]);
       *pDstG++ = subAndClamp(pDstG[0], crG);
    }
 }
