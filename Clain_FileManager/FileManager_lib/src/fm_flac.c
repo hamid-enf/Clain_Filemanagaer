@@ -31,7 +31,18 @@ uint32_t FM_Flac_Bits(const uint8_t *data, size_t size)
 #define DR_FLAC_NO_STDIO
 #define DRFLAC_API static
 #define DR_FLAC_IMPLEMENTATION
+/* Static means the part of the dr_flac API this file does not call is
+ * "defined but not used".  Silenced here, around the include only, so
+ * that it does not depend on a per-file compiler flag: STM32CubeIDE and
+ * tools/check_ports.sh compile this file with the project-wide flags. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "../third_party/dr_flac/dr_flac.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 /* dr_flac's own memory comes from the library allocator (FM_Allocator_Set).
  * No realloc hook: dr_flac then grows a block by allocate + copy + free,
