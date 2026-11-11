@@ -61,7 +61,7 @@ static FM_Result fm_vorbis_do_decode(void *ctx, const uint8_t *in, size_t in_siz
     {
         stb_vorbis_info info = stb_vorbis_get_info(v);
         channels = info.channels;
-        sample_rate = info.sample_rate;
+        sample_rate = (int)info.sample_rate;
         (void)sample_rate;
         if (channels <= 0 || channels > 2) {
             stb_vorbis_close(v);

@@ -11,6 +11,20 @@ Vendored dependencies that are too large or too specialized to live inside
 | `picojpeg/` | [picojpeg](https://github.com/richgel999/picojpeg) | public-domain single-file decoder                | Public domain    |
 | `opus/`     | [libopus](https://github.com/xiph/opus) (decoder-only) | master snapshot, 2025 (post-1.5: DRED/OSCE era) | BSD-3-Clause     |
 
+## Changes made to the vendored sources
+
+The vendored files are not pristine copies.  Every change is marked in
+the source with `FileManager patch` (or `FileManager:`), so that
+`grep -rn "FileManager" third_party/` lists them all; an update to a
+newer upstream version has to carry them over.
+
+| Library | What was changed |
+|---|---|
+| picojpeg | chroma sampled 1x2 (ffmpeg's 4:2:2 and 4:4:4 Motion JPEG: `gChromaV2`, `gMCUOrg[8]`, two halves of `gCbG`); one-component frames with any sampling factors; the green channel computed from Cb and Cr together (saturated blue used to get green in it) |
+| h264bsd | memory through `FM_Alloc` / `FM_Free`; a strict-aliasing barrier; parameter sets freed on the error paths; a reason code for failed parameter sets; an unsigned shift in the Exp-Golomb reader (`h264bsd_vlc.c`, undefined behaviour on damaged input) |
+| stb_vorbis | memory through the library allocator; table built once; bounds on the three setup lengths and on sparse codebooks; unsigned shifts and adds where a signed one overflowed |
+| dr_flac | no source change.  It is compiled inside `src/fm_flac.c` with `DR_FLAC_NO_STDIO` and `DRFLAC_API static`: no file I/O of its own and no exported `drflac_*` symbol, so an application can link its own dr_flac.  It decodes up to 24 bits a sample; wider streams are refused by `fm_flac.c` as unsupported |
+
 ## littlefs
 
 A small, power-loss-tolerant embedded filesystem.  It is used by the
@@ -58,6 +72,12 @@ Notes:
 
 * Baseline sequential only (grayscale + YCbCr); progressive JPEG is not
   supported.
+* Sampling layouts: one component (any factors); three components with
+  chroma 1x1 and luma 1x1, 2x1, 1x2 or 2x2; and, added here, chroma 1x2
+  with luma 1x2 or 2x2.  An MCU has at most 8 blocks (`gMCUOrg`), which
+  rules out the remaining layouts (luma 4x1, chroma 2x1, ...): they are
+  refused.  The reduced-size mode (`reduce = 1`, not used by FileManager)
+  does not have the chroma 1x2 branch and refuses those files.
 * Not thread-safe by design (static work arrays).
 * The decoder pulls bytes through a callback; the FileManager plugin feeds
   it from an in-memory frame buffer.

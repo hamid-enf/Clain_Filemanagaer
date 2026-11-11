@@ -323,7 +323,7 @@ buffer) and ID3v2 tags are skipped automatically.
 track in sample frames (one frame = one sample per channel) and
 `FM_Audio.frame_index` the position; `Player_GetDuration()` and
 `Player_GetPosition()` are these two divided by the sample rate.  The
-length is exact for WAV (PCM, G.711, IMA ADPCM), FLAC, Vorbis, Opus and
+length is exact for WAV (PCM, G.711, IMA and Microsoft ADPCM), FLAC, Vorbis, Opus and
 MP3 with a Xing/Info header.  For MP3 without one it is computed from the
 bit rate of the first frame: right for constant bit rate, **wrong for
 variable bit rate without a Xing header** (such files play, but length,
@@ -352,9 +352,9 @@ header: the sound starts up to about 0.15 s after the request and
 
 | Format | Decoded | Refused |
 |---|---|---|
-| WAV | PCM 8/16 bit, A-law, mu-law, IMA ADPCM (4 bit) mono and stereo | Microsoft ADPCM (format 2), 24-bit, float, more than 2 channels: `FM_ERR_UNSUPPORTED` |
+| WAV | PCM 8/16 bit, A-law, mu-law, IMA ADPCM and Microsoft ADPCM (4 bit) mono and stereo | 24-bit, float, more than 2 channels: `FM_ERR_UNSUPPORTED` |
 | MP3 | MPEG-1/2/2.5 Layer III; the Xing/Info frame is read, not played | |
-| FLAC | up to 8 channels, decoded whole at open, at most `FM_FLAC_MAX_PCM_BYTES` of PCM | longer: `FM_ERR_TOO_LARGE` |
+| FLAC | up to 8 channels and 24 bits a sample, decoded whole at open, at most `FM_FLAC_MAX_PCM_BYTES` of PCM | longer: `FM_ERR_TOO_LARGE`; 32 bits a sample: `FM_ERR_UNSUPPORTED` |
 | Ogg Vorbis | mono / stereo, decoded whole at open | more channels: `FM_ERR_UNSUPPORTED` |
 | Ogg Opus | mono / stereo (channel mapping family 0); the output gain of the header is applied | surround (family 1 and up): `FM_ERR_UNSUPPORTED` |
 | AAC (ADTS) | through a registered decoder | `.m4a` is an MP4 file: open it with the video API (`Video_ReadAudioFrame`) |
@@ -441,11 +441,12 @@ if (ti.decodable)
 
 | Track | In | Decoded by | Notes |
 |---|---|---|---|
-| PCM 8/16-bit, A-law, mu-law | AVI, MKV, MP4/MOV, FLV | the video layer | |
+| PCM 8 / 16 / 24 / 32-bit and 32-bit float, either byte order | AVI, MKV, MP4/MOV, FLV | the video layer | always handed out as 16-bit; 64-bit samples are not a track |
+| A-law, mu-law | AVI, MKV, MP4/MOV | the video layer | |
 | IMA ADPCM, Microsoft ADPCM | AVI, MKV (`A_MS/ACM`) | the video layer | mono and stereo; the buffer must hold one block (4 x `nBlockAlign` bytes is enough) |
 | MP3 | AVI, MP4, MKV, FLV | minimp3 (`FM_USE_MP3`) | buffer of 4608 bytes or more; 16 KB of heap while the file is open; 18 KB of stack |
-| FLAC | MP4, MKV | dr_flac (`FM_USE_FLAC`) | |
-| Vorbis | MKV / WebM, MP4 | stb_vorbis (`FM_USE_VORBIS`) | heap for the stream's codebooks (some hundred KB) while the file is open |
+| FLAC | MP4, MKV | dr_flac (`FM_USE_FLAC`) | up to 24 bits a sample; a 32-bit track has `decodable` false and every read returns `FM_ERR_UNSUPPORTED` |
+| Vorbis | MKV / WebM, MP4 | stb_vorbis (`FM_USE_VORBIS`) | heap for the stream's codebooks while the file is open: 150 to 185 KB measured for 22 and 44.1 kHz stereo tracks |
 | Opus | MP4, MKV / WebM | libopus (`FM_USE_OPUS_LIB`) | without it `decodable` is false |
 | AAC | MP4, MKV, FLV, AVI | a decoder you register under `"AAC"` | without one `decodable` is false and each call returns the raw frame behind a 7-byte ADTS header: a valid `.aac` stream, not PCM |
 
@@ -456,14 +457,24 @@ at its declaration in `fm_video.h`.
 **How this is checked.**  Files written by ffmpeg, one per row and
 container above, are decoded by the library and by ffmpeg and the PCM is
 compared: PCM, G.711, both ADPCM kinds and FLAC are identical byte for
-byte; MP3 and Vorbis are within one LSB.  The library does not remove
-the encoder delay that MP4 and MKV declare for MP3 (1105 samples, 25 ms:
-its output is ffmpeg's with that much in front) nor the pre-skip of Opus
-(312 samples at 48 kHz).  The test suite keeps small files for MP3,
-ADPCM and Vorbis (`tools/gen_video_audio_vectors.py`,
-`test/audit_v3_tests.h`).  Not recognised: 24-bit PCM written as
-`WAVE_FORMAT_EXTENSIBLE` in an AVI (the clip opens without an audio
-track), AC-3, DTS and ALAC (the same).
+byte; MP3, Vorbis and Opus are within one LSB.
+
+**Encoder delay and padding.**  An MP3, Opus or AAC encoder puts frames
+of its own in front of the sound (1105 for LAME, 312 at 48 kHz for
+libopus) and rounds the end up to a whole packet.  Where the container
+records this, `Video_ReadAudioFrame` removes it: the edit list of an
+MP4 / MOV track (start and length), `CodecDelay` and `DiscardPadding` in
+Matroska / WebM.  A decoded track then starts with the first sample of
+the sound and has its length, as ffmpeg's decode does.  AVI and FLV have
+no such record and are played from the first packet (ffmpeg does the
+same).  After `Video_SeekAudio()` to a packet other than 0 the MP4 length
+limit is not applied, because the number of frames before that packet is
+not known.  AAC handed out as ADTS frames is never trimmed.
+
+The test suite keeps small files for every row
+(`tools/gen_video_audio_vectors.py`, `test/audit_v3_tests.h`).  Not
+recognised: AC-3, DTS and ALAC (the clip opens without an audio track),
+PCM with 64-bit samples (the same).
 
 Notes:
 
@@ -473,13 +484,15 @@ Notes:
 * MP4/avc1 sample payloads are converted to Annex-B automatically; AVI H.264
   frames are auto-detected (start-code or length-prefixed).
 * picojpeg decodes baseline sequential JPEG only and is not thread-safe.
-  Chroma layouts: grey, 4:4:4, 4:2:2, 4:4:0 and 4:2:0 in the usual form
-  (chroma sampling factors 1x1).  ffmpeg writes its 4:2:2 and 4:4:4 Motion
-  JPEG with a vertical factor of 2 on every component; picojpeg refuses
-  that (`FM_ERR_INVALID_FORMAT` on every frame): encode with
-  `-pix_fmt yuvj420p`.  This holds for JPEG stills too.
-* Colour: H.264 is converted with the BT.601 matrix, video range
-  (16..235) unless the stream's VUI says full range; JPEG is full range.
+  Chroma layouts: grey (whatever sampling factors the one component
+  declares), 4:4:4, 4:2:2, 4:4:0 and 4:2:0 in the usual form (chroma
+  sampling factors 1x1), and the form ffmpeg writes for 4:2:2 and 4:4:4
+  Motion JPEG (chroma factors 1x2, luma 2x2 or 1x2).  Other layouts
+  (4:1:1 with luma 4x1, chroma wider than 1) are refused with
+  `FM_ERR_INVALID_FORMAT`.  This holds for JPEG stills too.
+* Colour: H.264 is converted with the BT.601 matrix, or BT.709 when the
+  stream's VUI names it (`matrix_coefficients` 1); video range
+  (16..235) unless the VUI says full range; JPEG is full range.
   Against ffmpeg's decode of the same files the picture is at 48 dB
   (H.264) and 50 dB (MJPEG) PSNR; raw video is identical.
 * The container frame/sample index is static (sized by `FM_VIDEO_MAX_FRAMES`

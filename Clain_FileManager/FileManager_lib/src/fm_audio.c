@@ -15,7 +15,9 @@
 #if FM_USE_FLAC
 #include "fm_flac.h"
 #endif
+#if FM_USE_AUDIO
 #include "fm_adpcm.h"       /* Microsoft ADPCM blocks (WAV format 0x02) */
+#endif
 #if FM_USE_VORBIS
 struct stb_vorbis;
 typedef struct stb_vorbis stb_vorbis;

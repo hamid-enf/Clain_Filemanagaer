@@ -1918,7 +1918,7 @@ static void test_audit_v2_audio(void)
         size_t cut;
         size_t setup = 0;
         size_t j;
-        int opened = 0;
+        unsigned tried = 0;
 
         r = av2_load("/test/vectors/test_vorbis.ogg", &len);
         for (j = 0; r == FM_OK && j + 7u < len; j++)
@@ -1929,14 +1929,14 @@ static void test_audit_v2_audio(void)
         {
             r = File_WriteAll("/av2_bad.ogg", g_av2_abuf, (uint32_t)cut);
             memset(&a, 0, sizeof(a));
+            tried++;
             if (r == FM_OK && Audio_Open("/av2_bad.ogg", &a) == FM_OK)
             {
                 /* cut in the audio: plays what is there, and that is fine */
-                opened++;
                 (void)Audio_Close(&a);
             }
         }
-        AV2_RESULT(r == FM_OK && setup != 0, r, "set-up");
+        AV2_RESULT(r == FM_OK && setup != 0 && tried != 0u, r, "set-up");
     }
     (void)File_Delete("/av2_bad.ogg");
 #endif /* FM_USE_VORBIS */

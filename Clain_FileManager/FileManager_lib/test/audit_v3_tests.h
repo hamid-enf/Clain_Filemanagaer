@@ -883,6 +883,14 @@ static void test_video_vorbis_track(void)
  * DiscardPadding).  With that applied the tone starts where ffmpeg has
  * it and the track has the length of the sound it was made from
  * (tools/gen_video_audio_vectors.py prints both). */
+#if FM_USE_MP3 || (FM_USE_AUDIO && FM_USE_VORBIS) || \
+    (defined(FM_OPUS_USE_LIBOPUS) && FM_OPUS_USE_LIBOPUS)
+#define AV3_DELAY_CASES 1
+#else
+#define AV3_DELAY_CASES 0       /* no codec with a delay in this build */
+#endif
+
+#if AV3_DELAY_CASES
 static long av3_onset(size_t bytes)
 {
     size_t k;
@@ -926,6 +934,7 @@ static void av3_delay_case(const char *what, const char *path, size_t cap,
         FAIL(m);
     }
 }
+#endif /* AV3_DELAY_CASES */
 
 static void test_video_audio_delay(void)
 {
@@ -1424,15 +1433,20 @@ static void test_video_pcm_track(void)
         size_t n = 77u;
         FM_Result rr = Video_ReadAudioFrame(&v, small, 5u, &n);
 
+        /* ...and it took nothing: the whole track is still there */
+        av3_drain(&v, 4096u, 100000u, &run);
         (void)Video_Close(&v);
-        if (rr == FM_ERR_TOO_LARGE && n == 0u)
+        if (rr == FM_ERR_TOO_LARGE && n == 0u && run.bad == 0u &&
+            run.ended && run.bytes == AV3_PCM_BYTES &&
+            av3_crc32(g_av3_pcm, run.bytes) == AV3_PCM_CRC)
         {
             PASS();
         }
         else
         {
-            (void)snprintf(m, sizeof(m), "read -> %d, %lu bytes", (int)rr,
-                           (unsigned long)n);
+            (void)snprintf(m, sizeof(m), "read -> %d, %lu bytes; then %lu "
+                           "bytes, %u bad", (int)rr, (unsigned long)n,
+                           (unsigned long)run.bytes, (unsigned)run.bad);
             FAIL(m);
         }
     }

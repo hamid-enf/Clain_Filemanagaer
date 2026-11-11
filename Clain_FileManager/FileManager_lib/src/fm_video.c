@@ -2936,7 +2936,7 @@ static int16_t ulaw_decode(uint8_t u)
 {
     int16_t t;
     u = (uint8_t)~u;
-    t = (int16_t)(((u & 0x0Fu) << 3) + 0x84) << ((u & 0x70u) >> 4);
+    t = (int16_t)((((u & 0x0Fu) << 3) + 0x84u) << ((u & 0x70u) >> 4));
     return (u & 0x80u) ? (int16_t)(0x84 - t) : (int16_t)(t - 0x84);
 }
 
@@ -6434,8 +6434,8 @@ static FM_Result video_adpcm_read(FM_Video *v, FM_VideoPriv *priv,
  * QuickTime writes one sample frame a packet, which was one file read
  * for every four bytes.
  *
- * `cap` below one sample frame: FM_ERR_TOO_LARGE, the packet is passed
- * over.  I/O errors take nothing.
+ * `cap` below one sample frame: FM_ERR_TOO_LARGE.  Like an I/O error it
+ * takes nothing: the same data comes with the next, larger buffer.
  */
 #define VIDEO_PCM_GATHER 4096u
 
@@ -6481,8 +6481,8 @@ static FM_Result video_pcm_read(FM_Video *v, FM_VideoPriv *priv,
     max_in -= max_in % frame_in;
     if (max_in == 0u)
     {
-        v->audio_frame_index = first + packets;
-        priv->audio_part_left = 0u;
+        /* nothing taken: neither the packet nor the rest of one */
+        v->audio_frame_index = first;
         return FM_ERR_TOO_LARGE;
     }
     if (fresh)
@@ -6704,7 +6704,7 @@ static FM_Result video_audio_read_raw(FM_Video *v, FM_VideoPriv *priv,
         if (r != FM_OK) { FM_Free(tmp); return r; }
         for (uint32_t i=0;i<fsize;i++)
         {
-            int16_t s = alaw_decode(tmp[i]);
+            uint32_t s = (uint32_t)(int32_t)alaw_decode(tmp[i]);
             buf[i*2u] = (uint8_t)(s & 0xFFu);
             buf[i*2u+1u] = (uint8_t)((s>>8)&0xFFu);
         }
@@ -6721,7 +6721,7 @@ static FM_Result video_audio_read_raw(FM_Video *v, FM_VideoPriv *priv,
         if (r != FM_OK) { FM_Free(tmp); return r; }
         for (uint32_t i=0;i<fsize;i++)
         {
-            int16_t s = ulaw_decode(tmp[i]);
+            uint32_t s = (uint32_t)(int32_t)ulaw_decode(tmp[i]);
             buf[i*2u] = (uint8_t)(s & 0xFFu);
             buf[i*2u+1u] = (uint8_t)((s>>8)&0xFFu);
         }

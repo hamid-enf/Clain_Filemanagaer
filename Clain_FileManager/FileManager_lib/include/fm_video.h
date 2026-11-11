@@ -99,19 +99,20 @@ typedef struct
 } FM_Video;
 
 /* ------------------------------------------------------------------ */
-/* Embedded audio track (demuxed, not decoded)                         */
+/* Embedded audio track: demuxed and decoded to 16-bit PCM             */
 /* ------------------------------------------------------------------ */
 typedef enum
 {
     FM_VIDEO_AUDIO_NONE = 0,
     FM_VIDEO_AUDIO_AAC,           /* MP4 "mp4a" / AVI 0x00FF         */
-    FM_VIDEO_AUDIO_PCM,           /* AVI "01wb" (8/16/24-bit PCM)    */
-    FM_VIDEO_AUDIO_MP3,           /* AVI 0x0055 / MP4 ".mp3"         */
+    FM_VIDEO_AUDIO_PCM,           /* AVI, MKV, MP4, MOV, FLV: 8/16/24/
+                                   * 32-bit integer, 32-bit float    */
+    FM_VIDEO_AUDIO_MP3,           /* AVI 0x0055 / MP4 ".mp3" / MKV   */
     FM_VIDEO_AUDIO_FLAC,          /* MP4 "fLaC" / MKV A_FLAC         */
     FM_VIDEO_AUDIO_VORBIS,        /* MKV A_VORBIS / MP4 "mp4a" 0xDD  */
     FM_VIDEO_AUDIO_OPUS,          /* MP4 "Opus" / MKV A_OPUS         */
-    FM_VIDEO_AUDIO_ALAW,          /* AVI 0x0006 aLaw                 */
-    FM_VIDEO_AUDIO_ULAW,          /* AVI 0x0007 muLaw                */
+    FM_VIDEO_AUDIO_ALAW,          /* 0x0006 aLaw                     */
+    FM_VIDEO_AUDIO_ULAW,          /* 0x0007 muLaw                    */
     FM_VIDEO_AUDIO_ADPCM          /* AVI, MKV: 0x0011 IMA / 0x0002 MS */
 } FM_VideoAudioCodec;
 
@@ -120,21 +121,45 @@ typedef struct
     FM_VideoAudioCodec codec;
     uint32_t sample_rate;
     uint16_t channels;
-    uint16_t bits_per_sample;     /* PCM only (0 for AAC)            */
-    uint32_t sample_count;        /* number of audio samples/frames  */
+    uint16_t bits_per_sample;     /* width of a sample IN THE FILE: PCM,
+                                   * and FLAC when the container says it;
+                                   * for the other codecs whatever the
+                                   * container states (often 0 or 16).
+                                   * What Video_ReadAudioFrame returns is
+                                   * 16-bit whatever this says.       */
+    uint32_t sample_count;        /* packets in the track (container
+                                   * samples / chunks / blocks): the unit
+                                   * of Video_SeekAudio, NOT sample
+                                   * frames.                          */
     FM_Bool  decodable;           /* FM_TRUE: Video_ReadAudioFrame returns
                                    * playable 16-bit PCM for this track.
                                    * FM_FALSE: no decoder is compiled in /
-                                   * registered (see Video_ReadAudioFrame). */
+                                   * registered, or the track is outside
+                                   * what the decoder does (see
+                                   * Video_ReadAudioFrame). */
 } FM_AudioTrackInfo;
 
 /* True if the container has an audio track. */
 FM_Result Video_HasAudio(const FM_Video *v, FM_Bool *has);
 FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
-/* Read the next audio packet into buf as interleaved 16-bit PCM
- * (little-endian).
+/* Read the next piece of the audio track into buf as interleaved 16-bit
+ * PCM (little-endian).  Every FM_OK comes with data (*size != 0, a whole
+ * number of sample frames).
  *
- *   PCM (8/16-bit), A-law, mu-law : decoded here, always available.
+ *   PCM                           : decoded here, always available.  In
+ *       the file a sample is 8 bits (unsigned; signed in QuickTime), 16,
+ *       24 or 32 bits or a 32-bit float, in either byte order; out comes
+ *       16-bit (wider samples lose their low bits, floats are scaled and
+ *       clipped).  The data is converted in the caller's buffer, so one
+ *       call gives as many sample frames as `cap` holds in the FILE's
+ *       format (24-bit input fills two thirds of the buffer), and `cap`
+ *       must hold one such frame: channels * bytes per sample, twice
+ *       that for 8-bit.  A packet with more is continued by the next
+ *       call; small packets that follow each other in the file are read
+ *       together.  Other widths (12, 20, 64 bits): decodable is
+ *       FM_FALSE, see "no decoder" below.
+ *   A-law, mu-law                 : decoded here, always available.
+ *       `cap` must hold twice the packet.
  *   IMA ADPCM, Microsoft ADPCM    : decoded here, mono and stereo, whole
  *       blocks at a time.  `cap` must hold one block (4 * nBlockAlign
  *       bytes is always enough).  A chunk with more blocks than fit is
@@ -163,31 +188,64 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
  *       in).  The decoder is opened on the first packet and kept until
  *       Video_Close / Video_SeekAudio.  A decoder registered under
  *       "VORBIS" in place of the built-in one is used the same way.
+ *       The built-in FLAC decoder does up to 24 bits a sample; a wider
+ *       track (FLAC allows 32) has decodable == FM_FALSE unless the
+ *       application registered its own "FLAC" decoder.  Opus has a
+ *       decoder only in a build with libopus (FM_OPUS_USE_LIBOPUS=1;
+ *       `make FM_USE_OPUS_LIB=1`); AAC has none built in.
  *
- * When no decoder is registered:
+ * Encoder delay and padding.  MP3, Vorbis, Opus and AAC encoders put
+ * frames in front of the sound (LAME 1105, libopus 312 at 48 kHz) and
+ * pad the last packet.  Where the container records them they are
+ * removed, so that the track has the length and the start the container
+ * states:
+ *   MP4 / MOV   the audio track's edit list, when it is one edit that
+ *               starts within the first second: the frames before its
+ *               start are dropped and nothing is returned past its
+ *               length.
+ *   MKV / WebM  CodecDelay (up to one second; not for Vorbis, whose
+ *               decoder drops its own first packet) at the start, and
+ *               DiscardPadding off the end of the block that carries it.
+ *   AVI, FLV    record neither: the track comes as the decoder gives it
+ *               (an MP3 track is 1105 frames late and a little longer
+ *               than the picture).
+ * After Video_SeekAudio(v, 0) the start is trimmed again.  After a seek
+ * to any other packet nothing is dropped at the start, and the MP4
+ * length is not applied (the frame position is no longer known): the
+ * padding of the last packet is then returned.  AAC handed out as ADTS
+ * (below) is never trimmed.
+ *
+ * When there is no decoder (decodable == FM_FALSE):
  *   AAC               -> the raw sample is returned prefixed with a 7-byte
  *                        ADTS header (*size includes it): a valid .aac
  *                        stream for extraction, NOT PCM.
- *   FLAC/Opus/Vorbis  -> FM_ERR_UNSUPPORTED (nothing is written, nothing
- *                        is consumed).
- * FM_AudioTrackInfo.decodable tells the two situations apart up front:
- * look at it before the read loop.
+ *   everything else   -> FM_ERR_UNSUPPORTED for every packet (nothing is
+ *                        written), then FM_ERR_EOF.
+ * FM_AudioTrackInfo.decodable tells up front: look at it before the read
+ * loop.
  *
  * Results:
  *   FM_OK             *size bytes were written.
  *   FM_ERR_EOF        the track has ended.
  *   FM_ERR_CORRUPTED  a packet was refused.  It has been passed over: the
  *                     next call continues with the following one.
+ *   FM_ERR_UNSUPPORTED  no decoder for this track.  The packet has been
+ *                     passed over, so a loop that reads until FM_ERR_EOF
+ *                     ends; it gets no data.  (Also: the file has no
+ *                     audio track.)
  *   FM_ERR_TOO_LARGE  `cap` is too small for this track's smallest unit
  *                     (see above).  Nothing was consumed: call again
  *                     with a larger buffer.
- *   FM_ERR_UNSUPPORTED  no decoder (decodable == FM_FALSE).  Nothing is
- *                     consumed: a loop that only stops at FM_ERR_EOF
- *                     would not end.
  *   FM_ERR_NO_MEMORY, FM_ERR_IO  nothing was consumed; the call can be
  *                     repeated. */
 FM_Result Video_ReadAudioFrame(FM_Video *v, uint8_t *buf, size_t cap,
                                size_t *size);
+/* Continue reading at packet `sample_index` (0 .. sample_count - 1; an
+ * index past the end is FM_ERR_INVALID_ARGUMENT).  The unit is the
+ * container's packet, not a sample frame or a time.  A seek is a break
+ * for the decoders: they start afresh, and what was left of a packet
+ * delivered in parts is dropped.  See above for what MP3 and Vorbis
+ * return right after it, and for the trimming. */
 FM_Result Video_SeekAudio(FM_Video *v, uint32_t sample_index);
 
 /* ------------------------------------------------------------------ */
