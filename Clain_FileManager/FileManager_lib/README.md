@@ -264,6 +264,10 @@ Project settings (Properties > C/C++ Build > Settings > MCU GCC Compiler):
   CubeMX FatFs middleware (the default is 0).  The media switches
   (`FM_USE_AUDIO`, `FM_USE_VIDEO`, `FM_USE_IMAGE`, `FM_USE_MP3`, ...) are
   already 1 on an STM32H7; define them only to turn something off.
+  Switching features off, buffer sizes and what each one saves:
+  [`docs/OPTIONS_FA.md`](docs/OPTIONS_FA.md) (Persian); the switches
+  themselves are the commented `//#define FM_USE_... 0` lines at the top
+  of `include/fm_board_config.h`.
 - **Include paths:** `include`, `backends`, `src`,
   `third_party/littlefs`, `third_party/h264bsd/src`,
   `third_party/minimp3`, `third_party/picojpeg` and
