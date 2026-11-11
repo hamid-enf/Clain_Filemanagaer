@@ -989,10 +989,13 @@ FM_File *File_Open(const char *path, uint32_t mode)
     r = file_open_internal(f, path, mode);
     if (r != FM_OK)
     {
-        /* file_open_internal already released the slot */
+        /* file_open_internal already released the slot.  "Open it if it
+         * is there" is normal use, so this is an event, not an error. */
+        FM_EVENT_LOG("open %s failed (%d)", path, (int)r);
         FM_Core_SetLastError(r);
         return NULL;
     }
+    FM_EVENT_LOG("opened %s (mode 0x%lx)", path, (unsigned long)mode);
     FM_Core_SetLastError(FM_OK);
     return f;
 }
@@ -1042,6 +1045,7 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
     }
     else
     {
+        FM_EVENT_LOG("open %s failed (%d)", path, (int)r);
         external_file_remove(f);
         file_release(f);
     }
@@ -1075,6 +1079,18 @@ FM_Result File_Close(FM_File *f)
     cache_invalidate_file(f);
     cache_unlock();
 #endif
+    /* Before the handle (and the path in it) is given back. */
+    if (r != FM_OK)
+    {
+        /* The one place a lost write shows up when the caller ignores
+         * the result of File_Close, which most callers do. */
+        FM_ERR_LOG("close %s failed (%d): data may not be on the medium",
+                   f->path, (int)r);
+    }
+    else
+    {
+        FM_EVENT_LOG("closed %s", f->path);
+    }
     if (file_is_pool(f))
     {
         file_release(f);
@@ -1496,6 +1512,13 @@ FM_Result File_Delete(const char *path)
     if (r == FM_OK)
     {
         FM_EVENT_LOG("deleted %s", path);
+    }
+    else if (r == FM_ERR_NOT_FOUND)
+    {
+        /* "Delete it if it is there" is the usual way to call this, so
+         * a missing file is an answer, not a fault: an error line for
+         * each one buried the real errors at the default level. */
+        FM_EVENT_LOG("delete %s: not there", path);
     }
     else
     {

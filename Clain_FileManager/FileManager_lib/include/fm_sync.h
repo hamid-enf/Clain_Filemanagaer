@@ -45,8 +45,15 @@
  *   per-mount filesystem lock
  *   VFS tables (FM_Lock), storage registry, last-error slot
  *
- * User callbacks (progress, idle, storage events, log sinks) are never
- * invoked with a VFS-table, storage-registry or per-mount lock held.
+ * User callbacks (progress, idle, storage events) are never invoked with
+ * a VFS-table, storage-registry or per-mount lock held.
+ *
+ * The log sink is the exception: a message is delivered where it is
+ * produced, and a storage driver or a filesystem reports its errors from
+ * inside an operation, with the per-mount lock held.  A log sink must
+ * therefore never call back into the library (the mutexes are not
+ * recursive, the call would wait for its own caller) and should not
+ * block for long.  See "Rules for a sink" in fm_log.h.
  */
 
 #ifndef FM_SYNC_H

@@ -9,6 +9,24 @@
 #include <stdlib.h>
 
 #include "file_manager.h"
+/* The level the library was built with (the Makefile passes the same
+ * flags to this file), before this file switches its own copy off. */
+#include "fm_board_config.h"
+#if defined(FM_LOG_DISABLE)
+#define FM_DEBUG_LEVEL_UNDER_TEST 0     /* no output: the level is forced off */
+#elif defined(FM_DEBUG_LEVEL)
+#if FM_DEBUG_LEVEL == 0
+#define FM_DEBUG_LEVEL_UNDER_TEST 0
+#elif FM_DEBUG_LEVEL == 1
+#define FM_DEBUG_LEVEL_UNDER_TEST 1
+#elif FM_DEBUG_LEVEL == 2
+#define FM_DEBUG_LEVEL_UNDER_TEST 2
+#else
+#define FM_DEBUG_LEVEL_UNDER_TEST 3
+#endif
+#else
+#define FM_DEBUG_LEVEL_UNDER_TEST 1
+#endif
 /* The negative tests below deliberately trigger error paths; keep the
  * log quiet so a passing run stays readable. */
 #undef  FM_DEBUG_LEVEL
@@ -4058,6 +4076,31 @@ static void test_logging(void)
 
     saved = FM_Log_GetSink(&saved_ctx);
 
+#ifdef FM_LOG_DISABLE
+    TEST("Log: an FM_LOG_DISABLE build delivers nothing and stays callable");
+    {
+        g_logcap_len = 0;
+        g_logcap_calls = 0;
+        FM_Log_SetSink(test_log_sink, NULL);
+        (void)FM_Log("text %d\n", 1);
+        (void)FM_Log_Write("raw", 3u);
+        (void)FM_Log_PutChar('c');
+        if (g_logcap_calls != 0 || FM_Log_IsActive())
+        {
+            FAIL("output from a build without log output");
+        }
+        else
+        {
+            PASS();
+        }
+    }
+    FM_Log_SetSink(saved, saved_ctx);
+    if (g_logcap_calls == 0)
+    {
+        return;                 /* the tests below need the output */
+    }
+#endif
+
     TEST("Log: with no sink registered, output is silently dropped");
     {
         FM_Log_SetSink(NULL, NULL);
@@ -5250,6 +5293,12 @@ static void test_file_report(void)
         {
             FAIL("File_PoolUsed is no longer the total");
         }
+#ifdef FM_LOG_DISABLE
+        else if (g_logcap[0] == '\0')
+        {
+            PASS();             /* log output compiled out: nothing to read */
+        }
+#endif
         else if (strstr(g_logcap, want) == NULL)
         {
             FAIL("header does not show the two counts separately");
@@ -20231,11 +20280,15 @@ static void suite_leak_check(const char *suite)
 
 #define RUN_SUITE(fn) do { fn(); suite_leak_check(#fn); } while (0)
 
+#include "debug_log_tests.h"
+
 int main(void)
 {
     printf("\nFileManager Host Test Suite\n");
     printf("==========================\n\n");
 
+    /* Before setup(): initialisation logs too. */
+    dl_install_global_sink();
     setup();
 
     RUN_SUITE(test_path);
@@ -20332,6 +20385,7 @@ int main(void)
     RUN_SUITE(test_regressions);
     RUN_SUITE(test_coverage);
     RUN_SUITE(test_sync_report);
+    RUN_SUITE(test_debug_levels);
     RUN_SUITE(test_audit_v2_file);
 #if FM_USE_VIDEO && FM_USE_H264
     RUN_SUITE(test_audit_v2_video);
@@ -20347,6 +20401,19 @@ int main(void)
     RUN_SUITE(test_threads_wide);
 #endif
 
+    printf("\n  Log sink: debug level %d, %lu messages, %lu bytes, "
+           "%lu malformed, %lu dropped\n",
+           FileManager_GetDebugLevel(), g_dl_msgs, g_dl_bytes, g_dl_bad,
+           FM_Log_Dropped());
+    TEST("Debug: every message of the run was one well-formed line");
+    if (g_dl_bad != 0u)
+    {
+        FAIL(g_dl_first_bad);
+    }
+    else
+    {
+        PASS();
+    }
     printf("\n  Results: %d/%d passed, %d failures\n",
            g_tests - g_failures, g_tests, g_failures);
 

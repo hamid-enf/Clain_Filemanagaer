@@ -143,6 +143,11 @@ static void alloc_failed(void)
     FM_Unlock();
 }
 
+/* Every failed allocation is an error line: running out of heap is the
+ * most common reason a decoder refuses a file that plays on the PC, and
+ * the result code alone (FM_ERR_NO_MEMORY) does not say how much was
+ * asked for.  At the HIGH level every allocation and release is traced,
+ * which is how a leak is found. */
 void *FM_Alloc(size_t size)
 {
     void *p = current()->alloc(size, g_allocator.ctx);
@@ -150,6 +155,11 @@ void *FM_Alloc(size_t size)
     if (p == NULL && size != 0)
     {
         alloc_failed();
+        FM_ERR_LOG("out of memory: %lu bytes", (unsigned long)size);
+    }
+    else
+    {
+        FM_TRACE_LOG("alloc %lu -> %p", (unsigned long)size, p);
     }
     return p;
 }
@@ -161,6 +171,13 @@ void *FM_Calloc(size_t n, size_t size)
     if (p == NULL && n != 0 && size != 0)
     {
         alloc_failed();
+        FM_ERR_LOG("out of memory: %lu x %lu bytes", (unsigned long)n,
+                   (unsigned long)size);
+    }
+    else
+    {
+        FM_TRACE_LOG("calloc %lu x %lu -> %p", (unsigned long)n,
+                     (unsigned long)size, p);
     }
     return p;
 }
@@ -172,6 +189,12 @@ void *FM_Realloc(void *p, size_t size)
     if (np == NULL && size != 0)
     {
         alloc_failed();
+        FM_ERR_LOG("out of memory: growing a block to %lu bytes",
+                   (unsigned long)size);
+    }
+    else
+    {
+        FM_TRACE_LOG("realloc %p to %lu -> %p", p, (unsigned long)size, np);
     }
     return np;
 }
@@ -205,5 +228,9 @@ void *FM_ReallocSized(void *p, size_t old_size, size_t new_size)
 
 void FM_Free(void *p)
 {
+    if (p != NULL)
+    {
+        FM_TRACE_LOG("free %p", p);
+    }
     current()->free(p, g_allocator.ctx);
 }

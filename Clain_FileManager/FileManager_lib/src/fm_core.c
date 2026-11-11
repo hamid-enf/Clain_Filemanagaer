@@ -270,6 +270,11 @@ void FM_BusyLeave(void)
     }
 }
 
+int FileManager_GetDebugLevel(void)
+{
+    return FM_DEBUG_LEVEL;
+}
+
 FM_Result FileManager_Init(void)
 {
     /*

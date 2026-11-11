@@ -133,6 +133,13 @@ if [ "$MODE" != "quick" ]; then
     # every log macro compiled out: a parameter or include that only the
     # log lines used must not break a -Werror build (audit v2, FILE-07)
     CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=0" run_one "FM_DEBUG_LEVEL=0 (log macros compiled out)"
+    # the middle level, and the level every tracing line belongs to with
+    # threads (messages formatted on the stacks of several tasks at once)
+    CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=2" run_one "FM_DEBUG_LEVEL=2 (errors + events)"
+    CFLAGS_EXTRA="-DFM_DEBUG_LEVEL=3" run_one "FM_DEBUG_LEVEL=3 THREADS=1" FM_USE_THREADS=1
+    # log output removed altogether: must build with -Werror, print
+    # nothing and leave no message text behind
+    CFLAGS_EXTRA="-DFM_LOG_DISABLE" run_one "FM_LOG_DISABLE (no log output at all)"
     # F-11: redirect the transfer layer's cache-maintenance hooks to
     # counters in test/main.c and check them against the chunk count.
     CFLAGS_EXTRA="-DFM_XFER_CACHE_CLEAN=fm_test_xfer_clean -DFM_XFER_CACHE_INVALIDATE=fm_test_xfer_inval" \

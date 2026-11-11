@@ -68,15 +68,65 @@ void FM_Log_UseStdout(void)
 }
 #endif
 
-int FM_Log_Write(const char *buf, size_t len)
-{
-    FM_LogSinkFn sink = g_sink;      /* یک‌بار بخوان: ممکن است عوض شود */
+/* ------------------------------------------------------------------ */
+/* One message at a time (FM_USE_THREADS=0)                            */
+/* ------------------------------------------------------------------ */
+/*
+ * Without threads there is one format buffer, and two things can ask for
+ * it while it is in use:
+ *
+ *   - the sink itself, by logging or by calling a library function that
+ *     reports an error.  Unchecked, that recursion ends only when the
+ *     stack does;
+ *   - an interrupt that logs in the middle of a message from the main
+ *     loop.  Unchecked, it formats over the buffer the main loop is
+ *     about to send.
+ *
+ * In both cases the second message is dropped and counted.  A plain flag
+ * is enough: whatever interrupts runs to completion before the
+ * interrupted code continues, so it either sees the flag set and leaves,
+ * or sets and clears it in between two instructions of the code below.
+ *
+ * With threads each message is formatted on its caller's stack and
+ * nothing is shared, so nothing is dropped; a flag could not tell a
+ * second task from a recursion anyway.
+ */
+static volatile unsigned long g_dropped;
 
-    if (buf == NULL || len == 0u)
+#if !FM_USE_THREADS
+static volatile unsigned char g_busy;
+
+static int log_enter(void)
+{
+    if (g_busy != 0u)
     {
+        g_dropped++;
         return 0;
     }
-    if (sink == NULL)
+    g_busy = 1u;
+    return 1;
+}
+
+static void log_leave(void)
+{
+    g_busy = 0u;
+}
+#else
+static int  log_enter(void) { return 1; }
+static void log_leave(void) { }
+#endif
+
+unsigned long FM_Log_Dropped(void)
+{
+    return g_dropped;
+}
+
+/* Hand `len` bytes to the sink.  The caller holds the "busy" claim. */
+static int log_deliver(const char *buf, size_t len)
+{
+    FM_LogSinkFn sink = g_sink;      /* read once: it may be replaced */
+
+    if (sink == NULL || len == 0u)
     {
         return 0;
     }
@@ -84,37 +134,92 @@ int FM_Log_Write(const char *buf, size_t len)
     return (int)len;
 }
 
+int FM_Log_Write(const char *buf, size_t len)
+{
+    int n;
+
+    if (buf == NULL || len == 0u || g_sink == NULL)
+    {
+        return 0;
+    }
+    if (!log_enter())
+    {
+        return 0;
+    }
+    n = log_deliver(buf, len);
+    log_leave();
+    return n;
+}
+
 int FM_Log_PutChar(int ch)
 {
     char c = (char)(ch & 0xFF);
-
     return FM_Log_Write(&c, 1u);
 }
 
-int FM_Log_V(const char *fmt, va_list ap)
+/* Format the message into one buffer and send it with one sink call.
+ * With `tag` set it is a levelled message: "[<level>/<tag>] " goes in
+ * front and it always ends in a line break, also when it had to be cut. */
+static int log_format_send(int level, const char *tag, const char *fmt,
+                           va_list ap)
 {
 #if FM_USE_THREADS
     char g_buf[FM_LOG_BUF_SIZE];
 #endif
+    size_t used = 0u;
+    size_t room;
     int n;
+    int sent;
 
     if (g_sink == NULL || fmt == NULL)
     {
         return 0;
     }
+    if (!log_enter())
+    {
+        return 0;
+    }
 
-    n = vsnprintf(g_buf, sizeof(g_buf), fmt, ap);
+    /* One byte is kept back for the line break of a levelled message. */
+    room = sizeof(g_buf) - ((tag != NULL) ? 1u : 0u);
+
+    if (tag != NULL)
+    {
+        /* Written by hand: a second pass through vsnprintf for six
+         * characters would double the cost of every message. */
+        g_buf[used++] = '[';
+        g_buf[used++] = (char)level;
+        g_buf[used++] = '/';
+        while (*tag != '\0' && used < 24u)
+        {
+            g_buf[used++] = *tag++;
+        }
+        g_buf[used++] = ']';
+        g_buf[used++] = ' ';
+    }
+
+    n = vsnprintf(g_buf + used, room - used, fmt, ap);
     if (n < 0)
     {
-        return -1;                   /* خطای فرمت */
+        log_leave();
+        return -1;                   /* format error */
     }
-    /* vsnprintf طولی که *لازم بود* را برمی‌گرداند، نه آنچه نوشت.
-     * اگر پیام بلندتر بود، فقط همان مقدار نوشته‌شده را بفرست. */
-    if ((size_t)n >= sizeof(g_buf))
+    /* vsnprintf returns the length the text NEEDED, not what it wrote. */
+    used += ((size_t)n >= room - used) ? (room - used - 1u) : (size_t)n;
+
+    if (room != sizeof(g_buf))
     {
-        n = (int)sizeof(g_buf) - 1;
+        g_buf[used++] = '\n';        /* the byte kept back above */
     }
-    return FM_Log_Write(g_buf, (size_t)n);
+
+    sent = log_deliver(g_buf, used);
+    log_leave();
+    return sent;
+}
+
+int FM_Log_V(const char *fmt, va_list ap)
+{
+    return log_format_send(0, NULL, fmt, ap);
 }
 
 int FM_Log(const char *fmt, ...)
@@ -124,6 +229,17 @@ int FM_Log(const char *fmt, ...)
 
     va_start(ap, fmt);
     n = FM_Log_V(fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+int FM_Log_Tagged(int level, const char *tag, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = log_format_send(level, (tag != NULL) ? tag : "fm", fmt, ap);
     va_end(ap);
     return n;
 }
@@ -143,6 +259,12 @@ int FM_Log_Write(const char *buf, size_t len) { (void)buf; (void)len; return 0; 
 int FM_Log_PutChar(int ch) { (void)ch; return 0; }
 int FM_Log_V(const char *fmt, va_list ap) { (void)fmt; (void)ap; return 0; }
 int FM_Log(const char *fmt, ...) { (void)fmt; return 0; }
+int FM_Log_Tagged(int level, const char *tag, const char *fmt, ...)
+{
+    (void)level; (void)tag; (void)fmt;
+    return 0;
+}
+unsigned long FM_Log_Dropped(void) { return 0u; }
 void FM_Log_Init(void) { }
 
 #endif /* FM_LOG_DISABLE */

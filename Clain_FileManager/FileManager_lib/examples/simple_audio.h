@@ -211,7 +211,7 @@ static FM_Result simple_audio_board_start(void *ctx, int16_t *samples,
            (unsigned long)rate, (unsigned)channels,
            (unsigned long)count,
            (int)(hi2s != NULL ? (int)hi2s->Init.DataFormat : -1),
-           (unsigned long)(uintptr_t)hi2s);
+           (void *)hi2s);
 
     if (hi2s == NULL || samples == NULL)
     {
@@ -635,7 +635,7 @@ FM_Result SimpleAudio_Begin(void)
     /* دیباگ: آدرس/آلایمن بافر DMA — اگر start با invalid-argument رد
      * شود، این خط نشان می‌دهد بافر کجا قرار گرفته است. */
     FM_Log("SimpleAudio: dma buf=%p (4B-aligned=%d) N=%lu folder=%s\n",
-           (unsigned long)(uintptr_t)simple_audio_dma_buf,
+           (void *)simple_audio_dma_buf,
            (((uintptr_t)simple_audio_dma_buf & 0x3u) == 0u) ? 1 : 0,
            (unsigned long)SIMPLE_AUDIO_HALF_SAMPLES, SIMPLE_AUDIO_FOLDER);
 

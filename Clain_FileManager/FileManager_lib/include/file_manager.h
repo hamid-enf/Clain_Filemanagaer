@@ -116,6 +116,13 @@ void FM_BusyLeave(void);
 uint32_t  FileManager_GetVersion(void);   /* 0xMMNNPP */
 const char *FileManager_GetVersionString(void);
 
+/* The debug level the LIBRARY was compiled with (0 off, 1 low, 2 medium,
+ * 3 high; see fm_debug.h).  FM_DEBUG_LEVEL in an application file only
+ * says what that file was compiled with; when the library is built
+ * separately (a static library, another build configuration) the two can
+ * differ, and this is the one that decides what the library prints. */
+int FileManager_GetDebugLevel(void);
+
 /* One-call setup for the common pointer-backed case.  After this call
  * the normal high-level file and directory APIs operate at "/" without
  * exposing storage blocks, filesystem handles or mount details. */

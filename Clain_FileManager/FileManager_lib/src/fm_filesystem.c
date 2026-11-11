@@ -3,6 +3,8 @@
  * fm_filesystem.c - Filesystem adapter registry + mount table (VFS)
  */
 
+#define FM_DEBUG_TAG "fs"
+#include "fm_debug.h"
 #include "fm_internal.h"
 #include <string.h>
 
@@ -530,6 +532,14 @@ FM_Result FS_Mount(const char *mount_path, FM_FS *fs)
     FM_Unlock();
 
     mount_op_unlock();
+    if (r == FM_OK)
+    {
+        FM_EVENT_LOG("mounted %s", normalized);
+    }
+    else
+    {
+        FM_ERR_LOG("mount %s failed (%d)", normalized, (int)r);
+    }
     return r;
 }
 
@@ -614,6 +624,7 @@ FM_Result FS_Unmount(const char *mount_path)
     }
 
     mount_op_unlock();
+    FM_EVENT_LOG("unmounted %s", normalized);
     return FM_OK;
 }
 
@@ -659,6 +670,14 @@ FM_Result FS_Format(const char *mount_path)
     r = entry->fs->ops.format(entry->fs);
     FM_Mount_Unlock(entry);
     FM_VFS_Unpin(entry);
+    if (r == FM_OK)
+    {
+        FM_EVENT_LOG("formatted %s", normalized);
+    }
+    else
+    {
+        FM_ERR_LOG("format %s failed (%d)", normalized, (int)r);
+    }
     return r;
 }
 

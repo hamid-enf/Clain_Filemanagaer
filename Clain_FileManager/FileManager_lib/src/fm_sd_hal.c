@@ -36,19 +36,24 @@ static uint8_t g_sd_stage[FM_SD_STAGE_SECTORS * 512u]
     __attribute__((aligned(32)));
 
 /* Report a failing HAL_SD transfer.  Runs only on an error path, so the
- * extra FM_Log cost is irrelevant.  ErrorCode is a bitmask of
- * HAL_SD_ErrorTypeDef; State is HAL_SD_StateTypeDef. */
+ * cost of the message is irrelevant.  An error line like every other
+ * one: it follows FM_DEBUG_LEVEL (it used to print at level 0 too, and
+ * kept its text in a firmware built without logging).  ErrorCode is a
+ * bitmask of HAL_SD_ErrorTypeDef; State is HAL_SD_StateTypeDef. */
 static void sd_diag(const char *op, uint64_t lba, uint32_t count,
                     uint32_t bytes)
 {
     /* lba is a 32-bit LBA here (FatFS DWORD / this HAL casts to uint32_t);
      * print with %lu to avoid 64-bit format support in the UART log. */
-    FM_Log("sdhal: %s FAIL lba=%lu count=%lu bytes=%lu state=%d "
-           "err=0x%08lX\n",
-           op, (unsigned long)lba, (unsigned long)count,
-           (unsigned long)bytes,
-           (int)(g_hsd != NULL ? (int)g_hsd->State : -1),
-           (unsigned long)(g_hsd != NULL ? g_hsd->ErrorCode : 0u));
+    (void)op;       /* only the message uses them; none at level 0 */
+    (void)lba;
+    (void)count;
+    (void)bytes;
+    FM_ERR_LOG("%s FAIL lba=%lu count=%lu bytes=%lu state=%d err=0x%08lX",
+               op, (unsigned long)lba, (unsigned long)count,
+               (unsigned long)bytes,
+               (int)(g_hsd != NULL ? (int)g_hsd->State : -1),
+               (unsigned long)(g_hsd != NULL ? g_hsd->ErrorCode : 0u));
 }
 
 static FM_Result sd_wait(uint32_t timeout_ms)

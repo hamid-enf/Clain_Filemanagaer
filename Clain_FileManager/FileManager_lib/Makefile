@@ -249,7 +249,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick fatfs
+.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick fatfs m32
 
 all: $(LIBS) fm_test
 
@@ -376,6 +376,15 @@ tsan:
 ports:
 	@sh tools/check_ports.sh
 
+# m32 — the whole suite built and run as a 32-bit program with clang
+# (the targets are 32-bit, the PC is not).  Needs "pip install ziglang"
+# or a gcc with -m32; prints SKIP otherwise.
+#   make m32              plain
+#   make m32 M32=ubsan    with UBSan
+M32 ?= plain
+m32:
+	@sh tools/check_32bit.sh $(M32)
+
 # cmake — CMakeLists.txt really configured, built and tested (13
 # configurations, incl. the three sync ports).  Skipped with a message
 # when cmake is not installed.
@@ -384,7 +393,7 @@ cmake:
 
 # matrix — every FM_USE_* combination must build (-Werror), pass its
 # tests and leave no static memory behind for a disabled subsystem.
-#   make matrix        plain build of all 27 configurations
+#   make matrix        plain build of all configurations
 #   make matrix-asan   the same under ASan + UBSan + LeakSanitizer
 #   make matrix-quick  only the 8 IMAGE/VIDEO/AUDIO combinations
 matrix:
@@ -440,10 +449,11 @@ fatfs:
 check: test cachetest videohooks ex33test tapstest asan ports fatfs
 	@sh tools/check_examples.sh
 	@sh tools/check_cmake.sh
+	@sh tools/check_32bit.sh
 
 clean:
 	rm -rf build-asan
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest fm_tsan.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

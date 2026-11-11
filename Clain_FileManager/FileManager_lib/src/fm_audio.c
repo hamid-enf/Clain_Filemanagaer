@@ -33,7 +33,10 @@ extern stb_vorbis_info stb_vorbis_get_info(stb_vorbis *f);
 
 #if FM_AUDIO_TRACE
 #include "fm_log.h"
-#define FM_AUDIO_LOG(...) FM_Log("wav: " __VA_ARGS__)
+/* Per-read tracing, its own switch because it prints on every refill.
+ * One line per message, long values printed as unsigned long: the small
+ * printf of newlib-nano has no "%llu". */
+#define FM_AUDIO_LOG(...) ((void)FM_Log_Tagged('T', "audio", __VA_ARGS__))
 #else
 #define FM_AUDIO_LOG(...) ((void)0)
 #endif
@@ -2672,9 +2675,9 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
     {
         n = UINT32_MAX / bytes_per_sample;
     }
-    FM_AUDIO_LOG("read: file pos %llu, avail %llu bytes, want %lu samples\n",
-                 (unsigned long long)(a->info.data_offset + byte_pos),
-                 (unsigned long long)available, (unsigned long)n);
+    FM_AUDIO_LOG("read: file pos %lu, avail %lu bytes, want %lu samples",
+                 (unsigned long)(a->info.data_offset + byte_pos),
+                 (unsigned long)available, (unsigned long)n);
     done = 0;
     while (done < n)
     {
@@ -2690,7 +2693,7 @@ FM_Result Audio_Read(FM_Audio *a, int16_t *samples, size_t count,
         byte_count = (uint32_t)chunk * bytes_per_sample;
         wav_raw_lock();
         r = file_read_exact(&a->file, g_wav_raw, byte_count, NULL);
-        FM_AUDIO_LOG("read: chunk %lu -> %d\n",
+        FM_AUDIO_LOG("read: chunk %lu -> %d",
                      (unsigned long)chunk, (int)r);
         if (r != FM_OK)
         {

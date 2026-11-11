@@ -146,7 +146,8 @@ static FM_Result qspi_write_enable(FM_QspiDevice *dev)
         if (FM_Qspi_ReadStatus(dev, &st) == FM_OK &&
             (st & QSTATUS_WEL) == 0u)
         {
-            FM_ERR_LOG("WREN gom shod (SR=0x%02X) - WEL nakhabid", st);
+            FM_ERR_LOG("write enable lost (SR=0x%02X): WEL did not set",
+                       (unsigned)st);
         }
     }
     return FM_OK;
@@ -599,8 +600,9 @@ static FM_Result qspi_erase_sector(FM_QspiDevice *dev, uint64_t addr)
                  * طبیعی (پایانِ طبیعی دقیقاً روی مرز ۴۰۰۰ms سی بار پشت
                  * هم تصادف نیست). سکتور ممکن است نیمه‌پاک باشد؛ بعداً
                  * Format یک‌باره توصیه می‌شود. */
-                FM_ERR_LOG("erase baad az reset azad shod (azad shodan "
-                           "dar %lums) - format-e yek bar-e /flash",
+                FM_ERR_LOG("erase came back only after a reset (%lu ms): "
+                           "the sector may be half erased, format the "
+                           "volume once",
                            (unsigned long)waited);
                 return FM_OK;
             }

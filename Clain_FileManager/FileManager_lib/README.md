@@ -549,6 +549,69 @@ blocks. Reads of at least two cache lines bypass this small-read cache and go
 straight to the filesystem backend, preserving FatFS multi-sector transfers
 for real-time audio/video streams.
 
+## Debug levels and log output
+
+The library prints through one function pointer, the *log sink*
+(`fm_log.h`).  It never touches a UART itself, and until a sink is
+registered nothing is formatted at all.
+
+```c
+#include "fm_log.h"
+#include "fm_log_uart_hal.h"
+FM_Log_UseHalUart(&huart1);          /* or FM_Log_SetSink(my_sink, ctx) */
+```
+
+How much it prints is a compile-time choice, `FM_DEBUG_LEVEL` in
+`fm_board_config.h` (or `-DFM_DEBUG_LEVEL=n`).  There are four values:
+
+| Level | Prints | Flash (Cortex-M7, clang `-Os`, all features, object files) |
+|---|---|---|
+| `0` OFF | nothing; the messages are not in the firmware | 0 |
+| `1` LOW (default) | operations that really failed: bad argument, mount/format failure, a close that could not flush, storage-driver errors, a media file that could not be opened or parsed, a failed allocation with its size.  Nothing on a successful path. | about 7 KB |
+| `2` MEDIUM | + one line per life-cycle step: init, mount/unmount/format, file open/close/delete, image loaded, audio/video opened, track change, media-cache decisions | about 9 KB |
+| `3` HIGH | + every allocation and release, every QSPI read/write/erase, raw-copy chunks | about 10 KB |
+
+```
+[E/fs] mount /sd failed (-6)
+[I/file] opened /sd/a.wav (mode 0x1)
+[T/alloc] alloc 4096 -> 0x24001000
+```
+
+What to know before choosing a level:
+
+* **"Not found" is not an error line.**  Opening or deleting a file that
+  is not there returns `FM_ERR_NOT_FOUND` and prints nothing at LOW (an
+  event line at MEDIUM).
+* **A message costs what the sink costs.**  It is one `vsnprintf` into a
+  `FM_LOG_BUF_SIZE` (512 byte) buffer and one sink call.  The ready-made
+  UART bridge blocks until the bytes are out: about 87 µs per character
+  at 115200 baud, so 4 ms for a 45-character line, and up to
+  `FM_LOG_UART_TIMEOUT_MS` (100 ms) per message when nothing drains the
+  UART.  The message is sent from wherever it was produced, which can be
+  inside a filesystem operation with its lock held.  LOW prints only when
+  something failed, so this does not matter there; **HIGH prints a line
+  per storage read and will break audio/video timing** -- use it to find
+  a fault, with a sink that only copies into a ring buffer if timing
+  matters.
+* **A sink must not call back into the library** when `FM_USE_THREADS=1`
+  (the locks are not recursive).  Without threads a sink that logs, or an
+  interrupt that logs in the middle of another message, has its message
+  dropped and counted (`FM_Log_Dropped()`) instead of recursing or
+  overwriting the buffer.
+* **RAM.**  The format buffer is static without threads; with
+  `FM_USE_THREADS=1` it is on the stack of the task that logs (add
+  `FM_LOG_BUF_SIZE` plus what your `vsnprintf` needs to every task that
+  uses the library, or lower `FM_LOG_BUF_SIZE`; 64 is the minimum).
+* **No float, no `%llu`.**  The library's messages use only string and
+  int/long conversions, so newlib-nano without float printf is enough.
+* `FM_LOG_DISABLE` removes the output functions themselves and forces
+  the level to OFF.  `FileManager_GetDebugLevel()` returns the level the
+  library was really built with (useful when it is a separate static
+  library).
+* Not logged at any level: the inside of the decoders (per frame or
+  packet), directory walks, the JSON/text helpers.  They report through
+  result codes only.
+
 ## Memory allocation hooks
 
 The file and storage core stays allocation-free.  These parts need dynamic

@@ -707,8 +707,36 @@ FM_Result Image_Load(const char *path, FM_Image *img, void *pixel_buffer,
     return Image_LoadEx(path, img, pixel_buffer, capacity, 0, 0);
 }
 
+static FM_Result image_load_ex(const char *path, FM_Image *img,
+                               void *pixel_buffer, size_t capacity,
+                               uint16_t max_w, uint16_t max_h);
+
 FM_Result Image_LoadEx(const char *path, FM_Image *img, void *pixel_buffer,
                        size_t capacity, uint16_t max_w, uint16_t max_h)
+{
+    FM_Result r;
+
+    FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
+    FM_CHECK_PTR(img, FM_ERR_INVALID_ARGUMENT);
+    FM_CHECK_PTR(pixel_buffer, FM_ERR_INVALID_ARGUMENT);
+    r = image_load_ex(path, img, pixel_buffer, capacity, max_w, max_h);
+    if (r == FM_OK)
+    {
+        FM_EVENT_LOG("loaded %s (%ux%u)", path, (unsigned)img->width,
+                     (unsigned)img->height);
+    }
+    else
+    {
+        /* One line for every way a load can fail (unknown format,
+         * damaged file, buffer too small, ...), not only a failed open. */
+        FM_ERR_LOG("image load %s failed (%d)", path, (int)r);
+    }
+    return r;
+}
+
+static FM_Result image_load_ex(const char *path, FM_Image *img,
+                               void *pixel_buffer, size_t capacity,
+                               uint16_t max_w, uint16_t max_h)
 {
     FM_File file;
     FM_Stream stream;
@@ -716,14 +744,10 @@ FM_Result Image_LoadEx(const char *path, FM_Image *img, void *pixel_buffer,
     uint8_t magic[8];
     uint32_t rd = 0;
 
-    FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
-    FM_CHECK_PTR(img, FM_ERR_INVALID_ARGUMENT);
-    FM_CHECK_PTR(pixel_buffer, FM_ERR_INVALID_ARGUMENT);
     File_Init(&file);
     r = File_OpenEx(&file, path, FM_OPEN_READ);
     if (r != FM_OK)
     {
-        FM_ERR_LOG("image load %s: open failed (%d)", path, (int)r);
         return r;
     }
     r = File_Read(&file, magic, sizeof(magic), &rd);

@@ -381,7 +381,7 @@ void exM_2_video_fmrv(void)
     uint8_t readback[EXM_VW * EXM_VH * 3];
     uint32_t fr;
 
-    printf("\n--- make /clip.fmrv (%ux%u, %u frames, 10 fps) ---\n",
+    printf("\n--- make /clip.fmrv (%lux%lu, %lu frames, 10 fps) ---\n",
            (unsigned long)EXM_VW, (unsigned long)EXM_VH,
            (unsigned long)EXM_VFRAMES);
     if (!exm_require_mounted("exM_2_video_fmrv")) return;
