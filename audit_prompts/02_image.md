@@ -96,7 +96,7 @@ repository: `ReportV2.txt` at the repository root, lines 1583–2454 (the other
 line ranges are the other three parts). Read it first, including its sections
 "Examined and found sound" and "Not examined". Everything it found has been
 worked on since; `git log 8dd0f25..2a45d9d` and
-`git diff 8dd0f25..2a45d9d -- src/fm_image.c src/fm_png.c src/fm_jpeg.c src/fm_hw.c include/fm_image.h` show how.
+`git diff 8dd0f25..2a45d9d -- src/fm_image.c src/fm_png.c src/fm_jpeg.c src/fm_hw.c third_party/picojpeg include/fm_image.h` show how.
 
 **What the maintainers found themselves after `cf187af`, and what it tells
 you.** While measuring stack frames for the ARM target, one frame led to the
