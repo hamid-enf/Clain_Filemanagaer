@@ -417,16 +417,16 @@ videohooks: $(LIBS)
 		test/video_hooks_test.c $(LIBS) -lm -o fm_videohooks
 	@./fm_videohooks
 
-# ex33test — example 33 (record + taps + folder copy) against the real
+# audiorecordtest — audio_record_with_tap.h (record + taps + folder copy) against the real
 # library on the host: records a WAV, reopens it, verifies length and
 # level, installs every tap, and copies a nested tree.
-ex33test: $(LIBS)
+audiorecordtest: $(LIBS)
 	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
 		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
-		tools/ex33_host_test.c $(LIBS) -lm -o fm_ex33test
-	@./fm_ex33test
+		tools/audio_record_host_test.c $(LIBS) -lm -o fm_audiorecordtest
+	@./fm_audiorecordtest
 
-# tapstest — the PCM-tap block of board/app_audio_hooks.h (Example 33
+# tapstest — the PCM-tap block of board/app_audio_hooks.h (audio_record_with_tap.h
 # wiring) executed on the host.  The section is extracted VERBATIM from
 # that header between "AGC_TARGET_PEAK" (the pre-tap DSP banner) and the
 # TAPS-BLOCK-END marker, so what is tested is exactly what ships to the
@@ -447,7 +447,7 @@ fatfs:
 	@sh test/build_fatfs_host.sh
 
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks ex33test tapstest asan ports fatfs
+check: test cachetest videohooks audiorecordtest tapstest asan ports fatfs
 	@sh tools/check_examples.sh
 	@sh tools/check_cubeide.sh
 	@sh tools/check_cmake.sh
@@ -455,7 +455,7 @@ check: test cachetest videohooks ex33test tapstest asan ports fatfs
 
 clean:
 	rm -rf build-asan
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_ex33test fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_audiorecordtest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

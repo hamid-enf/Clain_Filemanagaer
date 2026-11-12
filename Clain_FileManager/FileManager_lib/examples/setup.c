@@ -1,5 +1,5 @@
 /*
- * Example 00 — Setup
+ * setup.c — Setup
  *
  * راه‌اندازی اولیه FileManager روی RAM.
  * تمام مثال‌های دیگه از همین الگو برای setup استفاده می‌کنن.

@@ -2891,14 +2891,14 @@ static void test_audit_v2_audio(void)
     /* ---------------- F13 / F25: the DMA example ---------------- */
     TEST("F13: DMA player, odd half size and a stereo track");
     {
-        static Ex13_AudioDma x;
+        static AudioDma x;
         static int16_t dma[2 * 255] __attribute__((aligned(32)));
 
         r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
         memset(dma, 0x55, sizeof(dma));
         if (r == FM_OK)
         {
-            r = Ex13_AudioDmaStartEx(&x, "/av2dma", &ex13_test_port, NULL,
+            r = AudioDma_StartEx(&x, "/av2dma", &audio_dma_test_port, NULL,
                                      dma, 255, NULL);
         }
         /* half 0: samples 0..253 and one silent slot; half 1 goes on with
@@ -2907,18 +2907,18 @@ static void test_audit_v2_audio(void)
                        dma[253], dma[254], dma[255], dma[256]);
         AV2_RESULT(r == FM_OK && dma[253] == 253 * 4 && dma[254] == 0 &&
                    dma[255] == 254 * 4 && dma[256] == 255 * 4, r, msg);
-        (void)Ex13_AudioDmaStop(&x);
+        (void)AudioDma_Stop(&x);
     }
 
     TEST("F25: DMA player, the pre-gain tap sees the samples before the gain");
     {
-        static Ex13_AudioDma x;
+        static AudioDma x;
         static int16_t dma[2 * 256] __attribute__((aligned(32)));
 
         r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
         if (r == FM_OK)
         {
-            r = Ex13_AudioDmaStartEx(&x, "/av2dma", &ex13_test_port, NULL,
+            r = AudioDma_StartEx(&x, "/av2dma", &audio_dma_test_port, NULL,
                                      dma, 256, NULL);
         }
         g_av2_tap_pre_calls = 0;
@@ -2927,11 +2927,11 @@ static void test_audit_v2_audio(void)
         av2_tap_post(&x, NULL, 0, 0, 0);            /* reset its counter */
         if (r == FM_OK)
         {
-            Ex13_AudioDmaSetVolume(&x, 16383);
-            Ex13_AudioDmaSetPrePcmTap(&x, av2_tap_pre, NULL);
-            Ex13_AudioDmaSetPostPcmTap(&x, av2_tap_post, NULL);
-            Ex13_AudioDmaHalfCallback(&x);          /* refill half 0 */
-            r = Ex13_AudioDmaPoll(&x);
+            AudioDma_SetVolume(&x, 16383);
+            AudioDma_SetPrePcmTap(&x, av2_tap_pre, NULL);
+            AudioDma_SetPostPcmTap(&x, av2_tap_post, NULL);
+            AudioDma_HalfCallback(&x);          /* refill half 0 */
+            r = AudioDma_Poll(&x);
         }
         /* the refill starts at sample 512 of the ramp: 2048 */
         (void)snprintf(msg, sizeof(msg), "pre tap %d, post tap %d",
@@ -2939,7 +2939,7 @@ static void test_audit_v2_audio(void)
         AV2_RESULT(r == FM_OK && g_av2_tap_pre_first == 2048 &&
                    g_av2_tap_post_first >= 1022 && g_av2_tap_post_first <= 1025,
                    r, msg);
-        (void)Ex13_AudioDmaStop(&x);
+        (void)AudioDma_Stop(&x);
         (void)Directory_DeleteRecursive("/av2dma");
     }
 }

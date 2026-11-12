@@ -1905,7 +1905,7 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
  * split between SD/flash reads and decoder work:
  *
  *   Audio_Mp3StatsReset(&audio);
- *   Ex13_AudioDmaPoll(&player);                    // one refill
+ *   AudioDma_Poll(&player);                    // one refill
  *   Audio_Mp3Stats(&audio, &s);
  *   // s.read_calls   = File_Read commands the refill issued
  *   // s.read_bytes   = compressed bytes pulled from the file

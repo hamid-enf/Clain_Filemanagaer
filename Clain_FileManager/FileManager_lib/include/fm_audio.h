@@ -81,7 +81,7 @@ FM_Result Audio_Seek(FM_Audio *a, double seconds);
 /* went into SD/flash read commands versus decoder work:               */
 /*                                                                     */
 /*   Audio_Mp3StatsReset(&audio);                                     */
-/*   Ex13_AudioDmaPoll(&player);          // one half-buffer refill   */
+/*   AudioDma_Poll(&player);          // one half-buffer refill   */
 /*   Audio_Mp3Stats(&audio, &s);          // s.read_calls small?      */
 /*                                                                     */
 /* Every read_call is one separate SDMMC command; the command COUNT    */

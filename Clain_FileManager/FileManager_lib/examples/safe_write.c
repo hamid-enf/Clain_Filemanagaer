@@ -1,5 +1,5 @@
 /*
- * Example 07 — Safe / Crash-Safe Writes
+ * safe_write.c — Safe / Crash-Safe Writes
  *
  * APIها:
  *   File_SafeReplace   — نوشتن امن (temp + rename)

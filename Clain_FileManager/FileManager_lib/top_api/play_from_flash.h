@@ -15,8 +15,8 @@
  *   ۱) خودکار کامل — یک خط راه‌اندازی، بعد همیشه از سریع‌ترین جا پخش
  *      می‌شود:
  *
- *          Ex29_Begin();
- *          Ex29_PlayVideo("/videos/clip.avi");   // خودش کش می‌کند
+ *          FlashPlay_Begin();
+ *          FlashPlay_PlayVideo("/videos/clip.avi");   // خودش کش می‌کند
  *
  *   ۲) کنترل دستی — خودتان تصمیم بگیرید چه چیزی کش شود:
  *
@@ -25,7 +25,7 @@
  *
  *   ۳) کپی صریح — مثلاً موقع راه‌اندازی، همهٔ یک پوشه را ببرید روی فلش:
  *
- *          Ex29_PreloadFolder("/videos");
+ *          FlashPlay_PreloadFolder("/videos");
  *
  * چه وقت واقعاً کمک می‌کند
  * ------------------------
@@ -38,8 +38,8 @@
  * هشدار فرسودگی: هر کپی یک چرخهٔ نوشتن روی فلش است (حدود ۱۰۰ هزار بار
  * برای هر سکتور). برای فایل‌هایی که مدام عوض می‌شوند کش نگذارید.
  */
-#ifndef FM_EXAMPLE_29_PLAY_FROM_FLASH_H
-#define FM_EXAMPLE_29_PLAY_FROM_FLASH_H
+#ifndef FM_TOPAPI_PLAY_FROM_FLASH_H
+#define FM_TOPAPI_PLAY_FROM_FLASH_H
 
 #include <stdio.h>
 #include <string.h>
@@ -54,18 +54,18 @@
 
 /* بزرگ‌ترین فایلی که ارزش کپی دارد. برای ویدیوی ۳۲۰x۲۴۰ چند مگابایت
  * منطقی است؛ اگر فلش کوچکی دارید کمترش کنید. */
-#ifndef EX29_MAX_CACHED_FILE
-#define EX29_MAX_CACHED_FILE (4u * 1024u * 1024u)
+#ifndef FLASH_PLAY_MAX_CACHED_FILE
+#define FLASH_PLAY_MAX_CACHED_FILE (4u * 1024u * 1024u)
 #endif
 
 /* بیشترین فضایی که کش بگیرد. صفر = تا جایی که فلش جا دارد. */
-#ifndef EX29_MAX_CACHE_TOTAL
-#define EX29_MAX_CACHE_TOTAL (24u * 1024u * 1024u)
+#ifndef FLASH_PLAY_MAX_CACHE_TOTAL
+#define FLASH_PLAY_MAX_CACHE_TOTAL (24u * 1024u * 1024u)
 #endif
 
 /* پوشهٔ کش روی فلش. */
-#ifndef EX29_CACHE_ROOT
-#define EX29_CACHE_ROOT "/qspi/.mcache"
+#ifndef FLASH_PLAY_CACHE_ROOT
+#define FLASH_PLAY_CACHE_ROOT "/qspi/.mcache"
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -75,18 +75,18 @@
  * اگر فلش نباشد یا mount نشده باشد، این تابع تمیز شکست می‌خورد و
  * همه‌چیز مثل قبل از SD پخش می‌شود — فقط کندتر.
  */
-static FM_Result Ex29_Begin(void)
+static FM_Result FlashPlay_Begin(void)
 {
     FM_MediaCacheConfig cfg;
     FM_Result r;
 
-    puts("\n**************** Ex29_Begin ****************");
+    puts("\n**************** FlashPlay_Begin ****************");
 
     memset(&cfg, 0, sizeof(cfg));
-    cfg.cache_root      = EX29_CACHE_ROOT;
+    cfg.cache_root      = FLASH_PLAY_CACHE_ROOT;
     cfg.policy          = FM_MEDIACACHE_IF_SMALL;
-    cfg.max_file_bytes  = EX29_MAX_CACHED_FILE;
-    cfg.max_total_bytes = EX29_MAX_CACHE_TOTAL;
+    cfg.max_file_bytes  = FLASH_PLAY_MAX_CACHED_FILE;
+    cfg.max_total_bytes = FLASH_PLAY_MAX_CACHE_TOTAL;
     /* بررسی CRC بعد از کپی: کمی کندتر ولی مطمئن. برای فلشی که ممکن
      * است فرسوده باشد ارزشش را دارد. */
     cfg.verify          = FM_TRUE;
@@ -98,12 +98,12 @@ static FM_Result Ex29_Begin(void)
         return r;
     }
     printf("  کش آماده: %s (حداکثر %lu KB برای هر فایل)\n",
-           EX29_CACHE_ROOT,
-           (unsigned long)(EX29_MAX_CACHED_FILE / 1024u));
+           FLASH_PLAY_CACHE_ROOT,
+           (unsigned long)(FLASH_PLAY_MAX_CACHED_FILE / 1024u));
     return FM_OK;
 }
 
-static void Ex29_End(void)
+static void FlashPlay_End(void)
 {
     FM_MediaCacheStats st;
 
@@ -117,11 +117,11 @@ static void Ex29_End(void)
                (unsigned long)(st.bytes_copied / 1024u));
     }
     FM_MediaCache_Deinit();
-    puts("**************** Ex29_End ****************\n");
+    puts("**************** FlashPlay_End ****************\n");
 }
 
 /* ------------------------------------------------------------------ */
-/* ex29_1 — پخش ویدیو، خودکار از سریع‌ترین جا                          */
+/* FlashPlay_PlayVideo — پخش ویدیو، خودکار از سریع‌ترین جا                          */
 /* ------------------------------------------------------------------ */
 /*
  * تنها تفاوت با قبل: یک خط Resolve قبل از Play.
@@ -129,7 +129,7 @@ static void Ex29_End(void)
  * اگر کش فعال باشد و فایل مناسب باشد، از فلش پخش می‌شود. وگرنه دقیقاً
  * همان مسیر اصلی. کد شما به هر دو حالت بی‌تفاوت است.
  */
-static FM_Result Ex29_PlayVideo(const char *path)
+static FM_Result FlashPlay_PlayVideo(const char *path)
 {
     char play[FM_PATH_MAX];
     FM_Result r;
@@ -155,7 +155,7 @@ static FM_Result Ex29_PlayVideo(const char *path)
 }
 
 /* همان برای موسیقی. */
-static FM_Result Ex29_PlayMusic(const char *path)
+static FM_Result FlashPlay_PlayMusic(const char *path)
 {
     char play[FM_PATH_MAX];
     FM_Result r;
@@ -171,7 +171,7 @@ static FM_Result Ex29_PlayMusic(const char *path)
 }
 
 /* ------------------------------------------------------------------ */
-/* ex29_2 — پیش‌بارگذاری یک پوشه                                       */
+/* FlashPlay_PreloadFolder — پیش‌بارگذاری یک پوشه                                       */
 /* ------------------------------------------------------------------ */
 /*
  * موقع راه‌اندازی همهٔ فایل‌های یک پوشه را روی فلش ببر. بعد از این،
@@ -182,7 +182,7 @@ static FM_Result Ex29_PlayMusic(const char *path)
  * کپی نمی‌کند، پس صدا زدن دوباره‌اش هم بی‌ضرر است — فقط کمی وقت
  * می‌گیرد.)
  */
-static FM_Result Ex29_PreloadFolder(const char *folder)
+static FM_Result FlashPlay_PreloadFolder(const char *folder)
 {
     FM_Dir *d;
     FM_DirEntry e;
@@ -228,7 +228,7 @@ static FM_Result Ex29_PreloadFolder(const char *folder)
 }
 
 /* ------------------------------------------------------------------ */
-/* ex29_3 — مقایسهٔ سرعت                                               */
+/* FlashPlay_Benchmark — مقایسهٔ سرعت                                               */
 /* ------------------------------------------------------------------ */
 /*
  * برای اینکه ببینید کش واقعاً چقدر کمک می‌کند، نه اینکه فرض کنید.
@@ -240,7 +240,7 @@ static FM_Result Ex29_PreloadFolder(const char *folder)
  *     ... خواندن کامل فایل ...
  *     uint32_t ms = HAL_GetTick() - t0;
  */
-static void Ex29_Benchmark(const char *path, uint32_t (*get_ms)(void))
+static void FlashPlay_Benchmark(const char *path, uint32_t (*get_ms)(void))
 {
     static uint8_t buf[4096];
     char cached[FM_PATH_MAX];
@@ -310,14 +310,14 @@ static void Ex29_Benchmark(const char *path, uint32_t (*get_ms)(void))
 }
 
 /* ------------------------------------------------------------------ */
-/* ex29_4 — کپی صریح بین حافظه‌ها                                      */
+/* FlashPlay_ManualCopy — کپی صریح بین حافظه‌ها                                      */
 /* ------------------------------------------------------------------ */
 /*
  * اگر نمی‌خواهید کش خودکار باشد و ترجیح می‌دهید خودتان کنترل کنید.
  * FM_Transfer تکه‌تکه کپی می‌کند و اندازهٔ تکه را با سکتور فلش هم‌تراز
  * می‌کند تا پاک‌کردن اضافی رخ ندهد.
  */
-static void Ex29_ManualCopy(void)
+static void FlashPlay_ManualCopy(void)
 {
     FM_TransferOpts o;
     FM_TransferInfo info;
@@ -342,4 +342,4 @@ static void Ex29_ManualCopy(void)
     }
 }
 
-#endif /* FM_EXAMPLE_29_PLAY_FROM_FLASH_H */
+#endif /* FM_TOPAPI_PLAY_FROM_FLASH_H */

@@ -8686,12 +8686,12 @@ static void test_player(void)
 
 #if FM_USE_AUDIO
 /* ================================================================ */
-/* Example 13 options: force_stereo (mono -> stereo upmix) + volume */
+/* audio_dma_player.h options: force_stereo (mono -> stereo upmix) + volume */
 /* ================================================================ */
 
 #include "../examples/audio_dma_player.h"
 
-#define EX13_TEST_HALF 2048u
+#define AUDIO_DMA_TEST_HALF 2048u
 
 typedef struct
 {
@@ -8699,78 +8699,78 @@ typedef struct
     uint32_t last_rate;
     uint16_t last_channels;
     size_t   last_count;
-} Ex13TestPortState;
+} AudioDmaTestPortState;
 
-static Ex13TestPortState ex13tp;
+static AudioDmaTestPortState audio_dma_tp;
 
-static FM_Result ex13_test_port_start(void *ctx, int16_t *samples,
+static FM_Result audio_dma_test_port_start(void *ctx, int16_t *samples,
                                       size_t count, uint32_t rate,
                                       uint16_t channels)
 {
     (void)ctx;
     (void)samples;
-    ex13tp.start_calls++;
-    ex13tp.last_rate = rate;
-    ex13tp.last_channels = channels;
-    ex13tp.last_count = count;
+    audio_dma_tp.start_calls++;
+    audio_dma_tp.last_rate = rate;
+    audio_dma_tp.last_channels = channels;
+    audio_dma_tp.last_count = count;
     return FM_OK;
 }
 
-static FM_Result ex13_test_port_stop(void *ctx)
+static FM_Result audio_dma_test_port_stop(void *ctx)
 {
     (void)ctx;
     return FM_OK;
 }
 
-static const Ex13_AudioDmaPort ex13_test_port =
+static const AudioDma_Port audio_dma_test_port =
 {
-    ex13_test_port_start,
-    ex13_test_port_stop,
+    audio_dma_test_port_start,
+    audio_dma_test_port_stop,
     NULL
 };
 
-/* Record the track lifecycle callbacks, driven by the Ex13 player. */
+/* Record the track lifecycle callbacks, driven by the AudioDma player. */
 typedef struct
 {
     uint32_t start_calls;
     uint32_t end_calls;
     char start_path[FM_PATH_MAX];
     char end_path[FM_PATH_MAX];
-} Ex13TrackState;
+} AudioDmaTrackState;
 
-static Ex13TrackState ex13track;
+static AudioDmaTrackState audio_dma_track;
 
-static void ex13_test_track_start(void *ctx, const char *path,
+static void audio_dma_test_track_start(void *ctx, const char *path,
                                   const FM_AudioInfo *info)
 {
     (void)ctx;
     (void)info;
-    ex13track.start_calls++;
-    if (path != NULL && ex13track.start_path[0] == '\0')
+    audio_dma_track.start_calls++;
+    if (path != NULL && audio_dma_track.start_path[0] == '\0')
     {
-        (void)strncpy(ex13track.start_path, path,
-                      sizeof(ex13track.start_path) - 1u);
-        ex13track.start_path[sizeof(ex13track.start_path) - 1u] = '\0';
+        (void)strncpy(audio_dma_track.start_path, path,
+                      sizeof(audio_dma_track.start_path) - 1u);
+        audio_dma_track.start_path[sizeof(audio_dma_track.start_path) - 1u] = '\0';
     }
 }
 
-static void ex13_test_track_end(void *ctx, const char *path,
+static void audio_dma_test_track_end(void *ctx, const char *path,
                                 const FM_AudioInfo *info)
 {
     (void)ctx;
     (void)info;
-    ex13track.end_calls++;
+    audio_dma_track.end_calls++;
     if (path != NULL)
     {
-        (void)strncpy(ex13track.end_path, path,
-                      sizeof(ex13track.end_path) - 1u);
-        ex13track.end_path[sizeof(ex13track.end_path) - 1u] = '\0';
+        (void)strncpy(audio_dma_track.end_path, path,
+                      sizeof(audio_dma_track.end_path) - 1u);
+        audio_dma_track.end_path[sizeof(audio_dma_track.end_path) - 1u] = '\0';
     }
 }
 
 /*
  * A 0.25 s mono ramp (8 kHz, 2000 frames, sample i == i*8) played through
- * Ex13 with force_stereo + software volume.  The host port does nothing,
+ * AudioDma with force_stereo + software volume.  The host port does nothing,
  * so the DMA half/full callbacks are simulated to drive refills:
  *
  *   1. StartEx prefills both halves: first 2048 channel samples are
@@ -8779,17 +8779,17 @@ static void ex13_test_track_end(void *ctx, const char *path,
  *      wraparound refills half 0 from the top of the same track:
  *      samples must now be halved.
  */
-static void test_ex13_options(void)
+static void test_audio_dma_options(void)
 {
-    Ex13_AudioDma x;
-    Ex13_AudioDmaOptions opts;
+    AudioDma x;
+    AudioDma_Options opts;
     FM_AudioWriter w;
     FM_Result r;
     uint32_t i;
     int bad;
-    static int16_t dma_buf[2 * EX13_TEST_HALF] __attribute__((aligned(32)));
+    static int16_t dma_buf[2 * AUDIO_DMA_TEST_HALF] __attribute__((aligned(32)));
 
-    TEST("Ex13 options: mono upmix + software volume");
+    TEST("AudioDma options: mono upmix + software volume");
     (void)Directory_DeleteRecursive("/sa13");
     r = Directory_Create("/sa13");
     if (r != FM_OK && r != FM_ERR_EXISTS)
@@ -8817,20 +8817,20 @@ static void test_ex13_options(void)
         }
     }
 
-    memset(&ex13tp, 0, sizeof(ex13tp));
-    memset(&ex13track, 0, sizeof(ex13track));
+    memset(&audio_dma_tp, 0, sizeof(audio_dma_tp));
+    memset(&audio_dma_track, 0, sizeof(audio_dma_track));
     if (r == FM_OK)
     {
         opts.force_stereo = FM_TRUE;
         opts.volume = (int16_t)0x7FFF;
-        r = Ex13_AudioDmaStartEx(&x, "/sa13", &ex13_test_port, NULL,
-                                 dma_buf, EX13_TEST_HALF, &opts);
+        r = AudioDma_StartEx(&x, "/sa13", &audio_dma_test_port, NULL,
+                                 dma_buf, AUDIO_DMA_TEST_HALF, &opts);
     }
 
     /* Start reported stereo (forced) at the file rate, full buffer. */
     if (r == FM_OK &&
-        (ex13tp.last_rate != 8000u || ex13tp.last_channels != 2u ||
-         ex13tp.last_count != 2u * (size_t)EX13_TEST_HALF))
+        (audio_dma_tp.last_rate != 8000u || audio_dma_tp.last_channels != 2u ||
+         audio_dma_tp.last_count != 2u * (size_t)AUDIO_DMA_TEST_HALF))
     {
         r = FM_ERR_INTERNAL;
     }
@@ -8840,9 +8840,9 @@ static void test_ex13_options(void)
      * so end + the next track's start are observed. */
     if (r == FM_OK)
     {
-        Ex13_AudioDmaSetTrackStart(&x, ex13_test_track_start, NULL);
-        Ex13_AudioDmaSetTrackEnd(&x, ex13_test_track_end, NULL);
-        if (ex13track.start_calls != 1u || ex13track.start_path[0] == '\0')
+        AudioDma_SetTrackStart(&x, audio_dma_test_track_start, NULL);
+        AudioDma_SetTrackEnd(&x, audio_dma_test_track_end, NULL);
+        if (audio_dma_track.start_calls != 1u || audio_dma_track.start_path[0] == '\0')
         {
             r = FM_ERR_INTERNAL;
         }
@@ -8850,7 +8850,7 @@ static void test_ex13_options(void)
 
     /* Prefilled half 0: frames 0..1023 upmixed at 100%. */
     bad = 0;
-    for (i = 0; i < (uint32_t)(EX13_TEST_HALF / 2u); i++)
+    for (i = 0; i < (uint32_t)(AUDIO_DMA_TEST_HALF / 2u); i++)
     {
         int16_t expect = (int16_t)((uint32_t)i * 8u);
 
@@ -8874,12 +8874,12 @@ static void test_ex13_options(void)
      * the same track, refilling both halves at the new gain). */
     if (r == FM_OK)
     {
-        Ex13_AudioDmaSetVolume(&x, 16383);
-        Ex13_AudioDmaHalfCallback(&x);
-        (void)Ex13_AudioDmaPoll(&x);
-        Ex13_AudioDmaFullCallback(&x);
-        r = Ex13_AudioDmaPoll(&x);
-        if (r == FM_OK && !Ex13_AudioDmaIsRunning(&x))
+        AudioDma_SetVolume(&x, 16383);
+        AudioDma_HalfCallback(&x);
+        (void)AudioDma_Poll(&x);
+        AudioDma_FullCallback(&x);
+        r = AudioDma_Poll(&x);
+        if (r == FM_OK && !AudioDma_IsRunning(&x))
         {
             r = FM_ERR_INTERNAL;
         }
@@ -8889,7 +8889,7 @@ static void test_ex13_options(void)
     if (r == FM_OK)
     {
         bad = 0;
-        for (i = 0; i < (uint32_t)(EX13_TEST_HALF / 2u); i++)
+        for (i = 0; i < (uint32_t)(AUDIO_DMA_TEST_HALF / 2u); i++)
         {
             int16_t v = (int16_t)((uint32_t)i * 8u);
             int16_t expect = (int16_t)((int)v / 2);
@@ -8918,7 +8918,7 @@ static void test_ex13_options(void)
      * ended (end_calls >= 1) and the same track (REPEAT_ALL with one item)
      * restarted (start_calls == 2). */
     if (r == FM_OK &&
-        (ex13track.end_calls < 1u || ex13track.start_calls != 2u))
+        (audio_dma_track.end_calls < 1u || audio_dma_track.start_calls != 2u))
     {
         r = FM_ERR_INTERNAL;
     }
@@ -8929,15 +8929,15 @@ static void test_ex13_options(void)
      * instead of calling Audio_ReadStereo with frame_count = 0.
      */
     {
-        Ex13_AudioDma x2;
-        Ex13_AudioDmaOptions opts2;
+        AudioDma x2;
+        AudioDma_Options opts2;
         FM_Result r2 = FM_OK;
         static int16_t odd_buf[2 * 1025u] __attribute__((aligned(32)));
 
-        TEST("Ex13 options: odd half size with force_stereo");
+        TEST("AudioDma options: odd half size with force_stereo");
         opts2.force_stereo = FM_TRUE;
         opts2.volume = (int16_t)0x7FFF;
-        r2 = Ex13_AudioDmaStartEx(&x2, "/sa13", &ex13_test_port, NULL,
+        r2 = AudioDma_StartEx(&x2, "/sa13", &audio_dma_test_port, NULL,
                                   odd_buf, 1025u, &opts2);
         if (r2 == FM_OK)
         {
@@ -8969,26 +8969,26 @@ static void test_ex13_options(void)
                 r2 = FM_ERR_INTERNAL;
             }
         }
-        (void)Ex13_AudioDmaStop(&x2);
-        CHECK_RESULT(r2, "ex13 odd half + force_stereo");
+        (void)AudioDma_Stop(&x2);
+        CHECK_RESULT(r2, "AudioDma odd half + force_stereo");
     }
 
-    (void)Ex13_AudioDmaStop(&x);
+    (void)AudioDma_Stop(&x);
     (void)File_Delete("/sa13/ramp.wav");
     (void)Directory_DeleteRecursive("/sa13");
-    CHECK_RESULT(r, "ex13 force_stereo + volume");
+    CHECK_RESULT(r, "AudioDma force_stereo + volume");
 }
 
 /* ================================================================ */
-/* Example 17 (SimpleAudio) transitions: repeated manual Next/Prev   */
+/* simple_audio.h (SimpleAudio) transitions: repeated manual Next/Prev   */
 /* ---------------------------------------------------------------- */
 /* On the H7 board the player died silently after a few Next/Prev    */
 /* presses: the 3rd/4th track change produced no "board_start" log   */
-/* (it failed inside ex13_audio_start_next, before port->start) and  */
+/* (it failed inside audio_dma_start_next, before port->start) and  */
 /* the player stayed dead with no further output.  This mirrors the  */
-/* header's exact transition sequence through the real ex13 engine + */
+/* header's exact transition sequence through the real AudioDma engine + */
 /* Player + Audio stack on the host:                                 */
-/*   running = FALSE;  port->stop();  ex13_audio_start_next();       */
+/*   running = FALSE;  port->stop();  audio_dma_start_next();       */
 /* with IRQ "refill" flags still dirty at stop time, a mixed         */
 /* MP3/WAV, mono/stereo, multi-rate playlist (MP3->WAV and back),    */
 /* plus the automatic end-of-track advance path.  Nine manual        */
@@ -9028,7 +9028,7 @@ static FM_Result sa17_port_stop(void *ctx)
     return FM_OK;
 }
 
-static const Ex13_AudioDmaPort sa17_port =
+static const AudioDma_Port sa17_port =
 {
     sa17_port_start,
     sa17_port_stop,
@@ -9036,17 +9036,17 @@ static const Ex13_AudioDmaPort sa17_port =
 };
 
 /* Simulate `halves` half-buffer consumptions (IRQ -> poll cycles). */
-static FM_Result sa17_pump(Ex13_AudioDma *x, uint32_t halves)
+static FM_Result sa17_pump(AudioDma *x, uint32_t halves)
 {
     uint32_t t;
     FM_Result r = FM_OK;
 
     for (t = 0; t < halves; t++)
     {
-        Ex13_AudioDmaHalfCallback(x);
-        (void)Ex13_AudioDmaPoll(x);
-        Ex13_AudioDmaFullCallback(x);
-        r = Ex13_AudioDmaPoll(x);
+        AudioDma_HalfCallback(x);
+        (void)AudioDma_Poll(x);
+        AudioDma_FullCallback(x);
+        r = AudioDma_Poll(x);
         if (r != FM_OK)
         {
             break;
@@ -9056,7 +9056,7 @@ static FM_Result sa17_pump(Ex13_AudioDma *x, uint32_t halves)
 }
 
 /* Exact mirror of SimpleAudio_Next() in simple_audio.h. */
-static FM_Result sa17_next(Ex13_AudioDma *x)
+static FM_Result sa17_next(AudioDma *x)
 {
     if (!x->running)
     {
@@ -9064,11 +9064,11 @@ static FM_Result sa17_next(Ex13_AudioDma *x)
     }
     x->running = FM_FALSE;
     (void)x->port->stop(x->port_context);
-    return ex13_audio_start_next(x);
+    return audio_dma_start_next(x);
 }
 
 /* Exact mirror of SimpleAudio_Prev() (index math included). */
-static FM_Result sa17_prev(Ex13_AudioDma *x)
+static FM_Result sa17_prev(AudioDma *x)
 {
     uint32_t count = Player_Count(&x->player);
     uint32_t idx;
@@ -9082,7 +9082,7 @@ static FM_Result sa17_prev(Ex13_AudioDma *x)
                                                  1u);
     x->running = FM_FALSE;
     (void)x->port->stop(x->port_context);
-    return ex13_audio_play_from(x, idx);
+    return audio_dma_play_from(x, idx);
 }
 
 static int sa17_buf_maxabs(const int16_t *buf, size_t n)
@@ -9397,8 +9397,8 @@ static FM_Result sa17d_write_wav_odd_tail(const char *path, uint32_t rate,
 
 static void test_wav_truncated_board_geometry(void)
 {
-    Ex13_AudioDma x;
-    Ex13_AudioDmaOptions opts;
+    AudioDma x;
+    AudioDma_Options opts;
     FM_AudioInfo info;
     FM_Audio wav;
     FM_Result r;
@@ -9573,7 +9573,7 @@ static void test_wav_truncated_board_geometry(void)
     /* Board geometry: the board's exact layout (half = 32767, odd;
      * force_stereo; 48 kHz stereo WAV in the middle of the playlist).
      * The board froze inside fill half 1 of exactly this shape. */
-    TEST("ex13 board geometry: MP3->WAV->MP3 at half=32767");
+    TEST("AudioDma board geometry: MP3->WAV->MP3 at half=32767");
     (void)Directory_DeleteRecursive("/sa17e");
     r = Directory_Create("/sa17e");
     if (r != FM_OK && r != FM_ERR_EXISTS)
@@ -9594,7 +9594,7 @@ static void test_wav_truncated_board_geometry(void)
     {
         opts.force_stereo = FM_TRUE;
         opts.volume = (int16_t)0x7FFF;
-        r = Ex13_AudioDmaStartEx(&x, "/sa17e", &sa17_port, NULL,
+        r = AudioDma_StartEx(&x, "/sa17e", &sa17_port, NULL,
                                  board_buf, SA17D_HALF, &opts);
     }
     if (r == FM_OK && Player_Current(&x.player) != 0u)
@@ -9655,7 +9655,7 @@ static void test_wav_truncated_board_geometry(void)
             r = FM_ERR_INTERNAL;
         }
     }
-    (void)Ex13_AudioDmaStop(&x);
+    (void)AudioDma_Stop(&x);
     (void)Directory_DeleteRecursive("/sa17d");
     (void)Directory_DeleteRecursive("/sa17e");
     CHECK_RESULT(r, "board-geometry WAV transitions");
@@ -9663,8 +9663,8 @@ static void test_wav_truncated_board_geometry(void)
 
 static void test_simple_audio_track_change(void)
 {
-    Ex13_AudioDma x;
-    Ex13_AudioDmaOptions opts;
+    AudioDma x;
+    AudioDma_Options opts;
     FM_Result r;
     static int16_t dma_buf[2 * SA17_HALF] __attribute__((aligned(32)));
 
@@ -9710,7 +9710,7 @@ static void test_simple_audio_track_change(void)
     {
         opts.force_stereo = FM_TRUE;
         opts.volume = (int16_t)0x7FFF;
-        r = Ex13_AudioDmaStartEx(&x, "/sa17", &sa17_port, NULL,
+        r = AudioDma_StartEx(&x, "/sa17", &sa17_port, NULL,
                                  dma_buf, SA17_HALF, &opts);
     }
     {
@@ -9726,7 +9726,7 @@ static void test_simple_audio_track_change(void)
             (void)sa17_pump(&x, 2u);
             /* Leave the half flag dirty: on the board the key can be
              * pressed right after a half-callback, before the poll. */
-            Ex13_AudioDmaHalfCallback(&x);
+            AudioDma_HalfCallback(&x);
             if (step < 6u)
             {
                 r = sa17_next(&x);
@@ -9765,7 +9765,7 @@ static void test_simple_audio_track_change(void)
         r = Player_Seek(&x.player, 1.0);
         if (r == FM_OK)
         {
-            r = ex13_audio_start_current(&x);
+            r = audio_dma_start_current(&x);
         }
         if (r == FM_OK)
         {
@@ -9780,13 +9780,13 @@ static void test_simple_audio_track_change(void)
     /* Stop + Begin again (SimpleAudio_Stop + SimpleAudio_Begin). */
     if (r == FM_OK)
     {
-        (void)Ex13_AudioDmaStop(&x);
+        (void)AudioDma_Stop(&x);
         opts.force_stereo = FM_TRUE;
         opts.volume = (int16_t)0x7FFF;
-        r = Ex13_AudioDmaStartEx(&x, "/sa17", &sa17_port, NULL,
+        r = AudioDma_StartEx(&x, "/sa17", &sa17_port, NULL,
                                  dma_buf, SA17_HALF, &opts);
     }
-    (void)Ex13_AudioDmaStop(&x);
+    (void)AudioDma_Stop(&x);
     (void)Directory_DeleteRecursive("/sa17");
     CHECK_RESULT(r, "simple audio manual transitions");
 
@@ -9818,7 +9818,7 @@ static void test_simple_audio_track_change(void)
         {
             opts.force_stereo = FM_TRUE;
             opts.volume = (int16_t)0x7FFF;
-            r = Ex13_AudioDmaStartEx(&x, "/sa17b", &sa17_port, NULL,
+            r = AudioDma_StartEx(&x, "/sa17b", &sa17_port, NULL,
                                      dma_buf, SA17_HALF, &opts);
         }
         if (r == FM_OK)
@@ -9826,14 +9826,14 @@ static void test_simple_audio_track_change(void)
             starts_before = sa17tp.start_calls;
             for (cycles = 0; r == FM_OK && cycles < 64u; cycles++)
             {
-                Ex13_AudioDmaHalfCallback(&x);
-                r = Ex13_AudioDmaPoll(&x);
+                AudioDma_HalfCallback(&x);
+                r = AudioDma_Poll(&x);
                 if (r != FM_OK)
                 {
                     break;
                 }
-                Ex13_AudioDmaFullCallback(&x);
-                r = Ex13_AudioDmaPoll(&x);
+                AudioDma_FullCallback(&x);
+                r = AudioDma_Poll(&x);
                 if (r == FM_OK &&
                     sa17tp.start_calls - starts_before >= 4u)
                 {
@@ -9850,14 +9850,14 @@ static void test_simple_audio_track_change(void)
          * Phase C: the SimpleAudio_Poll recovery path. When a refill
          * fails the engine dies exactly like this (running=FALSE, DMA
          * stopped, file still open); the header then calls
-         * ex13_audio_play_from(current) and must bring the player back.
+         * audio_dma_play_from(current) and must bring the player back.
          */
         if (r == FM_OK)
         {
             x.running = FM_FALSE;
             (void)x.port->stop(x.port_context);
-            r = ex13_audio_play_from(&x, Player_Current(&x.player));
-            if (r == FM_OK && !Ex13_AudioDmaIsRunning(&x))
+            r = audio_dma_play_from(&x, Player_Current(&x.player));
+            if (r == FM_OK && !AudioDma_IsRunning(&x))
             {
                 r = FM_ERR_INTERNAL;
             }
@@ -9890,12 +9890,12 @@ static void test_simple_audio_track_change(void)
             r2 = File_Rename(dead, saved);
             if (r2 == FM_OK)
             {
-                r2 = ex13_audio_play_from(&x, cur_idx);
+                r2 = audio_dma_play_from(&x, cur_idx);
                 if (r2 == FM_OK)
                 {
                     /* the vanished item must have been skipped */
                     if (Player_Current(&x.player) == cur_idx ||
-                        !Ex13_AudioDmaIsRunning(&x))
+                        !AudioDma_IsRunning(&x))
                     {
                         r = FM_ERR_INTERNAL;
                     }
@@ -9907,7 +9907,7 @@ static void test_simple_audio_track_change(void)
                 (void)File_Rename(saved, dead);
             }
         }
-        (void)Ex13_AudioDmaStop(&x);
+        (void)AudioDma_Stop(&x);
     }
     (void)Directory_DeleteRecursive("/sa17b");
     CHECK_RESULT(r, "simple audio auto advance + recovery");
@@ -9964,13 +9964,13 @@ static void test_simple_audio_track_change(void)
         {
             opts.force_stereo = FM_TRUE;
             opts.volume = (int16_t)0x7FFF;
-            r = Ex13_AudioDmaStartEx(&x, "/sa17c", &sa17_port, NULL,
+            r = AudioDma_StartEx(&x, "/sa17c", &sa17_port, NULL,
                                      dma_buf, SA17_HALF, &opts);
         }
         for (step = 0; r == FM_OK && step < 6u; step++)
         {
             (void)sa17_pump(&x, 1u);
-            Ex13_AudioDmaHalfCallback(&x);
+            AudioDma_HalfCallback(&x);
             r = sa17_next(&x);
             if (r == FM_OK && Player_Current(&x.player) != expect_idx[step])
             {
@@ -9986,7 +9986,7 @@ static void test_simple_audio_track_change(void)
                 r = FM_ERR_INTERNAL;
             }
         }
-        (void)Ex13_AudioDmaStop(&x);
+        (void)AudioDma_Stop(&x);
     }
     (void)Directory_DeleteRecursive("/sa17c");
     CHECK_RESULT(r, "simple audio mp3->wav special files");
@@ -20491,7 +20491,7 @@ int main(void)
     RUN_SUITE(test_player);
 #endif
 #if FM_USE_AUDIO
-    RUN_SUITE(test_ex13_options);
+    RUN_SUITE(test_audio_dma_options);
     RUN_SUITE(test_opus_ogg);
     RUN_SUITE(test_adpcm_small_chunks);
 #endif

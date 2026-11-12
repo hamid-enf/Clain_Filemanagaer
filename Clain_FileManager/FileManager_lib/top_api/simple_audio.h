@@ -1,8 +1,8 @@
 /*
- * Example 17 — SimpleAudio: «صدا ساده» — پخش + داده + ضبط در یک دست
+ * simple_audio.h — SimpleAudio: «صدا ساده» — پخش + داده + ضبط در یک دست
  *
  * هدف: کار با صدا را به ساده‌ترین شکل ممکن بیاورد — مثل مثال‌های فایل.
- * این header را در main.c include کنید. با SimpleVideo (example 19) هم
+ * این header را در main.c include کنید. با SimpleVideo (simple_video.h) هم
  * می‌تواند در یک فایل باشد: callbackهای HAL_I2S مشترک‌اند؛ Begin یکی
  * Stop دیگری را می‌زند اگر همان hi2s1 را داشته باشد.
  *
@@ -47,7 +47,7 @@
  *
  *   int main(void)
  *   {
- *       ... SystemClock_Config(); SD_examples_begin(); ...
+ *       ... SystemClock_Config(); SdCard_Begin(); ...
  *       if (SimpleAudio_Begin() != FM_OK) { ... }
  *
  *       while (1)
@@ -74,7 +74,7 @@
  * سکشن .dma_buffer را در linker به RAM قابل دسترسی DMA (AXI-SRAM/
  * SRAM1/2) بگذارید (همان linker script فعلی‌تان، بدون تغییر).
  *
- * پیش‌نیاز: مونت SD (SD_examples_begin یا معادلش) قبل از Begin().
+ * پیش‌نیاز: مونت SD (SdCard_Begin یا معادلش) قبل از Begin().
  *
  * تنظیمات (پیش از include یا در preprocessor کل پروژه):
  *   SIMPLE_AUDIO_FOLDER           پوشهٔ لیست پخش (پیش‌فرض "/music")
@@ -105,9 +105,9 @@
 #include "../top_api/simple_idle_mux.h"
 
 /* log مراحل تعویض ترک را هم ببینیم (کجا دقیقاً می‌ماند؟). با define
- * نگه‌داشتن، هزینهٔ صفر دارد و برای بقیهٔ مصرف‌کننده‌های example 13
+ * نگه‌داشتن، هزینهٔ صفر دارد و برای بقیهٔ مصرف‌کننده‌های audio_dma_player.h
  * فعال نمی‌شود. */
-#define EX13_DEBUG_LOG(...) FM_Log("ex13: " __VA_ARGS__)
+#define AUDIO_DMA_DEBUG_LOG(...) FM_Log("AudioDma: " __VA_ARGS__)
 
 #include "../top_api/audio_dma_player.h"
 
@@ -369,7 +369,7 @@ static FM_Result simple_audio_board_rx_stop(void)
 }
 #endif
 
-static const Ex13_AudioDmaPort simple_audio_port =
+static const AudioDma_Port simple_audio_port =
 {
     simple_audio_board_start,
     simple_audio_board_stop,
@@ -389,7 +389,7 @@ static const Ex13_AudioDmaPort simple_audio_port =
 
 typedef struct
 {
-    Ex13_AudioDma dma;        /* موتور پخش (example 13)          */
+    AudioDma dma;        /* موتور پخش (audio_dma_player.h)          */
 
     uint8_t volume_pct;       /* صدای فعلی (0..100)              */
     uint32_t restart_count;   /* underrun‌های خودکارِ restart    */
@@ -434,7 +434,7 @@ static void simple_audio_i2s_half(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s == &hi2s1)
     {
-        Ex13_AudioDmaHalfCallback(&sa.dma);
+        AudioDma_HalfCallback(&sa.dma);
     }
 }
 
@@ -442,7 +442,7 @@ static void simple_audio_i2s_full(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s == &hi2s1)
     {
-        Ex13_AudioDmaFullCallback(&sa.dma);
+        AudioDma_FullCallback(&sa.dma);
     }
 }
 
@@ -569,11 +569,11 @@ typedef struct
  * هشدار: این تابع روی مسیر پرکردن DMA صدا زده می‌شود. کار سنگین یا
  * نوشتن مستقیم فایل داخلش باعث گرسنگی DMA و تق‌تق صدا می‌شود.
  */
-typedef Ex13_AudioDmaPcmTapFn SimpleAudio_PcmTapFn;
+typedef AudioDma_PcmTapFn SimpleAudio_PcmTapFn;
 
 void SimpleAudio_SetPcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
 {
-    Ex13_AudioDmaSetPcmTap(&sa.dma, fn, ctx);
+    AudioDma_SetPcmTap(&sa.dma, fn, ctx);
 }
 
 /* Pre-I2S tap: raw decoded PCM before volume/gain, editable.
@@ -583,17 +583,17 @@ void SimpleAudio_SetPcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
  * starve DMA. */
 void SimpleAudio_SetPrePcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
 {
-    Ex13_AudioDmaSetPrePcmTap(&sa.dma, fn, ctx);
+    AudioDma_SetPrePcmTap(&sa.dma, fn, ctx);
 }
 
 /* Post-gain tap (same as SetPcmTap): after volume, exactly what speaker gets.
  * Also editable before cache clean. Provided as explicit alias. */
 void SimpleAudio_SetPostPcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
 {
-    Ex13_AudioDmaSetPostPcmTap(&sa.dma, fn, ctx);
+    AudioDma_SetPostPcmTap(&sa.dma, fn, ctx);
 }
 
-typedef Ex13_AudioDmaTrackFn SimpleAudio_TrackFn;
+typedef AudioDma_TrackFn SimpleAudio_TrackFn;
 
 /* Track lifecycle callbacks: on_track_start fires once when a track begins
  * playing; on_track_end fires when it has finished (data fully consumed).
@@ -603,17 +603,17 @@ typedef Ex13_AudioDmaTrackFn SimpleAudio_TrackFn;
  * super-loop, not an ISR. */
 void SimpleAudio_SetTrackStart(SimpleAudio_TrackFn fn, void *ctx)
 {
-    Ex13_AudioDmaSetTrackStart(&sa.dma, fn, ctx);
+    AudioDma_SetTrackStart(&sa.dma, fn, ctx);
 }
 
 void SimpleAudio_SetTrackEnd(SimpleAudio_TrackFn fn, void *ctx)
 {
-    Ex13_AudioDmaSetTrackEnd(&sa.dma, fn, ctx);
+    AudioDma_SetTrackEnd(&sa.dma, fn, ctx);
 }
 
 FM_Result SimpleAudio_Begin(void)
 {
-    Ex13_AudioDmaOptions opts;
+    AudioDma_Options opts;
     FM_Result r;
 
     if (sa.dma.running || sa.rec_active)
@@ -638,7 +638,7 @@ FM_Result SimpleAudio_Begin(void)
            (((uintptr_t)simple_audio_dma_buf & 0x3u) == 0u) ? 1 : 0,
            (unsigned long)SIMPLE_AUDIO_HALF_SAMPLES, SIMPLE_AUDIO_FOLDER);
 
-    r = Ex13_AudioDmaStartEx(
+    r = AudioDma_StartEx(
         &sa.dma, SIMPLE_AUDIO_FOLDER, &simple_audio_port, &hi2s1,
         simple_audio_dma_buf, SIMPLE_AUDIO_HALF_SAMPLES, &opts);
     if (r != FM_OK)
@@ -739,7 +739,7 @@ static FM_Result simple_audio_apply_pending(void)
         }
         sa.dma.running = FM_FALSE;
         (void)simple_audio_board_stop(&hi2s1);
-        r = ex13_audio_start_current(&sa.dma);
+        r = audio_dma_start_current(&sa.dma);
         if (r == FM_OK)
         {
             FM_Log("SimpleAudio: resumed at %.2f s\n", want);
@@ -754,7 +754,7 @@ static FM_Result simple_audio_apply_pending(void)
 
     if (cmd == SA_CMD_NEXT)
     {
-        r = ex13_audio_start_next(&sa.dma);
+        r = audio_dma_start_next(&sa.dma);
         if (r == FM_OK)
         {
             FM_Log("SimpleAudio: next -> %s\n",
@@ -782,7 +782,7 @@ static FM_Result simple_audio_apply_pending(void)
         idx = (Player_Current(&sa.dma.player) == 0u)
                   ? (count - 1u)
                   : (Player_Current(&sa.dma.player) - 1u);
-        r = ex13_audio_play_from(&sa.dma, idx);
+        r = audio_dma_play_from(&sa.dma, idx);
         if (r == FM_OK)
         {
             FM_Log("SimpleAudio: prev -> %s\n",
@@ -811,7 +811,7 @@ static FM_Result simple_audio_apply_pending(void)
             FM_Log("SimpleAudio: seek past end (mode %d) -> handle EOF\n", (int)sa.dma.play_mode);
             sa.dma.running = FM_FALSE;
             (void)simple_audio_board_stop(&hi2s1);
-            r = ex13_audio_handle_eof(&sa.dma);
+            r = audio_dma_handle_eof(&sa.dma);
             if (r == FM_OK && sa.dma.running)
             {
                 FM_Log("SimpleAudio: -> %s\n",
@@ -830,7 +830,7 @@ static FM_Result simple_audio_apply_pending(void)
                    File_GetErrorString(r), (int)r);
             sa.dma.running = FM_FALSE;
             (void)simple_audio_board_stop(&hi2s1);
-            r = ex13_audio_start_current(&sa.dma);
+            r = audio_dma_start_current(&sa.dma);
             if (r != FM_OK)
             {
                 FM_Log("SimpleAudio: seek restore failed: %s (%d)\n",
@@ -840,11 +840,11 @@ static FM_Result simple_audio_apply_pending(void)
         }
         sa.dma.running = FM_FALSE;
         (void)simple_audio_board_stop(&hi2s1);
-        r = ex13_audio_start_current(&sa.dma);
+        r = audio_dma_start_current(&sa.dma);
         if (r == FM_ERR_EOF)
         {
             FM_Log("SimpleAudio: seek past end (mode %d) -> handle EOF\n", (int)sa.dma.play_mode);
-            r = ex13_audio_handle_eof(&sa.dma);
+            r = audio_dma_handle_eof(&sa.dma);
             if (r == FM_OK && sa.dma.running)
             {
                 FM_Log("SimpleAudio: -> %s\n",
@@ -883,7 +883,7 @@ static FM_Result simple_audio_apply_pending(void)
         {
             if (strcmp(Player_ItemPath(&sa.dma.player, i), path) == 0)
             {
-                r = ex13_audio_play_from(&sa.dma, i);
+                r = audio_dma_play_from(&sa.dma, i);
                 if (r == FM_OK)
                 {
                     FM_Log("SimpleAudio: play -> %s\n", path);
@@ -910,7 +910,7 @@ static FM_Result simple_audio_apply_pending(void)
         {
             if (strcmp(Player_ItemPath(&sa.dma.player, i), path) == 0)
             {
-                r = ex13_audio_play_from(&sa.dma, i);
+                r = audio_dma_play_from(&sa.dma, i);
                 if (r == FM_OK)
                 {
                     FM_Log("SimpleAudio: play -> %s\n", path);
@@ -1005,8 +1005,8 @@ FM_Result SimpleAudio_Poll(void)
         {
             if (sa.pause_need_restart == 0u)
             {
-                ex13_audio_silence_half(&sa.dma, 0u);
-                ex13_audio_silence_half(&sa.dma, 1u);
+                audio_dma_silence_half(&sa.dma, 0u);
+                audio_dma_silence_half(&sa.dma, 1u);
                 sa.dma.refill[0] = sa.dma.refill[1] = 0u;
                 sa.pause_need_restart = 1u;
             }
@@ -1017,7 +1017,7 @@ FM_Result SimpleAudio_Poll(void)
                     if (sa.dma.refill[half] != 0u)
                     {
                         sa.dma.refill[half] = 0u;
-                        ex13_audio_silence_half(&sa.dma, half);
+                        audio_dma_silence_half(&sa.dma, half);
                     }
                 }
             }
@@ -1038,7 +1038,7 @@ FM_Result SimpleAudio_Poll(void)
             (sa.dma.refill[0] != 0u || sa.dma.refill[1] != 0u)
                 ? FM_TRUE : FM_FALSE;
 
-        r = Ex13_AudioDmaPoll(&sa.dma);
+        r = AudioDma_Poll(&sa.dma);
         elapsed = HAL_GetTick() - started;
 
         /* UART Next/Seek sets running=FALSE while Poll is inside the
@@ -1112,7 +1112,7 @@ FM_Result SimpleAudio_Poll(void)
              *
              * حالا هر خطایی تا SIMPLE_AUDIO_MAX_RESTARTS بار ترک فعلی
              * را از اول restart می‌کند تا اجرا از کار نیفتد؛
-             * ex13_audio_play_from همچنین ترک‌هایی که باز/decode نمی‌شوند
+             * audio_dma_play_from همچنین ترک‌هایی که باز/decode نمی‌شوند
              * را رد می‌کند، پس حتی یک فایل خراب به‌تنهایی پلیر را
              * نمی‌کُشد.
              */
@@ -1125,7 +1125,7 @@ FM_Result SimpleAudio_Poll(void)
 
             if (sa.restart_count <= SIMPLE_AUDIO_MAX_RESTARTS)
             {
-                FM_Result r2 = ex13_audio_play_from(
+                FM_Result r2 = audio_dma_play_from(
                     &sa.dma, Player_Current(&sa.dma.player));
 
                 if (r2 == FM_OK)
@@ -1159,7 +1159,7 @@ FM_Result SimpleAudio_Stop(void)
     sa.pause_need_restart = 0u;
     SimpleI2S_Drop(SimpleAudio_Stop);
     SimpleIdle_Remove(simple_audio_idle);
-    r = Ex13_AudioDmaStop(&sa.dma);
+    r = AudioDma_Stop(&sa.dma);
 
     if (r == FM_OK)
     {
@@ -1174,7 +1174,7 @@ FM_Bool SimpleAudio_IsRunning(void)
     {
         return FM_TRUE;
     }
-    return Ex13_AudioDmaIsRunning(&sa.dma);
+    return AudioDma_IsRunning(&sa.dma);
 }
 
 FM_Bool SimpleAudio_IsPaused(void)
@@ -1381,7 +1381,7 @@ FM_Result SimpleAudio_SetVolume(uint8_t percent)
         percent = 100u;
     }
     sa.volume_pct = percent;
-    Ex13_AudioDmaSetVolume(
+    AudioDma_SetVolume(
         &sa.dma, (int16_t)(((uint32_t)percent * 0x7FFFu) / 100u));
     return FM_OK;
 }
@@ -1395,12 +1395,12 @@ FM_Result SimpleAudio_SetVolume(uint8_t percent)
 FM_Result SimpleAudio_SetPlayMode(FM_PlayMode mode)
 {
     if ((int)mode < FM_PLAY_MODE_STOP || (int)mode > FM_PLAY_MODE_REPEAT_ALL) return FM_ERR_INVALID_ARGUMENT;
-    Ex13_AudioDmaSetPlayMode(&sa.dma, mode);
+    AudioDma_SetPlayMode(&sa.dma, mode);
     FM_Log("SimpleAudio: SetPlayMode(%d) %s\n", (int)mode,
            mode==FM_PLAY_MODE_STOP?"STOP":mode==FM_PLAY_MODE_NEXT?"NEXT":mode==FM_PLAY_MODE_REPEAT_ONE?"REPEAT_ONE":"REPEAT_ALL");
     return FM_OK;
 }
-FM_PlayMode SimpleAudio_GetPlayMode(void) { return Ex13_AudioDmaGetPlayMode(&sa.dma); }
+FM_PlayMode SimpleAudio_GetPlayMode(void) { return AudioDma_GetPlayMode(&sa.dma); }
 void SimpleAudio_SetRepeatMode(int mode) { (void)SimpleAudio_SetPlayMode((FM_PlayMode)mode); } /* compat */
 uint8_t SimpleAudio_IsRepeatOne(void) { return (SimpleAudio_GetPlayMode()==FM_PLAY_MODE_REPEAT_ONE)?1u:0u; }
 

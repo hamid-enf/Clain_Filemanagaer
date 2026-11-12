@@ -142,7 +142,7 @@ APP_STEP App_LibraryBegin(void)
            (hw_vid == FM_OK) ? "on" : File_GetErrorString(hw_vid));
 
     /* present ویدیو: پیش‌فرض blocking (باس پشت‌سرهم) — توضیح در
-     * my_lcd_blit_video. حالت async با SIMPLE_VIDEO_ASYNC_PRESENT=1. */
+     * App_LcdBlitVideo. حالت async با SIMPLE_VIDEO_ASYNC_PRESENT=1. */
 #if defined(SIMPLE_VIDEO_ASYNC_PRESENT) && SIMPLE_VIDEO_ASYNC_PRESENT
     SimpleVideo_SetPresentWait(LcdSpiDma_Wait);
 #else
@@ -197,48 +197,48 @@ static void app_banner(const char *name)
 #define APP_RUN(fn) do { app_banner(#fn); (void)fn(); } while (0)
 
 /* مثال‌های ۱ تا ۱۱ روی RAM-disk (examples_file.h) */
-APP_STEP App_RunFileExamples(void)
+APP_STEP App_RunFileDemos(void)
 {
-    APP_RUN(ex_1_file_basic);                    HAL_Delay(100);
-    APP_RUN(ex_2_file_copy_move_rename);         HAL_Delay(100);
-    APP_RUN(ex_3_file_advance);                  HAL_Delay(100);
-    APP_RUN(ex_4_file_directory);                HAL_Delay(100);
-    APP_RUN(ex_5_file_json);                     HAL_Delay(100);
-    APP_RUN(ex_6_file_text_line_edit);           HAL_Delay(100);
-    APP_RUN(ex_7_file_Crash_Safe_Writes);        HAL_Delay(100);
-    APP_RUN(ex_8_file_Data_Logger);              HAL_Delay(100);
-    APP_RUN(ex_9_file_crc_cheaksum);             HAL_Delay(100);
-    APP_RUN(ex_10_file_BMP_Image_Scale_Convert); HAL_Delay(100);
-    APP_RUN(ex_11_audio_codecs);                 HAL_Delay(100);
+    APP_RUN(FileDemo_Basic);                   HAL_Delay(100);
+    APP_RUN(FileDemo_CopyMoveRename);          HAL_Delay(100);
+    APP_RUN(FileDemo_Advanced);                HAL_Delay(100);
+    APP_RUN(FileDemo_Directory);               HAL_Delay(100);
+    APP_RUN(FileDemo_Json);                    HAL_Delay(100);
+    APP_RUN(FileDemo_TextLineEdit);            HAL_Delay(100);
+    APP_RUN(FileDemo_CrashSafeWrites);         HAL_Delay(100);
+    APP_RUN(FileDemo_DataLogger);              HAL_Delay(100);
+    APP_RUN(FileDemo_CrcChecksum);             HAL_Delay(100);
+    APP_RUN(FileDemo_BmpScaleConvert);         HAL_Delay(100);
+    APP_RUN(FileDemo_AudioCodecs);             HAL_Delay(100);
 }
 
 /* همان مثال‌ها روی SD، بعد مدیا و کنترل پخش
  * (examples_sdcard.h، examples_sdcard_media.h، examples_sdcard_player.h).
- * SD_examples_end() عمداً صدا زده نمی‌شود: پخش‌کننده‌ها بعداً همین مونت را
+ * SdCard_End() عمداً صدا زده نمی‌شود: پخش‌کننده‌ها بعداً همین مونت را
  * لازم دارند. */
-APP_STEP App_RunSdExamples(void)
+APP_STEP App_RunSdDemos(void)
 {
     HAL_Delay(100);
-    APP_RUN(SD_examples_begin);                   HAL_Delay(100);
-    APP_RUN(exS_2_file_copy_move_rename);         HAL_Delay(100);
-    APP_RUN(exS_3_file_advance);                  HAL_Delay(100);
-    APP_RUN(exS_4_file_directory);                HAL_Delay(100);
-    APP_RUN(exS_5_file_json);                     HAL_Delay(100);
-    APP_RUN(exS_6_file_text_line_edit);           HAL_Delay(100);
-    APP_RUN(exS_7_file_Crash_Safe_Writes);        HAL_Delay(100);
-    APP_RUN(exS_8_file_Data_Logger);              HAL_Delay(100);
-    APP_RUN(exS_9_file_crc_cheaksum);             HAL_Delay(100);
-    APP_RUN(exS_10_file_BMP_Image_Scale_Convert); HAL_Delay(100);
+    APP_RUN(SdCard_Begin);                     HAL_Delay(100);
+    APP_RUN(SdDemo_CopyMoveRename);            HAL_Delay(100);
+    APP_RUN(SdDemo_Advanced);                  HAL_Delay(100);
+    APP_RUN(SdDemo_Directory);                 HAL_Delay(100);
+    APP_RUN(SdDemo_Json);                      HAL_Delay(100);
+    APP_RUN(SdDemo_TextLineEdit);              HAL_Delay(100);
+    APP_RUN(SdDemo_CrashSafeWrites);           HAL_Delay(100);
+    APP_RUN(SdDemo_DataLogger);                HAL_Delay(100);
+    APP_RUN(SdDemo_CrcChecksum);               HAL_Delay(100);
+    APP_RUN(SdDemo_BmpScaleConvert);           HAL_Delay(100);
 
-    APP_RUN(exM_1_audio_wav);                     HAL_Delay(100);
-    APP_RUN(exM_2_video_fmrv);
-    APP_RUN(exM_3_copy_song);
-    APP_RUN(exM_4_copy_video);
-    APP_RUN(exM_5_media_detect);
+    APP_RUN(SdMediaDemo_AudioWav);             HAL_Delay(100);
+    APP_RUN(SdMediaDemo_VideoFmrv);
+    APP_RUN(SdMediaDemo_CopySong);
+    APP_RUN(SdMediaDemo_CopyVideo);
+    APP_RUN(SdMediaDemo_MediaDetect);
 
-    APP_RUN(exP_1_music_controls);
-    APP_RUN(exP_2_video_controls);
-    APP_RUN(exP_3_remote_buttons);
+    APP_RUN(SdPlayerDemo_MusicControls);
+    APP_RUN(SdPlayerDemo_VideoControls);
+    APP_RUN(SdPlayerDemo_RemoteButtons);
 }
 
 /* فرمت QSPI فقط با تأیید خودتان: اگر دکمهٔ سرویس دارید این را با آن
@@ -247,21 +247,21 @@ static FM_Bool service_button_confirmed = FM_TRUE;
 
 /* فلش QSPI: فایل، مدیا، پخش، انتقال SD↔QSPI↔SDRAM
  * (examples_qspi*.h، qspi_transfers.h). مدل قطعه از JEDEC ID شناخته
- * می‌شود. QSPI_examples_end() صدا زده نمی‌شود چون USB بعداً لازمش دارد.
+ * می‌شود. QspiFlash_End() صدا زده نمی‌شود چون USB بعداً لازمش دارد.
  *
- * مونت دستی به‌جای QSPI_examples_begin() (مثلاً برای پخش از فلش):
+ * مونت دستی به‌جای QspiFlash_Begin() (مثلاً برای پخش از فلش):
  *
  *   static FM_QspiDevice qspi_dev;
  *   static FM_Storage    qspi_st;
  *   static FM_FS         qspi_fs;
  *
- *   if (Ex26_QspiBegin(&qspi_dev, &qspi_st, &hqspi,
+ *   if (QspiDriver_Begin(&qspi_dev, &qspi_st, &hqspi,
  *                      FM_QSPI_CHIP_AUTO) == FM_OK)
  *   {
  *       Storage_Mount("qspi");
  *       FMFS_Init(&qspi_fs);
  *       FS_Mount("/qspi", &qspi_fs);
- *       Ex29_Begin();               // پخش از فلش به‌جای SD
+ *       FlashPlay_Begin();               // پخش از فلش به‌جای SD
  *   }
  *
  * و برای فلشی که روی SPI معمولی است (نه QUADSPI):
@@ -270,38 +270,38 @@ static FM_Bool service_button_confirmed = FM_TRUE;
  *                    sector_buf, sizeof(sector_buf));
  *   FM_Qspi_RegisterStorage(&qspi_dev, &qspi_st, "flash");
  */
-APP_STEP App_RunQspiExamples(void)
+APP_STEP App_RunQspiDemos(void)
 {
     app_banner("qspi_transfers");
-    if (QSPI_examples_begin() == FM_OK)
+    if (QspiFlash_Begin() == FM_OK)
     {
-        APP_RUN(exQ_1_file_basic);
-        APP_RUN(exQ_2_file_copy_move_rename);
-        APP_RUN(exQ_3_file_advance);
-        APP_RUN(exQ_4_file_directory);
-        APP_RUN(exQ_5_file_json);
-        APP_RUN(exQ_6_file_text_line_edit);
-        APP_RUN(exQ_7_file_Crash_Safe_Writes);
-        APP_RUN(exQ_8_file_Data_Logger);
-        APP_RUN(exQ_9_file_crc_cheaksum);
-        APP_RUN(exQ_10_file_BMP_Image_Scale_Convert);
+        APP_RUN(QspiDemo_Basic);
+        APP_RUN(QspiDemo_CopyMoveRename);
+        APP_RUN(QspiDemo_Advanced);
+        APP_RUN(QspiDemo_Directory);
+        APP_RUN(QspiDemo_Json);
+        APP_RUN(QspiDemo_TextLineEdit);
+        APP_RUN(QspiDemo_CrashSafeWrites);
+        APP_RUN(QspiDemo_DataLogger);
+        APP_RUN(QspiDemo_CrcChecksum);
+        APP_RUN(QspiDemo_BmpScaleConvert);
 
-        APP_RUN(exQM_1_audio_detect_process_save);
-        APP_RUN(exQM_2_video_detect_to_bgr565);
-        APP_RUN(exQM_3_image_bgr_effect_resize_save);
+        APP_RUN(QspiMediaDemo_AudioDetectProcessSave);
+        APP_RUN(QspiMediaDemo_VideoDetectToBgr565);
+        APP_RUN(QspiMediaDemo_ImageEffectResizeSave);
 
-        APP_RUN(exQP_1_music_controls);
-        APP_RUN(exQP_2_video_controls);
-        APP_RUN(exQP_3_remote_buttons);
+        APP_RUN(QspiPlayerDemo_MusicControls);
+        APP_RUN(QspiPlayerDemo_VideoControls);
+        APP_RUN(QspiPlayerDemo_RemoteButtons);
 
-        APP_RUN(exT_1_sd_to_qspi);       /* /config.json را اگر نبود می‌سازد */
-        APP_RUN(exT_2_qspi_to_sdram);
-        APP_RUN(exT_3_verify_roundtrip);
-        APP_RUN(exT_4_all_combinations);
+        APP_RUN(TransferDemo_SdToQspi);       /* /config.json را اگر نبود می‌سازد */
+        APP_RUN(TransferDemo_QspiToSdram);
+        APP_RUN(TransferDemo_VerifyRoundtrip);
+        APP_RUN(TransferDemo_AllCombinations);
     }
     else if (service_button_confirmed)
     {
-        APP_RUN(QSPI_examples_format);   /* فقط بار اول */
+        APP_RUN(QspiFlash_Format);   /* فقط بار اول */
     }
 }
 
@@ -312,33 +312,33 @@ static FM_QspiDevice  flash;
 static uint8_t sector_buf[4096]
     __attribute__((section(".sdram_buffers"), aligned(32)));
 
-APP_STEP App_RunSpiFlashExamples(void)
+APP_STEP App_RunSpiFlashDemos(void)
 {
-    app_banner("Ex33_SpiFlash_Begin");
-    Ex33_SpiFlash_SetCs(GPIOE, GPIO_PIN_4);
-    if (Ex33_SpiFlash_Begin(&flash, &spi_port, &hspi4, FM_QSPI_CHIP_AUTO,
+    app_banner("SpiFlash_Begin");
+    SpiFlash_SetCs(GPIOE, GPIO_PIN_4);
+    if (SpiFlash_Begin(&flash, &spi_port, &hspi4, FM_QSPI_CHIP_AUTO,
                             sector_buf, sizeof(sector_buf)) == FM_OK)
     {
-        /* فلش نو: یک‌بار Ex33_SpiFlash_Format(); */
-        APP_RUN(exF_1_spi_flash_smoke);  /* write/read/verify              */
-        APP_RUN(exF_2_file_ops);         /* متن + باینری 1K + CRC + پوشه   */
-        APP_RUN(exF_3_sd_to_flash);      /* SD→فلش با وریفای               */
-        APP_RUN(exF_4_ram_roundtrip);    /* RAM→فلش→RAM                    */
-        APP_RUN(exF_5_stats);            /* erase/write/blank-skip/DMA?    */
+        /* فلش نو: یک‌بار SpiFlash_Format(); */
+        APP_RUN(SpiFlashDemo_Smoke);  /* write/read/verify              */
+        APP_RUN(SpiFlashDemo_FileOps);         /* متن + باینری 1K + CRC + پوشه   */
+        APP_RUN(SpiFlashDemo_SdToFlash);      /* SD→فلش با وریفای               */
+        APP_RUN(SpiFlashDemo_RamRoundtrip);    /* RAM→فلش→RAM                    */
+        APP_RUN(SpiFlashDemo_Stats);            /* erase/write/blank-skip/DMA?    */
     }
 }
 
 /* EEPROM روی I2C2 با DMA (i2c_eeprom_dma.h، eeprom_simple.h) */
-APP_STEP App_RunEepromExamples(void)
+APP_STEP App_RunEepromDemos(void)
 {
-    app_banner("Ex32_I2cEeprom_Begin");
-    if (Ex32_I2cEeprom_Begin(FM_EEPROM_CHIP_24LC02, &hi2c2, 0x50) == FM_OK)
+    app_banner("I2cEeprom_Begin");
+    if (I2cEeprom_Begin(FM_EEPROM_CHIP_24LC02, &hi2c2, 0x50) == FM_OK)
     {
-        APP_RUN(exI_1_i2c_dma_smoke);    /* پروب + بنویس/بخوان/تطبیق */
-        APP_RUN(exE_1_basic);
-        APP_RUN(exE_2_settings_struct);
-        APP_RUN(exE_3_wear_aware_counter);
-        APP_RUN(exE_4_as_storage);
+        APP_RUN(I2cEepromDemo_Smoke);    /* پروب + بنویس/بخوان/تطبیق */
+        APP_RUN(EepromDemo_Basic);
+        APP_RUN(EepromDemo_SettingsStruct);
+        APP_RUN(EepromDemo_WearAwareCounter);
+        APP_RUN(EepromDemo_AsStorage);
     }
 }
 
@@ -374,7 +374,7 @@ APP_STEP App_PlayersBegin(void)
 
     app_banner("SimpleImage_Begin");
     SimpleImage_SetOutputSize(320, 240);
-    SimpleImage_SetPresent(my_lcd_blit);
+    SimpleImage_SetPresent(App_LcdBlit);
     SimpleImage_ShowTestPattern();  /* باید ۸ نوار عمودی تمیز باشد */
     HAL_Delay(3000);
     SimpleImage_Begin();
@@ -382,7 +382,7 @@ APP_STEP App_PlayersBegin(void)
     if (music_activated == 0)
     {
         app_banner("SimpleVideo_Begin");
-        SimpleVideo_SetPresent(my_lcd_blit_video);
+        SimpleVideo_SetPresent(App_LcdBlitVideo);
         SimpleVideo_SetOutputSize(320, 240);
         app_video_begin();
     }
@@ -394,14 +394,14 @@ APP_STEP App_PlayersBegin(void)
 /*
  * پل USB در USB_DEVICE/App/usbd_storage_if.c به کتابخانه وصل است:
  *
- *   #include "usb_msc.h"                 (بدون EX16_USB_DEFINE_CONTEXT)
- *   STORAGE_Init_FS           -> Ex16_STM32_Init
- *   STORAGE_GetCapacity_FS    -> Ex16_STM32_GetCapacity
- *   STORAGE_IsReady_FS        -> Ex16_STM32_IsReady
- *   STORAGE_IsWriteProtected_FS -> Ex16_STM32_IsWriteProtected
- *   STORAGE_Read_FS           -> Ex16_STM32_Read
- *   STORAGE_Write_FS          -> Ex16_STM32_Write
- *   STORAGE_GetMaxLun_FS      -> Ex16_STM32_GetMaxLun
+ *   #include "usb_msc.h"                 (بدون USB_MSC_DEFINE_CONTEXT)
+ *   STORAGE_Init_FS           -> UsbMsc_StorageInit
+ *   STORAGE_GetCapacity_FS    -> UsbMsc_StorageGetCapacity
+ *   STORAGE_IsReady_FS        -> UsbMsc_StorageIsReady
+ *   STORAGE_IsWriteProtected_FS -> UsbMsc_StorageIsWriteProtected
+ *   STORAGE_Read_FS           -> UsbMsc_StorageRead
+ *   STORAGE_Write_FS          -> UsbMsc_StorageWrite
+ *   STORAGE_GetMaxLun_FS      -> UsbMsc_StorageGetMaxLun
  */
 
 /* همهٔ پخش‌ها بسته، SD به PC داده می‌شود و تا دستور «sdmcu» همین‌جا
@@ -409,7 +409,7 @@ APP_STEP App_PlayersBegin(void)
  * پردازش می‌شوند وگرنه sdmcu هیچ‌وقت نمی‌رسد. HAL_Delay اینجا نگذارید:
  * USB از همین حلقه سرویس می‌شود.
  *
- * USB را Ex35_Sd_ShowToPc() راه می‌اندازد (بار اول MX_USB_DEVICE_Init()،
+ * USB را UsbSd_ShowToPc() راه می‌اندازد (بار اول MX_USB_DEVICE_Init()،
  * بعد از آن USBD_Start). برای همین خط MX_USB_DEVICE_Init() در main() کامنت
  * است. Generate آن خط را برمی‌گرداند: یا دوباره کامنتش کنید، یا در CubeMX
  * ← Project Manager ← Advanced Settings برای MX_USB_DEVICE_Init تیک
@@ -420,17 +420,17 @@ APP_STEP App_SdToPc(void)
     SimpleImage_Stop();
     SimpleAudio_Stop();
 
-    Ex35_Sd_ShowToPc();
+    UsbSd_ShowToPc();
 
     printf("Sd For Pc \n");
     while (sd_pc_mcu == 1)
     {
-        Ex35_UsbPoll();
+        UsbSd_Poll();
         CmdMusic_ProcessPending();
     }
     sd_pc_mcu = 0;
 
-    Ex35_Sd_TakeBack();             /* بعد از Eject در ویندوز */
+    UsbSd_TakeBack();             /* بعد از Eject در ویندوز */
 }
 
 /* ================================================================== */
@@ -510,10 +510,10 @@ APP_STEP App_VideoCommandPoll(void)
         viedo_start = 2;
 
         SimpleAudio_Stop();
-        SimpleVideo_SetPresent(my_lcd_blit_video);
+        SimpleVideo_SetPresent(App_LcdBlitVideo);
         SimpleVideo_SetOutputSize(320, 240);
         /* همان نرمالایزر موزیک (tap1) روی صدای ویدیو */
-        SimpleVideo_SetPrePcmTap(my_audio_pre_tap, NULL);
+        SimpleVideo_SetPrePcmTap(app_audio_pre_tap, NULL);
         printf("SimpleVideo_Begin \n");
         app_video_begin();
     }
@@ -532,9 +532,9 @@ APP_STEP App_FlashEraseCommandPoll(void)
     if (qspi_erase == 1)
     {
         qspi_erase = 2;
-        printf("QSPI_examples_format \n");
-        /* QSPI_examples_format(); */
-        Ex33_SpiFlash_EraseAll();
+        printf("QspiFlash_Format \n");
+        /* QspiFlash_Format(); */
+        SpiFlash_EraseAll();
     }
 }
 

@@ -47,10 +47,10 @@ uint32_t *sdram_buf = (uint32_t*)SdRamBaseAddress;
 #include "../../FileManager_lib/top_api/cache.h"
 
 #include "fm_qspi.h"
-#include "../../FileManager_lib/top_api/examples_qspi.h"        /* begin/end + exQ_1..10 */
-#include "../../FileManager_lib/top_api/examples_qspi_media.h"  /* اختیاری: exQM_1..3   */
-#include "../../FileManager_lib/top_api/examples_qspi_player.h" /* اختیاری: exQP_1..3   */
-#include "../../FileManager_lib/top_api/qspi_transfers.h"       /* انتقال: exT_1..4     */
+#include "../../FileManager_lib/top_api/examples_qspi.h"        /* QspiFlash_Begin/End + QspiDemo_* */
+#include "../../FileManager_lib/top_api/examples_qspi_media.h"  /* اختیاری: QspiMediaDemo_*  */
+#include "../../FileManager_lib/top_api/examples_qspi_player.h" /* اختیاری: QspiPlayerDemo_* */
+#include "../../FileManager_lib/top_api/qspi_transfers.h"       /* انتقال: TransferDemo_*    */
 
 #include "../../FileManager_lib/top_api/dma2d_ycbcr.h"
 #include "../../FileManager_lib/top_api/spi_flash_dma_port.h"
@@ -60,8 +60,8 @@ uint32_t *sdram_buf = (uint32_t*)SdRamBaseAddress;
 #include "../../FileManager_lib/top_api/i2c_eeprom_dma.h"
 
 /* USER CODE 0 (قبل از defines.h) */
-#define EX16_USB_DEFINE_CONTEXT
-#define EX35_CUBE_USB
+#define USB_MSC_DEFINE_CONTEXT
+#define USB_SD_CUBE_USB
 #include "../../FileManager_lib/top_api/usb_msc.h"
 #include "../../FileManager_lib/top_api/usb_sd_presenter.h"
 

@@ -92,7 +92,7 @@ int main(void){
      * (قبلاً InvalidateAfterDma خودش لبه‌ها را Clean می‌کرد؛ روی برد
      * محتوای کهنهٔ خط لبه را روی دادهٔ تازهٔ DMA می‌نوشت — باگ واقعی
      * «آخرین ۸ بایت خواندن I2C صفر شد». حالا Clean در سایتِ RX قبل از
-     * انتقال انجام می‌شود: fm_xdma.h و مثال‌های ۳۲/۳۳.) */
+     * انتقال انجام می‌شود: fm_xdma.h و i2c_eeprom_dma.h / spi_flash_dma_port.h.) */
     clean_calls=inval_calls=0;
     FM_Cache_CleanForDma(buf+5,100);            /* سایت RX: قبل از کیک */
     FM_Cache_InvalidateAfterDma(buf+5,100);     /* بعد: فقط Invalidate */

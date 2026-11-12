@@ -1,7 +1,7 @@
 /*
- * ex33_host_test.c — host validation for examples/33_audio_record_with_tap.h
+ * audio_record_host_test.c — host validation for examples/audio_record_with_tap.h
  *
- * Example 33 documents the "new" audio plumbing (pre/post PCM taps,
+ * audio_record_with_tap.h documents the "new" audio plumbing (pre/post PCM taps,
  * recording, video frame/audio access, folder copy).  Those APIs live
  * in header-only layers that also compile on the host with the HAL
  * stub, so this harness includes the very example header the board
@@ -13,7 +13,7 @@
  *   - SimpleVideo taps install; frame/audio getters behave when idle
  *
  *   gcc -Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
- *       tools/ex33_host_test.c libfilemanager.a -lm -o ex33test
+ *       tools/audio_record_host_test.c libfilemanager.a -lm -o audiorecordtest
  */
 
 /* FM-NOT-FIRMWARE: host-only file (make / CMake on a PC).
@@ -34,8 +34,8 @@
 extern FM_Result PosixFS_Init(FM_FS *fs);
 
 /* Pulls in simple_audio.h + simple_video.h + fm_directory.h and the
- * example's own static helpers (my_pre_dsp, my_post_tap, ...). */
-#include "33_audio_record_with_tap.h"
+ * example's own static helpers (audio_record_pre_dsp, audio_record_post_tap, ...). */
+#include "audio_record_with_tap.h"
 
 static int fails;
 
@@ -63,11 +63,11 @@ int main(void)
         return 1;
     }
 
-    printf("Example 33 (audio record + taps) host test\n");
+    printf("audio_record_with_tap.h (audio record + taps) host test\n");
     printf("==========================================\n");
 
     /* ---- 1) taps install ------------------------------------------ */
-    ex33_audio_tap_setup();
+    audio_record_tap_setup();
     ok("SimpleAudio_SetPrePcmTap installed",
        sa.dma.pcm_tap_pre != NULL);
     ok("SimpleAudio_SetPostPcmTap installed",
@@ -81,16 +81,16 @@ int main(void)
         int16_t exp[4] = {2000, 32767, -32768, -2000};
         size_t keep = rec_ring_len;
 
-        my_pre_dsp(NULL, buf, 4, 48000, 2);
-        ok("my_pre_dsp: +6 dB with saturation",
+        audio_record_pre_dsp(NULL, buf, 4, 48000, 2);
+        ok("audio_record_pre_dsp: +6 dB with saturation",
            buf[0] == exp[0] && buf[1] == exp[1] &&
            buf[2] == exp[2] && buf[3] == exp[3]);
-        ok("my_pre_dsp: does not record when idle",
+        ok("audio_record_pre_dsp: does not record when idle",
            rec_ring_len == keep);
     }
 
     /* ---- 3) video taps install; getters sane while idle ----------- */
-    ex33_video_setup();
+    audio_record_video_setup();
     ok("SimpleVideo_SetPrePcmTap installed", sv_pcm_tap_pre != NULL);
     ok("SimpleVideo_SetPostPcmTap installed", sv_pcm_tap_post != NULL);
     ok("SimpleVideo_SetTrackStartCallback installed",
@@ -111,8 +111,8 @@ int main(void)
     }
     {
         int16_t v[2] = {1000, -1000};
-        my_video_pre_tap(NULL, v, 2, 48000, 2);
-        ok("my_video_pre_tap: -6 dB halving",
+        audio_record_video_pre_tap(NULL, v, 2, 48000, 2);
+        ok("audio_record_video_pre_tap: -6 dB halving",
            v[0] == 500 && v[1] == -500);
     }
 
@@ -182,29 +182,29 @@ int main(void)
         char txt[64];
         FM_Bool exists = FM_FALSE;
 
-        (void)Directory_DeleteRecursive("/ex33src");
-        (void)Directory_DeleteRecursive("/ex33dst");
-        (void)Directory_Create("/ex33src/a/b");
-        (void)File_WriteText("/ex33src/a/hello.txt", "salam");
-        (void)File_WriteText("/ex33src/a/b/deep.txt", "deep-salam");
+        (void)Directory_DeleteRecursive("/recsrc");
+        (void)Directory_DeleteRecursive("/recdst");
+        (void)Directory_Create("/recsrc/a/b");
+        (void)File_WriteText("/recsrc/a/hello.txt", "salam");
+        (void)File_WriteText("/recsrc/a/b/deep.txt", "deep-salam");
 
-        r = ex33_folder_copy_demo("/ex33src", "/ex33dst");
-        ok("Directory_Copy nested /ex33src -> /ex33dst", r == FM_OK);
+        r = audio_record_folder_copy("/recsrc", "/recdst");
+        ok("Directory_Copy nested /recsrc -> /recdst", r == FM_OK);
         if (r == FM_OK)
         {
-            r = File_ReadText("/ex33dst/a/hello.txt", txt,
+            r = File_ReadText("/recdst/a/hello.txt", txt,
                               sizeof(txt), NULL);
             ok("copied shallow file content", r == FM_OK &&
                strcmp(txt, "salam") == 0);
-            r = File_ReadText("/ex33dst/a/b/deep.txt", txt,
+            r = File_ReadText("/recdst/a/b/deep.txt", txt,
                               sizeof(txt), NULL);
             ok("copied nested file content", r == FM_OK &&
                strcmp(txt, "deep-salam") == 0);
         }
-        (void)File_Exists("/ex33dst/a/hello.txt", &exists);
+        (void)File_Exists("/recdst/a/hello.txt", &exists);
         ok("cleanup precondition sane", exists == FM_TRUE);
-        (void)Directory_DeleteRecursive("/ex33src");
-        (void)Directory_DeleteRecursive("/ex33dst");
+        (void)Directory_DeleteRecursive("/recsrc");
+        (void)Directory_DeleteRecursive("/recdst");
     }
 
     printf("\nResults: %s\n", fails == 0 ? "all PASS" : "FAILURES");

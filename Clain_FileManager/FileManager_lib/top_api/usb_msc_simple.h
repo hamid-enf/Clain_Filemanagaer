@@ -7,13 +7,13 @@
  *
  * ساده‌ترین شکل:
  *
- *     USB_examples_begin("sd");     // SD کارت را روی USB بگذار
+ *     UsbMscSimple_Begin("sd");     // SD کارت را روی USB بگذار
  *     ...
- *     while (1) { USB_examples_poll(); }
+ *     while (1) { UsbMscSimple_Poll(); }
  *
  * و برای عوض کردن حافظه‌ای که نشان داده می‌شود:
  *
- *     exU_2_switch_to("qspi");
+ *     UsbMscDemo_SwitchTo("qspi");
  *
  * ---------------------------------------------------------------------
  * چیزی که باید بدانید
@@ -28,7 +28,7 @@
  *      کامپیوتر «کارت را بیرون‌آمده» ببیند، کارتان را بکنید، بعد دوباره
  *      TRUE کنید. کامپیوتر آن‌وقت دوباره می‌خواند.
  *
- * مثال exU_4 دقیقاً همین الگو را نشان می‌دهد.
+ * مثال UsbMscDemo_SafeLocalWrite دقیقاً همین الگو را نشان می‌دهد.
  *
  * ---------------------------------------------------------------------
  * اتصال به USB واقعی
@@ -37,8 +37,8 @@
  * stop) و در callback های SCSI کیوب، USB_MSC_ReadBlocks /
  * USB_MSC_WriteBlocks را صدا می‌زنید. نمونهٔ اتصال در انتهای فایل.
  */
-#ifndef FM_EXAMPLE_27_USB_MSC_SIMPLE_H
-#define FM_EXAMPLE_27_USB_MSC_SIMPLE_H
+#ifndef FM_TOPAPI_USB_MSC_SIMPLE_H
+#define FM_TOPAPI_USB_MSC_SIMPLE_H
 
 #include <stdio.h>
 #include <string.h>
@@ -54,7 +54,7 @@
 static FM_USB_MSC g_msc;
 static FM_Bool    g_msc_ready;
 
-static void u_step(const char *what, FM_Result r)
+static void usb_msc_demo_step(const char *what, FM_Result r)
 {
     if (r != FM_OK)
     {
@@ -70,12 +70,12 @@ static void u_step(const char *what, FM_Result r)
  *
  * نام‌های رایج: "sd"، "qspi"، "ram"
  */
-static FM_Result USB_examples_begin(const char *storage_name)
+static FM_Result UsbMscSimple_Begin(const char *storage_name)
 {
     FM_Storage *st = NULL;
     FM_Result r;
 
-    puts("\n**************** USB_examples_begin ****************");
+    puts("\n**************** UsbMscSimple_Begin ****************");
 
     r = Storage_Find(storage_name, &st);
     if (r != FM_OK || st == NULL)
@@ -86,7 +86,7 @@ static FM_Result USB_examples_begin(const char *storage_name)
     }
 
     r = USB_MSC_Init(&g_msc, st, NULL);
-    u_step("USB_MSC_Init", r);
+    usb_msc_demo_step("USB_MSC_Init", r);
     if (r != FM_OK)
     {
         g_msc_ready = FM_FALSE;
@@ -110,14 +110,14 @@ static FM_Result USB_examples_begin(const char *storage_name)
     return FM_OK;
 }
 
-static void USB_examples_end(void)
+static void UsbMscSimple_End(void)
 {
     if (g_msc_ready)
     {
         (void)USB_MSC_Detach(&g_msc);
         g_msc_ready = FM_FALSE;
     }
-    puts("**************** USB_examples_end ****************\n");
+    puts("**************** UsbMscSimple_End ****************\n");
 }
 
 #define U_REQUIRE()                                                        \
@@ -126,14 +126,14 @@ static void USB_examples_end(void)
     } while (0)
 
 /* ------------------------------------------------------------------ */
-/* exU_1 — نمایش وضعیت                                                 */
+/* UsbMscDemo_Status — نمایش وضعیت                                                 */
 /* ------------------------------------------------------------------ */
-static void exU_1_status(void)
+static void UsbMscDemo_Status(void)
 {
     uint64_t blocks = 0;
     uint32_t bsize = 0;
 
-    puts("\n================== exU_1_status ==================");
+    puts("\n================== UsbMscDemo_Status ==================");
     U_REQUIRE();
 
     if (USB_MSC_GetCapacity(&g_msc, &blocks, &bsize) == FM_OK)
@@ -146,7 +146,7 @@ static void exU_1_status(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exU_2 — عوض کردن حافظهٔ نمایش‌داده‌شده                               */
+/* UsbMscDemo_SwitchTo — عوض کردن حافظهٔ نمایش‌داده‌شده                               */
 /* ------------------------------------------------------------------ */
 /*
  * مثلاً از SD به QSPI سوییچ کنید بدون ریست کردن برد.
@@ -155,12 +155,12 @@ static void exU_1_status(void)
  * جدید را بگذار». وگرنه کامپیوتر با جدول FAT قدیمی روی محتوای جدید
  * کار می‌کند و خرابش می‌کند.
  */
-static void exU_2_switch_to(const char *storage_name)
+static void UsbMscDemo_SwitchTo(const char *storage_name)
 {
     FM_Storage *st = NULL;
     FM_Result r;
 
-    puts("\n================ exU_2_switch_to =================");
+    puts("\n================ UsbMscDemo_SwitchTo =================");
     U_REQUIRE();
 
     r = Storage_Find(storage_name, &st);
@@ -171,25 +171,25 @@ static void exU_2_switch_to(const char *storage_name)
     }
 
     /* ۱) به کامپیوتر بگو رسانه رفت */
-    u_step("eject", USB_MSC_SetMediaPresent(&g_msc, FM_FALSE));
+    usb_msc_demo_step("eject", USB_MSC_SetMediaPresent(&g_msc, FM_FALSE));
     /* ۲) حالا امن است که عوض شود */
-    u_step("re-init", USB_MSC_Init(&g_msc, st, NULL));
+    usb_msc_demo_step("re-init", USB_MSC_Init(&g_msc, st, NULL));
     /* ۳) رسانهٔ جدید را اعلام کن */
-    u_step("insert", USB_MSC_SetMediaPresent(&g_msc, FM_TRUE));
+    usb_msc_demo_step("insert", USB_MSC_SetMediaPresent(&g_msc, FM_TRUE));
 
     printf("  حالا '%s' روی USB است.\n", storage_name);
 }
 
 /* ------------------------------------------------------------------ */
-/* exU_3 — خواندن/نوشتن بلوکی (همان چیزی که کامپیوتر می‌بیند)          */
+/* UsbMscDemo_BlockIo — خواندن/نوشتن بلوکی (همان چیزی که کامپیوتر می‌بیند)          */
 /* ------------------------------------------------------------------ */
-static void exU_3_block_io(void)
+static void UsbMscDemo_BlockIo(void)
 {
     static uint8_t block[512];
     uint64_t blocks = 0;
     uint32_t bsize = 0;
 
-    puts("\n================= exU_3_block_io =================");
+    puts("\n================= UsbMscDemo_BlockIo =================");
     U_REQUIRE();
 
     if (USB_MSC_GetCapacity(&g_msc, &blocks, &bsize) != FM_OK ||
@@ -215,27 +215,27 @@ static void exU_3_block_io(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exU_4 — دسترسی امن همزمان                                           */
+/* UsbMscDemo_SafeLocalWrite — دسترسی امن همزمان                                           */
 /* ------------------------------------------------------------------ */
 /*
  * الگوی درست وقتی خودتان می‌خواهید فایلی بنویسید در حالی که USB وصل است.
  */
-static void exU_4_safe_local_write(void)
+static void UsbMscDemo_SafeLocalWrite(void)
 {
     FM_Result r;
 
-    puts("\n============ exU_4_safe_local_write =============");
+    puts("\n============ UsbMscDemo_SafeLocalWrite =============");
     U_REQUIRE();
 
     puts("  ۱) رسانه را از دید کامپیوتر بردار");
-    u_step("eject", USB_MSC_SetMediaPresent(&g_msc, FM_FALSE));
+    usb_msc_demo_step("eject", USB_MSC_SetMediaPresent(&g_msc, FM_FALSE));
 
     puts("  ۲) حالا نوشتن محلی امن است");
     r = File_WriteText("/usb_note.txt", "written while USB was detached");
-    u_step("write", r);
+    usb_msc_demo_step("write", r);
 
     puts("  ۳) رسانه را برگردان — کامپیوتر دوباره می‌خواند");
-    u_step("insert", USB_MSC_SetMediaPresent(&g_msc, FM_TRUE));
+    usb_msc_demo_step("insert", USB_MSC_SetMediaPresent(&g_msc, FM_TRUE));
 
     puts("  حالا فایل جدید در کامپیوتر دیده می‌شود.");
 }
@@ -243,7 +243,7 @@ static void exU_4_safe_local_write(void)
 /* ------------------------------------------------------------------ */
 /* در حلقهٔ اصلی                                                       */
 /* ------------------------------------------------------------------ */
-static void USB_examples_poll(void)
+static void UsbMscSimple_Poll(void)
 {
     if (g_msc_ready)
     {
@@ -297,4 +297,4 @@ static void USB_examples_poll(void)
  * ---------------------------------------------------------------------
  */
 
-#endif /* FM_EXAMPLE_27_USB_MSC_SIMPLE_H */
+#endif /* FM_TOPAPI_USB_MSC_SIMPLE_H */

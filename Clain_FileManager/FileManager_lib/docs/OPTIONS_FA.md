@@ -166,11 +166,11 @@ CubeIDE ببینید. ستون‌های RAM و SDRAM اندازهٔ آرایه�
 اجرا نشدن یک گروه، همان خط را کامنت کنید:
 
 ```c
-App_RunFileExamples();        /* مثال‌های RAM-disk   */
-App_RunSdExamples();          /* مثال‌های SD         */
-App_RunQspiExamples();        /* مثال‌های QSPI       */
-App_RunSpiFlashExamples();    /* مثال‌های SPI flash  */
-App_RunEepromExamples();      /* مثال‌های EEPROM     */
+App_RunFileDemos();        /* مثال‌های RAM-disk   */
+App_RunSdDemos();          /* مثال‌های SD         */
+App_RunQspiDemos();        /* مثال‌های QSPI       */
+App_RunSpiFlashDemos();    /* مثال‌های SPI flash  */
+App_RunEepromDemos();      /* مثال‌های EEPROM     */
 App_PlayersBegin();           /* اسلایدشو و پلیر     */
 App_SdToPc();                 /* SD به کامپیوتر با USB */
 ```

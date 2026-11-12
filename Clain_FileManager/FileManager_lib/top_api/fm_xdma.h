@@ -2,8 +2,9 @@
  * fm_xdma.h — موتور انتقال DMA پورت‌پذیر برای فاز دادهٔ فلش‌های سری
  * ================================================================
  *
- * یک بار تعریف می‌شود و مثال‌های ۱۵ (W25Q256)، ۲۶ (درایور عمومی
- * QUADSPI) و ۳۳ (فلش روی SPI معمولی) از همان استفاده می‌کنند — هیچ
+ * یک بار تعریف می‌شود و qspi_w25q.h (W25Q256)، qspi_driver.h (درایور
+ * عمومی QUADSPI) و spi_flash_dma_port.h (فلش روی SPI معمولی) از همان
+ * استفاده می‌کنند — هیچ
  * درایوری کد DMA تکراری ندارد و «روشن بودن DMA» خودکار تشخیص داده
  * می‌شود، نه با دو نسخه کدنویسی.
  *
@@ -27,7 +28,7 @@
  *   بقیه    : هیچ — polling. می‌توانید با FM_Xdma_Use موتور خودتان
  *             را بدهید؛ قرارداد سه تابع کوچک بیشتر نمی‌خواهد.
  *
- * استفادهٔ درایور (داخل مثال ۱۵/۲۶):
+ * استفادهٔ درایور (داخل qspi_w25q.h / qspi_driver.h):
  *
  *     if (FM_Xdma_Rx(buf, len, timeout_ms)) return FM_OK;   * DMA    *
  *     ... مسیر polling ...                                  * فالبک   *
@@ -192,7 +193,7 @@ FM_XDMA_API static int FM_Xdma_TxEx(const void *buf, uint32_t len, uint32_t time
 /*
  * خودکار نصب می‌شود اگر (الف) خانوادهٔ H7 تعریف باشد، (ب) در کیوب
  * کانال MDMA به QUADSPI وصل شده باشد (hmdma != NULL). برای فلش روی
- * SPI معمولی از FM_Xdma_SpiInstall در مثال ۳۳ استفاده کنید.
+ * SPI معمولی از FM_Xdma_SpiInstall در spi_flash_dma_port.h استفاده کنید.
  */
 #if (defined(STM32H743xx) || defined(STM32H750xx) || defined(STM32H723xx) || \
      defined(STM32H725xx) || defined(STM32H730xx) || defined(STM32H735xx) || \

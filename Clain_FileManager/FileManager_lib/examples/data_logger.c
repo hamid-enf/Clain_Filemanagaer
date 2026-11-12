@@ -1,5 +1,5 @@
 /*
- * Example 08 — Data Logger (CSV)
+ * data_logger.c — Data Logger (CSV)
  *
  * APIها:
  *   Logger_Init/Start/Write/Stop — چرخه کامل لاگ

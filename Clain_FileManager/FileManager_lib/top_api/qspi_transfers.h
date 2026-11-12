@@ -4,29 +4,29 @@
  *
  * این فایل بعد از مرتب‌سازی، فقط بخش یکتای خودش را دارد: تست‌های انتقال.
  * بخش «کار معمولی با فایل روی QSPI» (نوشتن/خواندن متن، پوشه‌ها، دادهٔ
- * باینری، CRC) قبلاً با مثال‌های exQ_1 تا exQ_10 در
+ * باینری، CRC) قبلاً با مثال‌های QspiDemo_* در
  * examples_qspi.h پوشش داده می‌شود و نسخه‌های تکراری‌اش حذف
  * شدند. راه‌اندازی و mount هم فقط یک‌جاست:
  *
- *     QSPI_examples_begin()   از examples_qspi.h
- *     QSPI_examples_end()     از examples_qspi.h
+ *     QspiFlash_Begin()   از examples_qspi.h
+ *     QspiFlash_End()     از examples_qspi.h
  *
  * استفاده در main (ترتیب کامل در examples_qspi.h نوشته شده):
  *
- *     #include "examples_qspi.h"       <- begin/end + exQ_1..10
- *     #include "qspi_transfers.h"      <- exT_1..exT_4
+ *     #include "examples_qspi.h"       <- QspiFlash_Begin/End + QspiDemo_*
+ *     #include "qspi_transfers.h"      <- TransferDemo_*
  *     ...
- *     if (QSPI_examples_begin() == FM_OK) {
- *         exQ_1_file_basic();                 <- تست‌های فایل
+ *     if (QspiFlash_Begin() == FM_OK) {
+ *         QspiDemo_Basic();                 <- تست‌های فایل
  *         ...
- *         exT_1_sd_to_qspi();                 <- انتقال
- *         exT_2_qspi_to_sdram();
- *         exT_3_verify_roundtrip();
- *         exT_4_all_combinations();
- *         QSPI_examples_end();
+ *         TransferDemo_SdToQspi();                 <- انتقال
+ *         TransferDemo_QspiToSdram();
+ *         TransferDemo_VerifyRoundtrip();
+ *         TransferDemo_AllCombinations();
+ *         QspiFlash_End();
  *     }
  *
- * پیش‌نیاز: "/qspi" مونت شده باشد — با هر درایوری (Ex15 یا Ex26).
+ * پیش‌نیاز: "/qspi" مونت شده باشد — با هر درایوری (QspiW25q یا QspiDriver).
  * اگر مونت نباشد، هر تست تمیز «رد شد» می‌دهد و crash نمی‌کند.
  *
  * ---------------------------------------------------------------------
@@ -42,7 +42,7 @@
  *
  *  ۲) تعداد پاک‌شدن محدود است (حدود ۱۰۰ هزار بار برای هر سکتور). پس
  *     لاگ پرتکرار روی QSPI نگذارید؛ آن را روی SD بگذارید.
- *     (به همین دلیل تست Logger عمداً در exQ_8 روی /qspi/logs با
+ *     (به همین دلیل تست Logger عمداً در QspiDemo_DataLogger روی /qspi/logs با
  *     rotation کوچک اجرا می‌شود — برای لاگ واقعی از SD استفاده کنید.)
  *
  *  ۳) در حالت memory-mapped فقط خواندنی است. آدرس FM_MEM_QSPI_BASE را
@@ -50,8 +50,8 @@
  *     باید از API فایل یا دستورات QSPI استفاده کنید.
  */
 
-#ifndef FM_EXAMPLE_25_QSPI_AND_TRANSFERS_H
-#define FM_EXAMPLE_25_QSPI_AND_TRANSFERS_H
+#ifndef FM_TOPAPI_QSPI_TRANSFERS_H
+#define FM_TOPAPI_QSPI_TRANSFERS_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -67,11 +67,11 @@
  * has no CRC module, so the example carries the same loop itself
  * (reflected 0xEDB88320, no init / final XOR: identical results to
  * CRC_Compute32) instead of breaking the build. */
-#ifndef EX_CRC32
+#ifndef DEMO_CRC32
 #if FM_USE_CRC
-#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
 #else
-static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+static uint32_t demo_crc32_local(const void *data, size_t len, uint32_t crc)
 {
     const uint8_t *p = (const uint8_t *)data;
     size_t i;
@@ -87,9 +87,9 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
     }
     return crc;
 }
-#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) demo_crc32_local((data), (len), (crc))
 #endif
-#endif /* EX_CRC32 */
+#endif /* DEMO_CRC32 */
 
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
@@ -98,7 +98,7 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
 /* ابزار مشترک                                                          */
 /* ==================================================================== */
 
-static void q_step(const char *what, FM_Result r)
+static void transfer_demo_step(const char *what, FM_Result r)
 {
     if (r != FM_OK)
     {
@@ -115,7 +115,7 @@ static FM_Bool qspi_ready(void)
 
     if (FS_IsMounted("/qspi", &mounted) != FM_OK || !mounted)
     {
-        puts("  (QSPI آماده نیست — اول QSPI_examples_begin() را صدا بزنید)");
+        puts("  (QSPI آماده نیست — اول QspiFlash_Begin() را صدا بزنید)");
         return FM_FALSE;
     }
     return FM_TRUE;
@@ -134,9 +134,9 @@ static FM_Bool qspi_ready(void)
  * کش و بدون کش — چرا اینجا هیچ نگهداری کشی لازم نیست:
  *   همهٔ انتقال‌های این بخش روی مسیر File_* یعنی CPU (memcpy) هستند؛
  *   CPU با کش خودش همیشه نسخهٔ درست را می‌بیند. DMA فقط داخل درایورهای
- *   سخت‌افزاری رخ می‌دهد (fm_xdma.h برای QSPI/SPI-فلش، مثال ۳۲ برای
+ *   سخت‌افزاری رخ می‌دهد (fm_xdma.h برای QSPI/SPI-فلش، i2c_eeprom_dma.h برای
  *   I2C) و همان‌جا Clean/Invalidate خودکار انجام می‌شود. پس چه SDRAM
- *   کش‌دار باشد چه نباشد، این تست‌ها درست کار می‌کنند — exT_2 که بافرش
+ *   کش‌دار باشد چه نباشد، این تست‌ها درست کار می‌کنند — TransferDemo_QspiToSdram که بافرش
  *   در ناحیهٔ کش‌پذیر SDRAM است هم مستثنا نیست.
  */
 
@@ -147,7 +147,7 @@ static FM_Bool qspi_ready(void)
  * لاگ (FM_LOG_BUF_SIZE) کوچک است؛ اسپم درصد، خروجی بقیهٔ تست‌ها را
  * می‌بلعد. برای لغو، FM_FALSE برگردانید.
  */
-static FM_Bool q_progress(uint64_t done, uint64_t total, void *user)
+static FM_Bool transfer_demo_progress(uint64_t done, uint64_t total, void *user)
 {
     static uint32_t last_step = 100u;
     uint32_t pct;
@@ -165,14 +165,14 @@ static FM_Bool q_progress(uint64_t done, uint64_t total, void *user)
     return FM_TRUE;
 }
 
-/* exT_1 — از SD کارت به QSPI.
+/* TransferDemo_SdToQspi — از SD کارت به QSPI.
  *
  * کاربرد واقعی: فایلی که همیشه لازم دارید (فونت، لوگو، کالیبراسیون) را
  * از SD روی فلش داخلی ببرید تا بدون کارت هم در دسترس باشد.
  *
- * منبع پیش‌فرض /config.json است (مثال ۵ همان را می‌سازد). اگر روی SD
+ * منبع پیش‌فرض /config.json است (FileDemo_Json همان را می‌سازد). اگر روی SD
  * نبود، یک فایل نمونه می‌سازد تا تست همیشه قابل اجرا باشد. */
-void exT_1_sd_to_qspi(void)
+void TransferDemo_SdToQspi(void)
 {
     FM_TransferOpts o;
     FM_TransferInfo info;
@@ -180,20 +180,20 @@ void exT_1_sd_to_qspi(void)
     const char *src = "/config.json";
     FM_Bool exists = FM_FALSE;
 
-    puts("\n================ exT_1_sd_to_qspi =================");
+    puts("\n================ TransferDemo_SdToQspi =================");
     if (!qspi_ready()) return;
 
     if (File_Exists(src, &exists) != FM_OK || !exists)
     {
         src = "/qspi_demo_src.txt";
-        q_step("write demo source",
+        transfer_demo_step("write demo source",
                File_WriteText(src,
                    "QSPI transfer demo source file (from SD side)."));
     }
 
     memset(&o, 0, sizeof(o));
     o.verify = FM_TRUE;        /* بعد از کپی CRC دو طرف مقایسه شود */
-    o.progress = q_progress;
+    o.progress = transfer_demo_progress;
 
     r = FM_Transfer_CopyEx(src, "/qspi/config.json", &o, &info);
     if (r == FM_OK)
@@ -204,17 +204,17 @@ void exT_1_sd_to_qspi(void)
     }
     else
     {
-        q_step("SD -> QSPI", r);
+        transfer_demo_step("SD -> QSPI", r);
     }
 }
 
-/* exT_2 — از QSPI به SDRAM (بافر حافظه).
+/* TransferDemo_QspiToSdram — از QSPI به SDRAM (بافر حافظه).
  *
  * کاربرد واقعی: یک کلیپ یا تصویر را یک‌بار در SDRAM بارگذاری کنید تا
  * پخش/نمایشش سریع باشد و هر فریم از فلش خوانده نشود.
  *
- * ورودی همان فایلی است که exT_1 کپی کرده؛ پس این دو را پشت هم صدا بزنید. */
-void exT_2_qspi_to_sdram(void)
+ * ورودی همان فایلی است که TransferDemo_SdToQspi کپی کرده؛ پس این دو را پشت هم صدا بزنید. */
+void TransferDemo_QspiToSdram(void)
 {
     /* این بافر در SDRAM می‌نشیند — سکشن از fm_board_config.h می‌آید. */
 #if defined(__GNUC__) && !(defined(FM_HOST_BUILD) && FM_HOST_BUILD)
@@ -224,7 +224,7 @@ void exT_2_qspi_to_sdram(void)
     size_t len = 0;
     FM_Result r;
 
-    puts("\n=============== exT_2_qspi_to_sdram ===============");
+    puts("\n=============== TransferDemo_QspiToSdram ===============");
     if (!qspi_ready()) return;
 
     /* بافر در ناحیهٔ کش‌پذیر SDRAM است — اشکالی ندارد: بارگذاری از
@@ -241,12 +241,12 @@ void exT_2_qspi_to_sdram(void)
     }
     else
     {
-        q_step("QSPI -> SDRAM", r);
+        transfer_demo_step("QSPI -> SDRAM", r);
     }
 }
 
-/* exT_3 — رفت و برگشت کامل: RAM → QSPI → RAM، و اثبات یکی بودن. */
-void exT_3_verify_roundtrip(void)
+/* TransferDemo_VerifyRoundtrip — رفت و برگشت کامل: RAM → QSPI → RAM، و اثبات یکی بودن. */
+void TransferDemo_VerifyRoundtrip(void)
 {
     static uint8_t src[2048];
     static uint8_t dst[2048];
@@ -255,31 +255,31 @@ void exT_3_verify_roundtrip(void)
     uint32_t c1;
     uint32_t c2;
 
-    puts("\n============== exT_3_verify_roundtrip =============");
+    puts("\n============== TransferDemo_VerifyRoundtrip =============");
     if (!qspi_ready()) return;
 
     for (i = 0; i < sizeof(src); i++)
     {
         src[i] = (uint8_t)((i * 31u) ^ (i >> 3));
     }
-    c1 = EX_CRC32(src, sizeof(src), 0u);
+    c1 = DEMO_CRC32(src, sizeof(src), 0u);
 
-    q_step("RAM -> QSPI",
+    transfer_demo_step("RAM -> QSPI",
            FM_Transfer_SaveFile("/qspi/rt.bin", src, sizeof(src)));
-    q_step("QSPI -> RAM",
+    transfer_demo_step("QSPI -> RAM",
            FM_Transfer_LoadFile("/qspi/rt.bin", dst, sizeof(dst), &got));
 
-    c2 = EX_CRC32(dst, got, 0u);
+    c2 = DEMO_CRC32(dst, got, 0u);
     printf("  %lu bytes, CRC %08lX -> %08lX : %s\n",
            (unsigned long)got, (unsigned long)c1, (unsigned long)c2,
            (c1 == c2) ? "IDENTICAL" : "CORRUPTED");
 }
 
-/* exT_4 — همهٔ ترکیب‌ها در یک جدول.
+/* TransferDemo_AllCombinations — همهٔ ترکیب‌ها در یک جدول.
  *
  * چون همه‌چیز پشت مسیر فایل انتزاع شده، مبدأ و مقصد فقط دو رشته‌اند.
  * منبع می‌تواند SD باشد و مقصد QSPI، یا برعکس، یا هر ترکیب دیگری. */
-void exT_4_all_combinations(void)
+void TransferDemo_AllCombinations(void)
 {
     static const char *const paths[] = {
         "/ram_area.bin",     /* RAM disk / SDRAM که mount شده */
@@ -291,7 +291,7 @@ void exT_4_all_combinations(void)
     size_t i;
     size_t j;
 
-    puts("\n============= exT_4_all_combinations ==============");
+    puts("\n============= TransferDemo_AllCombinations ==============");
     if (!qspi_ready()) return;
 
     for (i = 0; i < sizeof(seed); i++)
@@ -325,4 +325,4 @@ void exT_4_all_combinations(void)
     }
 }
 
-#endif /* FM_EXAMPLE_25_QSPI_AND_TRANSFERS_H */
+#endif /* FM_TOPAPI_QSPI_TRANSFERS_H */

@@ -12,7 +12,7 @@
  *          Write: 24 bpp
  *   JPEG — still-image decode (picojpeg software, streamed — no heap
  *          slurp) and baseline encode; STM32 JPEG hardware via
- *          Image_RegisterCodec("JPEG", ...) / example 20 (falls back to
+ *          Image_RegisterCodec("JPEG", ...) / hw_jpeg.h (falls back to
  *          picojpeg when the file does not fit the heap)
  *   PNG  — decode of every colour type and bit depth (gray 1/2/4/8/16,
  *          RGB / RGBA / gray+alpha 8/16, palette 1/2/4/8), interlaced

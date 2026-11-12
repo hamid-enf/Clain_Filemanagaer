@@ -20,43 +20,43 @@ int main(void)
      * failed included -- went nowhere and this runner could not fail. */
     FM_Log_UseStdout();
 
-    if (SD_examples_begin() != FM_OK)
+    if (SdCard_Begin() != FM_OK)
     {
-        printf("SD_examples_begin FAILED\n");
+        printf("SdCard_Begin FAILED\n");
         return 1;
     }
 
-    printf("\n************ exS_1_file_basic ************\n");
-    exS_1_file_basic();
+    printf("\n************ SdDemo_Basic ************\n");
+    SdDemo_Basic();
 
-    printf("\n************ exS_2_file_copy_move_rename ************\n");
-    exS_2_file_copy_move_rename();
+    printf("\n************ SdDemo_CopyMoveRename ************\n");
+    SdDemo_CopyMoveRename();
 
-    printf("\n************ exS_3_file_advance ************\n");
-    exS_3_file_advance();
+    printf("\n************ SdDemo_Advanced ************\n");
+    SdDemo_Advanced();
 
-    printf("\n************ exS_4_file_directory ************\n");
-    exS_4_file_directory();
+    printf("\n************ SdDemo_Directory ************\n");
+    SdDemo_Directory();
 
-    printf("\n************ exS_5_file_json ************\n");
-    exS_5_file_json();
+    printf("\n************ SdDemo_Json ************\n");
+    SdDemo_Json();
 
-    printf("\n************ exS_6_file_text_line_edit ************\n");
-    exS_6_file_text_line_edit();
+    printf("\n************ SdDemo_TextLineEdit ************\n");
+    SdDemo_TextLineEdit();
 
-    printf("\n************ exS_7_file_Crash_Safe_Writes ************\n");
-    exS_7_file_Crash_Safe_Writes();
+    printf("\n************ SdDemo_CrashSafeWrites ************\n");
+    SdDemo_CrashSafeWrites();
 
-    printf("\n************ exS_8_file_Data_Logger ************\n");
-    exS_8_file_Data_Logger();
+    printf("\n************ SdDemo_DataLogger ************\n");
+    SdDemo_DataLogger();
 
-    printf("\n************ exS_9_file_crc_cheaksum ************\n");
-    exS_9_file_crc_cheaksum();
+    printf("\n************ SdDemo_CrcChecksum ************\n");
+    SdDemo_CrcChecksum();
 
-    printf("\n************ exS_10_file_BMP_Image_Scale_Convert ************\n");
-    exS_10_file_BMP_Image_Scale_Convert();
+    printf("\n************ SdDemo_BmpScaleConvert ************\n");
+    SdDemo_BmpScaleConvert();
 
-    SD_examples_end();
+    SdCard_End();
     printf("\n===== ALL SD EXAMPLES DONE OK =====\n");
     return 0;
 }

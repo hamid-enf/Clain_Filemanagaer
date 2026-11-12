@@ -117,7 +117,7 @@ typedef struct {
 typedef struct {
     uint32_t TimeOutActivation, TimeOutPeriod;
 } QSPI_MemoryMappedTypeDef;
-/* State و hmdma: درایورهای DMA محورِ مثال ۱۵/۲۶ به آن‌ها نگاه می‌کنند. */
+/* State و hmdma: درایورهای DMA محورِ qspi_w25q.h / qspi_driver.h به آن‌ها نگاه می‌کنند. */
 typedef struct {
     uint32_t Instance; uint32_t State; void *hmdma;
 } QSPI_HandleTypeDef;
@@ -306,7 +306,7 @@ static inline HAL_StatusTypeDef HAL_QSPI_Transmit_DMA(QSPI_HandleTypeDef *h,
 static inline HAL_StatusTypeDef HAL_QSPI_Receive_DMA(QSPI_HandleTypeDef *h,
     uint8_t *d) { (void)h; (void)d; return HAL_OK; }
 
-/* I2C — پل EEPROM مثال ۳۲ (فقط سینتکس) */
+/* I2C — پل EEPROM i2c_eeprom_dma.h (فقط سینتکس) */
 typedef struct {
     uint32_t Instance, AddressingMode, DualAddressMode, OwnAddress1,
              OwnAddress2, GeneralCallMode, NoStretchMode;

@@ -2,8 +2,8 @@
  * app_video_hooks.h — قلاب‌های ویدیو
  * ==================================
  *
- *   my_video_track_start/end    شروع و پایان هر ویدیو
- *   my_video_frame_cb           هر فریم دیکدشده (حتی بدون نمایش)
+ *   app_video_track_start/end    شروع و پایان هر ویدیو
+ *   app_video_frame_cb           هر فریم دیکدشده (حتی بدون نمایش)
  *   Music_InstallVideoHooks()   نصب هر سه — بعد از هر SimpleVideo_Begin()
  *   Music_VideoMute/Unmute      دستورهای vmut / vunmut
  *
@@ -13,8 +13,8 @@
 #define FM_BOARD_APP_VIDEO_HOOKS_H_
 
 /* ---- قلاب‌های ویدیو: شروع/پایان ترک + دادهٔ فریم (DSP مستقل از نمایش) ----
- *   - my_video_track_start/end: می‌گوید کدام ویدیو شروع/تمام شد.
- *   - my_video_frame_cb: هر فریم دیکدشده (تبدیل‌شده به sv.format، پیش‌فرض
+ *   - app_video_track_start/end: می‌گوید کدام ویدیو شروع/تمام شد.
+ *   - app_video_frame_cb: هر فریم دیکدشده (تبدیل‌شده به sv.format، پیش‌فرض
  *     RGB565) را تحویل می‌دهد؛ حتی وقتی SimpleVideo_SetPresent(NULL) است
  *     (حالت فقط-داده: ۶۰٪ مواقع فقط داده می‌خواهیم، نه LCD). اینجا فقط یک
  *     شمارنده/تله‌متری سبک — پردازش گران را به تپ PCM یا فریم بدهید.
@@ -24,7 +24,7 @@ static volatile uint32_t video_frames;          /* فریم‌های دیده‌
 static volatile uint32_t video_seq;             /* شمارهٔ ویدیوی در حال پخش */
 static char last_video_track[FM_PATH_MAX];
 
-static void my_video_track_start(void *ctx, const char *path,
+static void app_video_track_start(void *ctx, const char *path,
                                  uint32_t w, uint32_t h, uint32_t fps)
 {
     (void)ctx;
@@ -38,14 +38,14 @@ static void my_video_track_start(void *ctx, const char *path,
            (unsigned long)w, (unsigned long)h, (unsigned long)fps);
 }
 
-static void my_video_track_end(void *ctx, const char *path)
+static void app_video_track_end(void *ctx, const char *path)
 {
     (void)ctx;
     printf("video track END: %s (frames=%lu)\n",
            (path != NULL) ? path : "", (unsigned long)video_frames);
 }
 
-static void my_video_frame_cb(void *ctx, const void *px, uint16_t w,
+static void app_video_frame_cb(void *ctx, const void *px, uint16_t w,
                               uint16_t h, FM_PixelFormat fmt, size_t bytes)
 {
     (void)ctx; (void)px; (void)w; (void)h; (void)fmt; (void)bytes;
@@ -59,9 +59,9 @@ static void my_video_frame_cb(void *ctx, const void *px, uint16_t w,
 static void Music_InstallVideoHooks(void)
 {
     video_frames = 0u;
-    SimpleVideo_SetTrackStartCallback(my_video_track_start, NULL);
-    SimpleVideo_SetTrackEndCallback(my_video_track_end, NULL);
-    SimpleVideo_SetFrameCallback(my_video_frame_cb, NULL);
+    SimpleVideo_SetTrackStartCallback(app_video_track_start, NULL);
+    SimpleVideo_SetTrackEndCallback(app_video_track_end, NULL);
+    SimpleVideo_SetFrameCallback(app_video_frame_cb, NULL);
 }
 
 /* vmut: صدای ویدیو را خاموش (مسیر پردازش، نیاز به صدا نیست).

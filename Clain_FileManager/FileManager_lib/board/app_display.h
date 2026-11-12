@@ -5,8 +5,8 @@
  *   HAL_SPI_TxCpltCallback / HAL_SPI_ErrorCallback
  *       پایان یا خطای انتقال DMA را به درایور نمایشگر (spi_tft_dma.h)
  *       می‌رسانند.
- *   my_lcd_blit        present اسلایدشو  (SimpleImage_SetPresent)
- *   my_lcd_blit_video  present ویدیو     (SimpleVideo_SetPresent)
+ *   App_LcdBlit        present اسلایدشو  (SimpleImage_SetPresent)
+ *   App_LcdBlitVideo  present ویدیو     (SimpleVideo_SetPresent)
  *
  * فقط از main.c شامل می‌شود (بعد از defines.h) — توضیح در board/README.md.
  */
@@ -39,7 +39,7 @@ static const char *fmt_s[] = {
     "GRAY8","RGB565","RGB888","RGBA8888","BGR565","BGR888","BGRA8888"
 };
 
-void my_lcd_blit(const void *px, uint16_t w, uint16_t h,
+void App_LcdBlit(const void *px, uint16_t w, uint16_t h,
                  FM_PixelFormat fmt, size_t bytes)
 {
     (void)fmt;
@@ -63,7 +63,7 @@ void my_lcd_blit(const void *px, uint16_t w, uint16_t h,
 #endif
 }
 
-void my_lcd_blit_video(const void *px, uint16_t w, uint16_t h,
+void App_LcdBlitVideo(const void *px, uint16_t w, uint16_t h,
                  FM_PixelFormat fmt, size_t bytes)
 {
     (void)fmt;

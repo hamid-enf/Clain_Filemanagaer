@@ -1,5 +1,5 @@
 /*
- * Example 04 — Directories
+ * directory.c — Directories
  *
  * APIها:
  *   Directory_Create          — ایجاد پوشه

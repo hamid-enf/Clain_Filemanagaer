@@ -1,5 +1,5 @@
 /*
- * Example 09 — CRC & Checksum
+ * crc_example.c — CRC & Checksum
  *
  * APIها:
  *   CRC_Calculate16      — CRC16-CCITT

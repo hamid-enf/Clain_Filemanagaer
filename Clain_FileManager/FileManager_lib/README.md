@@ -1052,11 +1052,11 @@ STM32H7/SD examples are target-oriented and are not part of `make examples`:
 - `examples/qspi_transfers.h` — verified data transfers between SD ↔ QSPI ↔ SDRAM ↔ RAM (uses the mount from `examples_qspi.h`)
 - `examples/qspi_driver.h` — generic QUADSPI driver with automatic JEDEC chip detection, memory-mapped reads and engine-driven data phase (`fm_xdma.h`)
 - `examples/play_from_flash.h` — play music/video directly from QSPI flash through the media cache
-- `examples/i2c_eeprom_dma.h` — I2C EEPROM bridge with DMA-driven data phase (ACK-polling write cycle) wired to `FM_Eeprom`; feeds example 28
-- `examples/spi_flash_dma_port.h` — serial flash on plain SPI for any STM32 family: DMA-capable transfer callback, FMFS mount on `/flash`, file/CRC/transfer/stats test suite (`exF_1..5`)
+- `examples/i2c_eeprom_dma.h` — I2C EEPROM bridge with DMA-driven data phase (ACK-polling write cycle) wired to `FM_Eeprom`; feeds eeprom_simple.h
+- `examples/spi_flash_dma_port.h` — serial flash on plain SPI for any STM32 family: DMA-capable transfer callback, FMFS mount on `/flash`, file/CRC/transfer/stats test suite (`SpiFlashDemo_Smoke..5`)
 - `examples/usb_sd_presenter.h` — معماری «فقط SD به PC» با سوییچ هوشمند مالکیت (ShowToPc/TakeBack) و فایل دوطرفهٔ FAT
 - `examples/usb_present.h` — present SD / QSPI / SPI-flash to the PC as a USB MSC drive (single-LUN switch, owner-switch helpers, full CubeMX checklist)
-- `examples/fm_xdma.h` — the one portable DMA engine behind examples 15/26: auto-detected per family (H7 MDMA, H5 GPDMA/OCTOSPI), permanent polling fallback, cache maintenance in one place
+- `examples/fm_xdma.h` — the one portable DMA engine behind qspi_w25q.h / qspi_driver.h: auto-detected per family (H7 MDMA, H5 GPDMA/OCTOSPI), permanent polling fallback, cache maintenance in one place
 - `examples/examples_sdcard.h` — file examples 01-10 on a mounted SD card
 - `examples/examples_sdcard_media.h` — WAV/FMRV, media detection and verified media copies
 - `examples/examples_sdcard_player.h` — playlist, seek, next/previous and audio/video player controls

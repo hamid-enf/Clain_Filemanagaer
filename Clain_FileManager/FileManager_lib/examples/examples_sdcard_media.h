@@ -2,33 +2,33 @@
  * examples_sdcard_media.h — مثال‌های موسیقی/صدا و ویدئو روی SD
  *
  * پنج مثال ساده و واضح:
- *   exM_1_audio_wav    : ساخت یک فایل WAV (سینوس 440Hz) با AudioWriter،
+ *   SdMediaDemo_AudioWav    : ساخت یک فایل WAV (سینوس 440Hz) با AudioWriter،
  *                        خواندن اطلاعات، پخش (خواندن نمونه‌ها) و Seek
- *   exM_2_video_fmrv   : ساخت یک ویدئوی خام FMRV (کانتینر داخلی کتابخانه)
+ *   SdMediaDemo_VideoFmrv   : ساخت یک ویدئوی خام FMRV (کانتینر داخلی کتابخانه)
  *                        با VideoWriter، خواندن فریم‌ها و بررسی صحت
- *   exM_3_copy_song    : (سناریوی شما) آهنگ از SD → ذخیره با اسم جدید +
+ *   SdMediaDemo_CopySong    : (سناریوی شما) آهنگ از SD → ذخیره با اسم جدید +
  *                        مقایسه‌ی CRC32 دو فایل (تست سالم بودن SD)
- *   exM_4_copy_video   : (سناریوی شما) ویدئو از SD → ذخیره با اسم جدید +
+ *   SdMediaDemo_CopyVideo   : (سناریوی شما) ویدئو از SD → ذخیره با اسم جدید +
  *                        مقایسه‌ی CRC32
- *   exM_5_media_detect : تشخیص خودکار نوع رسانه از magic فایل‌ها
+ *   SdMediaDemo_MediaDetect : تشخیص خودکار نوع رسانه از magic فایل‌ها
  *
- * پیش‌نیاز: SD_examples_begin() از examples_sdcard.h قبلاً صدا
- * شده باشد و SD_examples_end() فقط بعد از آخرین exM_* اجرا شود:
+ * پیش‌نیاز: SdCard_Begin() از examples_sdcard.h قبلاً صدا
+ * شده باشد و SdCard_End() فقط بعد از آخرین SdMediaDemo_* اجرا شود:
  *
- *   if (SD_examples_begin() == FM_OK) {
- *       exM_1_audio_wav();
- *       exM_2_video_fmrv();
- *       exM_3_copy_song();
- *       exM_4_copy_video();
- *       exM_5_media_detect();
- *       SD_examples_end();
+ *   if (SdCard_Begin() == FM_OK) {
+ *       SdMediaDemo_AudioWav();
+ *       SdMediaDemo_VideoFmrv();
+ *       SdMediaDemo_CopySong();
+ *       SdMediaDemo_CopyVideo();
+ *       SdMediaDemo_MediaDetect();
+ *       SdCard_End();
  *   }
  *
  * همه‌ی printfها با %lu/%d/%s هستند (سازگار با mini-printf).
  */
 
-#ifndef EXAMPLES_FILE_SDCARD_MEDIA_H_
-#define EXAMPLES_FILE_SDCARD_MEDIA_H_
+#ifndef FM_TOPAPI_SDCARD_MEDIA_DEMOS_H
+#define FM_TOPAPI_SDCARD_MEDIA_DEMOS_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -45,11 +45,11 @@
  * has no CRC module, so the example carries the same loop itself
  * (reflected 0xEDB88320, no init / final XOR: identical results to
  * CRC_Compute32) instead of breaking the build. */
-#ifndef EX_CRC32
+#ifndef DEMO_CRC32
 #if FM_USE_CRC
-#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
 #else
-static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+static uint32_t demo_crc32_local(const void *data, size_t len, uint32_t crc)
 {
     const uint8_t *p = (const uint8_t *)data;
     size_t i;
@@ -65,9 +65,9 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
     }
     return crc;
 }
-#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) demo_crc32_local((data), (len), (crc))
 #endif
-#endif /* EX_CRC32 */
+#endif /* DEMO_CRC32 */
 
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
@@ -86,30 +86,30 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
 /* ابزارهای کمکی                                                        */
 /*----------------------------------------------------------------------*/
 
-static void exm_step(const char *what, FM_Result r)
+static void sd_media_demo_step(const char *what, FM_Result r)
 {
     if (r != FM_OK)
         printf("  !! %s -> %s (%d)\n", what, File_GetErrorString(r), (int)r);
 }
 
 /* Media examples مالک mount نیستند. این guard جلوی ادامه‌دادن با handleها
- * و ساختارهای نامعتبر را می‌گیرد اگر caller زودتر SD_examples_end() زده باشد. */
-static FM_Bool exm_require_mounted(const char *example_name)
+ * و ساختارهای نامعتبر را می‌گیرد اگر caller زودتر SdCard_End() زده باشد. */
+static FM_Bool sd_media_demo_require_mounted(const char *example_name)
 {
     FM_Bool mounted = FM_FALSE;
     FM_Result r = FS_IsMounted("/", &mounted);
 
     if (r != FM_OK || !mounted)
     {
-        printf("  !! %s requires mounted SD: call SD_examples_begin() before "
-               "media and SD_examples_end() after it\n", example_name);
+        printf("  !! %s requires mounted SD: call SdCard_Begin() before "
+               "media and SdCard_End() after it\n", example_name);
         return FM_FALSE;
     }
     return FM_TRUE;
 }
 
 /* CRC32 یک فایل به‌صورت تکه‌تکه (برای فایل‌های بزرگ) */
-static FM_Result exm_crc32_file(const char *path, uint32_t *crc_out)
+static FM_Result sd_media_demo_crc32_file(const char *path, uint32_t *crc_out)
 {
     FM_File *f;
     uint8_t  buf[512];
@@ -125,7 +125,7 @@ static FM_Result exm_crc32_file(const char *path, uint32_t *crc_out)
         r = File_Read(f, buf, sizeof(buf), &got);
         if (r != FM_OK && r != FM_ERR_EOF) { File_Close(f); return r; }
         if (got == 0) break;
-        crc = EX_CRC32(buf, got, crc);
+        crc = DEMO_CRC32(buf, got, crc);
         if (r == FM_ERR_EOF) break;
     }
     (void)File_Close(f);
@@ -134,7 +134,7 @@ static FM_Result exm_crc32_file(const char *path, uint32_t *crc_out)
 }
 
 /* /music/song.mp3 -> /music/song_copy.mp3 */
-static void exm_make_copy_name(const char *src, char *out, size_t out_size)
+static void sd_media_demo_make_copy_name(const char *src, char *out, size_t out_size)
 {
     const char *dot = strrchr(src, '.');
     size_t base;
@@ -153,7 +153,7 @@ static void exm_make_copy_name(const char *src, char *out, size_t out_size)
 }
 
 /* اگر path موجود نبود، اولین فایلِ folder را پیدا کن */
-static FM_Result exm_pick_file(const char *path, const char *folder,
+static FM_Result sd_media_demo_pick_file(const char *path, const char *folder,
                                char *out, size_t out_size)
 {
     FM_Bool exists = FM_FALSE;
@@ -183,7 +183,7 @@ static FM_Result exm_pick_file(const char *path, const char *folder,
 
 /* پیشرفت کپی — فقط هر ۲۵٪ یک خط چاپ می‌کند تا خروجی شلوغ نشود */
 typedef struct { uint32_t last_pct; } ExmProgress;
-static void exm_copy_progress(uint64_t done, uint64_t total, void *ud)
+static void sd_media_demo_copy_progress(uint64_t done, uint64_t total, void *ud)
 {
     ExmProgress *p = (ExmProgress *)ud;
     uint32_t pct = (total != 0) ? (uint32_t)(done * 100u / total) : 100u;
@@ -196,7 +196,7 @@ static void exm_copy_progress(uint64_t done, uint64_t total, void *ud)
 }
 
 /* هسته‌ی مشترک سناریوهای «کپی با اسم جدید + تأیید» */
-static FM_Result exm_copy_and_verify(const char *title, const char *src)
+static FM_Result sd_media_demo_copy_and_verify(const char *title, const char *src)
 {
     char dst[FM_PATH_MAX];
     uint64_t s1 = 0, s2 = 0;
@@ -210,18 +210,18 @@ static FM_Result exm_copy_and_verify(const char *title, const char *src)
     type = File_DetectType(src);
     printf("type:   %s\n", Media_TypeName(type));
 
-    exm_make_copy_name(src, dst, sizeof(dst));
+    sd_media_demo_make_copy_name(src, dst, sizeof(dst));
     printf("dest:   %s\n", dst);
 
     {
         ExmProgress p;
 
         p.last_pct = 0;
-        r = File_Copy(src, dst, exm_copy_progress, &p);
+        r = File_Copy(src, dst, sd_media_demo_copy_progress, &p);
     }
     if (r != FM_OK)
     {
-        exm_step("File_Copy", r);
+        sd_media_demo_step("File_Copy", r);
         return r;
     }
 
@@ -229,7 +229,7 @@ static FM_Result exm_copy_and_verify(const char *title, const char *src)
     if (r == FM_OK) r = File_SizeOf(dst, &s2);
     if (r != FM_OK)
     {
-        exm_step("File_SizeOf", r);
+        sd_media_demo_step("File_SizeOf", r);
         return r;
     }
     printf("size:   %lu -> %lu bytes\n",
@@ -240,11 +240,11 @@ static FM_Result exm_copy_and_verify(const char *title, const char *src)
         return FM_ERR_IO;
     }
 
-    r = exm_crc32_file(src, &c1);
-    if (r == FM_OK) r = exm_crc32_file(dst, &c2);
+    r = sd_media_demo_crc32_file(src, &c1);
+    if (r == FM_OK) r = sd_media_demo_crc32_file(dst, &c2);
     if (r != FM_OK)
     {
-        exm_step("CRC32 copied file", r);
+        sd_media_demo_step("CRC32 copied file", r);
         return r;
     }
 
@@ -255,10 +255,10 @@ static FM_Result exm_copy_and_verify(const char *title, const char *src)
 }
 
 /*----------------------------------------------------------------------*/
-/* exM_1 — صدا: ساخت WAV سینوسی + خواندن + Seek                          */
+/* SdMediaDemo_AudioWav — صدا: ساخت WAV سینوسی + خواندن + Seek                          */
 /*----------------------------------------------------------------------*/
 
-void exM_1_audio_wav(void)
+void SdMediaDemo_AudioWav(void)
 {
     FM_AudioWriter w;
     FM_Audio a;
@@ -268,7 +268,7 @@ void exM_1_audio_wav(void)
     size_t i, written_frames = 0, total_samples = 0;
 
     printf("\n--- make /tone.wav (440 Hz, 0.5 s) ---\n");
-    if (!exm_require_mounted("exM_1_audio_wav")) return;
+    if (!sd_media_demo_require_mounted("SdMediaDemo_AudioWav")) return;
 
     memset(&w, 0, sizeof(w));
     memset(&a, 0, sizeof(a));
@@ -278,7 +278,7 @@ void exM_1_audio_wav(void)
     r = AudioWriter_Create("/tone.wav", 8000, 1, 16, &w);
     if (r != FM_OK)
     {
-        exm_step("AudioWriter_Create", r);
+        sd_media_demo_step("AudioWriter_Create", r);
         return;
     }
 
@@ -303,7 +303,7 @@ void exM_1_audio_wav(void)
         r = AudioWriter_Write(&w, chunk, n, &written);
         if (r != FM_OK || written != n)
         {
-            exm_step("AudioWriter_Write",
+            sd_media_demo_step("AudioWriter_Write",
                      (r != FM_OK) ? r : FM_ERR_IO);
             (void)AudioWriter_Close(&w);
             return;
@@ -314,7 +314,7 @@ void exM_1_audio_wav(void)
     r = AudioWriter_Close(&w);
     if (r != FM_OK)
     {
-        exm_step("AudioWriter_Close", r);
+        sd_media_demo_step("AudioWriter_Close", r);
         return;
     }
     printf("wrote %lu samples (%.2f s)\n",
@@ -324,14 +324,14 @@ void exM_1_audio_wav(void)
     r = Audio_Open("/tone.wav", &a);
     if (r != FM_OK)
     {
-        exm_step("Audio_Open", r);
+        sd_media_demo_step("Audio_Open", r);
         return;
     }
 
     r = Audio_GetInfo(&a, &info);
     if (r != FM_OK)
     {
-        exm_step("Audio_GetInfo", r);
+        sd_media_demo_step("Audio_GetInfo", r);
         (void)Audio_Close(&a);
         return;
     }
@@ -348,7 +348,7 @@ void exM_1_audio_wav(void)
         r = Audio_Read(&a, chunk, 256, &got);
         if (r != FM_OK && r != FM_ERR_EOF)
         {
-            exm_step("Audio_Read", r);
+            sd_media_demo_step("Audio_Read", r);
             (void)Audio_Close(&a);
             return;
         }
@@ -368,26 +368,26 @@ void exM_1_audio_wav(void)
             printf("after seek 0.25s: %lu channel-sample(s)\n",
                    (unsigned long)got);
         else
-            exm_step("Audio_ReadFrame", r);
+            sd_media_demo_step("Audio_ReadFrame", r);
     }
     else
     {
-        exm_step("Audio_Seek", r);
+        sd_media_demo_step("Audio_Seek", r);
     }
 
     r = Audio_Close(&a);
-    if (r != FM_OK) exm_step("Audio_Close", r);
+    if (r != FM_OK) sd_media_demo_step("Audio_Close", r);
 }
 
 /*----------------------------------------------------------------------*/
-/* exM_2 — ویدئو: ساخت FMRV + خواندن فریم‌ها                             */
+/* SdMediaDemo_VideoFmrv — ویدئو: ساخت FMRV + خواندن فریم‌ها                             */
 /*----------------------------------------------------------------------*/
 
 #define EXM_VW 16
 #define EXM_VH 16
 #define EXM_VFRAMES 8
 
-static void exm_fill_frame(uint8_t *px, uint8_t frame_no)
+static void sd_media_demo_fill_frame(uint8_t *px, uint8_t frame_no)
 {
     for (int y = 0; y < EXM_VH; y++)
         for (int x = 0; x < EXM_VW; x++)
@@ -399,7 +399,7 @@ static void exm_fill_frame(uint8_t *px, uint8_t frame_no)
         }
 }
 
-void exM_2_video_fmrv(void)
+void SdMediaDemo_VideoFmrv(void)
 {
     FM_VideoWriter vw;
     FM_Video v;
@@ -412,7 +412,7 @@ void exM_2_video_fmrv(void)
     printf("\n--- make /clip.fmrv (%lux%lu, %lu frames, 10 fps) ---\n",
            (unsigned long)EXM_VW, (unsigned long)EXM_VH,
            (unsigned long)EXM_VFRAMES);
-    if (!exm_require_mounted("exM_2_video_fmrv")) return;
+    if (!sd_media_demo_require_mounted("SdMediaDemo_VideoFmrv")) return;
 
     memset(&vw, 0, sizeof(vw));
     memset(&v, 0, sizeof(v));
@@ -423,17 +423,17 @@ void exM_2_video_fmrv(void)
                            EXM_VFRAMES, sizeof(frame), &vw);
     if (r != FM_OK)
     {
-        exm_step("VideoWriter_Create", r);
+        sd_media_demo_step("VideoWriter_Create", r);
         return;
     }
 
     for (fr = 0; fr < EXM_VFRAMES; fr++)
     {
-        exm_fill_frame(frame, (uint8_t)fr);
+        sd_media_demo_fill_frame(frame, (uint8_t)fr);
         r = VideoWriter_WriteFrame(&vw, frame, sizeof(frame));
         if (r != FM_OK)
         {
-            exm_step("VideoWriter_WriteFrame", r);
+            sd_media_demo_step("VideoWriter_WriteFrame", r);
             (void)VideoWriter_Close(&vw);
             return;
         }
@@ -442,7 +442,7 @@ void exM_2_video_fmrv(void)
     r = VideoWriter_Close(&vw);
     if (r != FM_OK)
     {
-        exm_step("VideoWriter_Close", r);
+        sd_media_demo_step("VideoWriter_Close", r);
         return;
     }
 
@@ -450,14 +450,14 @@ void exM_2_video_fmrv(void)
     r = Video_Open("/clip.fmrv", &v);
     if (r != FM_OK)
     {
-        exm_step("Video_Open", r);
+        sd_media_demo_step("Video_Open", r);
         return;
     }
 
     r = Video_GetInfo(&v, &info);
     if (r != FM_OK)
     {
-        exm_step("Video_GetInfo", r);
+        sd_media_demo_step("Video_GetInfo", r);
         (void)Video_Close(&v);
         return;
     }
@@ -473,11 +473,11 @@ void exM_2_video_fmrv(void)
         r = Video_ReadFrame(&v, readback, sizeof(readback), &got);
         if (r != FM_OK)
         {
-            exm_step("Video_ReadFrame", r);
+            sd_media_demo_step("Video_ReadFrame", r);
             (void)Video_Close(&v);
             return;
         }
-        exm_fill_frame(frame, 0);
+        sd_media_demo_fill_frame(frame, 0);
         printf("frame 0: %lu bytes -> %s\n", (unsigned long)got,
                (got == sizeof(frame) && memcmp(frame, readback, got) == 0)
                    ? "content OK" : "CONTENT MISMATCH!");
@@ -495,7 +495,7 @@ void exM_2_video_fmrv(void)
         }
         if (r != FM_ERR_EOF)
         {
-            exm_step("Video_ReadFrame", r);
+            sd_media_demo_step("Video_ReadFrame", r);
             (void)Video_Close(&v);
             return;
         }
@@ -503,27 +503,27 @@ void exM_2_video_fmrv(void)
     }
 
     r = Video_Close(&v);
-    if (r != FM_OK) exm_step("Video_Close", r);
+    if (r != FM_OK) sd_media_demo_step("Video_Close", r);
 }
 
 /*----------------------------------------------------------------------*/
-/* exM_3 — سناریوی ۱: آهنگ را از SD بخوان و با اسم دیگری ذخیره کن        */
+/* SdMediaDemo_CopySong — سناریوی ۱: آهنگ را از SD بخوان و با اسم دیگری ذخیره کن        */
 /*----------------------------------------------------------------------*/
 
-void exM_3_copy_song(void)
+void SdMediaDemo_CopySong(void)
 {
     char src[FM_PATH_MAX];
 
-    printf("\n=== exM_3: copy a song from SD card ===\n");
-    if (!exm_require_mounted("exM_3_copy_song")) return;
+    printf("\n=== SdMediaDemo_CopySong: copy a song from SD card ===\n");
+    if (!sd_media_demo_require_mounted("SdMediaDemo_CopySong")) return;
 
-    if (exm_pick_file(EXM_SONG_PATH, EXM_SONG_DIR, src, sizeof(src)) != FM_OK)
+    if (sd_media_demo_pick_file(EXM_SONG_PATH, EXM_SONG_DIR, src, sizeof(src)) != FM_OK)
     {
         printf("no song found (put one in %s or set EXM_SONG_PATH)\n",
                EXM_SONG_DIR);
         return;
     }
-    if (exm_copy_and_verify("song copy", src) != FM_OK) return;
+    if (sd_media_demo_copy_and_verify("song copy", src) != FM_OK) return;
 
     /* برای فایل‌های WAV/MP3 می‌شود همین‌طور اطلاعات صوتی هم خواند */
     {
@@ -541,7 +541,7 @@ void exM_3_copy_song(void)
                        (unsigned long)info.sample_rate, (int)info.channels,
                        (int)info.bits_per_sample, info.codec);
             else
-                exm_step("Audio_GetInfo", r);
+                sd_media_demo_step("Audio_GetInfo", r);
             (void)Audio_Close(&a);
         }
         else
@@ -553,23 +553,23 @@ void exM_3_copy_song(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exM_4 — سناریوی ۲: ویدئو را از SD بخوان و با اسم دیگری ذخیره کن       */
+/* SdMediaDemo_CopyVideo — سناریوی ۲: ویدئو را از SD بخوان و با اسم دیگری ذخیره کن       */
 /*----------------------------------------------------------------------*/
 
-void exM_4_copy_video(void)
+void SdMediaDemo_CopyVideo(void)
 {
     char src[FM_PATH_MAX];
 
-    printf("\n=== exM_4: copy a video from SD card ===\n");
-    if (!exm_require_mounted("exM_4_copy_video")) return;
+    printf("\n=== SdMediaDemo_CopyVideo: copy a video from SD card ===\n");
+    if (!sd_media_demo_require_mounted("SdMediaDemo_CopyVideo")) return;
 
-    if (exm_pick_file(EXM_VIDEO_PATH, EXM_VIDEO_DIR, src, sizeof(src)) != FM_OK)
+    if (sd_media_demo_pick_file(EXM_VIDEO_PATH, EXM_VIDEO_DIR, src, sizeof(src)) != FM_OK)
     {
         printf("no video found (put one in %s or set EXM_VIDEO_PATH)\n",
                EXM_VIDEO_DIR);
         return;
     }
-    if (exm_copy_and_verify("video copy", src) != FM_OK) return;
+    if (sd_media_demo_copy_and_verify("video copy", src) != FM_OK) return;
 
     /* FMRV و AVI/MP4 معتبر توسط Video_Open parse می‌شوند. بازشدن container
      * به معنی قابل decode بودن codec آن روی هر build/برد نیست. */
@@ -589,7 +589,7 @@ void exM_4_copy_video(void)
                        (unsigned long)info.fps,
                        (unsigned long)info.frame_count, info.container);
             else
-                exm_step("Video_GetInfo", r);
+                sd_media_demo_step("Video_GetInfo", r);
             (void)Video_Close(&v);
         }
         else
@@ -601,17 +601,17 @@ void exM_4_copy_video(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exM_5 — تشخیص خودکار نوع رسانه                                         */
+/* SdMediaDemo_MediaDetect — تشخیص خودکار نوع رسانه                                         */
 /*----------------------------------------------------------------------*/
 
-void exM_5_media_detect(void)
+void SdMediaDemo_MediaDetect(void)
 {
     const char *files[] = { "/tone.wav", "/clip.fmrv",
                             EXM_SONG_PATH, EXM_VIDEO_PATH };
     uint32_t i;
 
     printf("\n--- media detection (magic bytes) ---\n");
-    if (!exm_require_mounted("exM_5_media_detect")) return;
+    if (!sd_media_demo_require_mounted("SdMediaDemo_MediaDetect")) return;
 
     for (i = 0; i < sizeof(files) / sizeof(files[0]); i++)
     {
@@ -621,4 +621,4 @@ void exM_5_media_detect(void)
     }
 }
 
-#endif /* EXAMPLES_FILE_SDCARD_MEDIA_H_ */
+#endif /* FM_TOPAPI_SDCARD_MEDIA_DEMOS_H */

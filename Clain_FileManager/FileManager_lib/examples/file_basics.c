@@ -1,5 +1,5 @@
 /*
- * Example 01 — File Basics
+ * file_basics.c — File Basics
  *
  * عملیات پایه روی فایل: نوشتن، خواندن، وجود داشتن، حذف.
  *

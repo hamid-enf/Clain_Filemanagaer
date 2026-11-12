@@ -14,11 +14,11 @@
  *   🖼 خروجی  → Player_DecodeVideo(p, pixels, cap, &w, &h) → به LCD
  *
  * سه مثال:
- *   exP_1_music_controls : کنترل کامل موزیک (لیست، پخش، seek، after/next)
- *   exP_2_video_controls : کنترل ویدئو (لیست، فریم‌به‌فریم، seek، next)
- *   exP_3_remote_buttons : شبیه‌سازی «ریموت» — جدول دکمه‌ها + switch
+ *   SdPlayerDemo_MusicControls : کنترل کامل موزیک (لیست، پخش، seek، after/next)
+ *   SdPlayerDemo_VideoControls : کنترل ویدئو (لیست، فریم‌به‌فریم، seek، next)
+ *   SdPlayerDemo_RemoteButtons : شبیه‌سازی «ریموت» — جدول دکمه‌ها + switch
  *
- * پیش‌نیاز: SD_examples_begin() قبلاً صدا شده باشد (مونت روی "/").
+ * پیش‌نیاز: SdCard_Begin() قبلاً صدا شده باشد (مونت روی "/").
  *
  * نکته‌ی حافظه: لیست پخش از fm_alloc (پیش‌فرض malloc) حافظه می‌گیرد؛
  * هر آیتم ~164 بایت است (100 آهنگ ≈ 16KB). اگر heap کوچک است یا می‌خواهید
@@ -27,8 +27,8 @@
  *     FM_Allocator_Set(&ext);
  */
 
-#ifndef EXAMPLES_FILE_SDCARD_PLAYER_H_
-#define EXAMPLES_FILE_SDCARD_PLAYER_H_
+#ifndef FM_TOPAPI_SDCARD_PLAYER_DEMOS_H
+#define FM_TOPAPI_SDCARD_PLAYER_DEMOS_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -43,13 +43,13 @@
 
 static FM_Player g_player;    /* بزرگ است (~1KB) — حتماً static، نه stack */
 
-static void exp_step(const char *what, FM_Result r)
+static void sd_player_demo_step(const char *what, FM_Result r)
 {
     if (r != FM_OK && r != FM_ERR_EOF)
         printf("  !! %s -> %s (%d)\n", what, File_GetErrorString(r), (int)r);
 }
 
-static void exp_print_playlist(FM_Player *p)
+static void sd_player_demo_print_playlist(FM_Player *p)
 {
     uint32_t i;
     uint32_t n = Player_Count(p);
@@ -62,22 +62,22 @@ static void exp_print_playlist(FM_Player *p)
 }
 
 /*----------------------------------------------------------------------*/
-/* exP_1 — کنترل کامل موزیک                                              */
+/* SdPlayerDemo_MusicControls — کنترل کامل موزیک                                              */
 /*----------------------------------------------------------------------*/
 
-void exP_1_music_controls(void)
+void SdPlayerDemo_MusicControls(void)
 {
     int16_t samples[256];        /* بافر خروجی «خط صدا» */
     size_t  got = 0;
     uint32_t k;
 
-    printf("=== exP_1: music controls ===\n");
+    printf("=== SdPlayerDemo_MusicControls: music controls ===\n");
 
     /* ۱) ساخت لیست پخش از پوشه‌ی /music (بازگشتی + مرتب‌شده) */
-    exp_step("Player_Init", Player_Init(&g_player));
-    exp_step("Player_ScanFolder(/music)",
+    sd_player_demo_step("Player_Init", Player_Init(&g_player));
+    sd_player_demo_step("Player_ScanFolder(/music)",
              Player_ScanFolder(&g_player, "/music", FM_PLAYER_KIND_AUDIO));
-    exp_print_playlist(&g_player);
+    sd_player_demo_print_playlist(&g_player);
 
     if (Player_Count(&g_player) == 0)
     {
@@ -87,7 +87,7 @@ void exP_1_music_controls(void)
     }
 
     /* ۲) ▶ PLAY — ترک ۰ */
-    exp_step("Player_Play(0)", Player_Play(&g_player, 0));
+    sd_player_demo_step("Player_Play(0)", Player_Play(&g_player, 0));
     printf("now playing: %s\n", Player_ItemPath(&g_player,
                                                 Player_Current(&g_player)));
 
@@ -96,7 +96,7 @@ void exP_1_music_controls(void)
     for (k = 0; k < 3; k++)
     {
         FM_Result r = Player_ReadAudio(&g_player, samples, 256, &got);
-        exp_step("Player_ReadAudio", r);
+        sd_player_demo_step("Player_ReadAudio", r);
         if (r == FM_ERR_EOF)
         {
             /* مثل پخش‌کننده‌ی واقعی: پایان ترک → خودکار بعدی */
@@ -109,27 +109,27 @@ void exP_1_music_controls(void)
            Player_GetPosition(&g_player), Player_GetDuration(&g_player));
 
     /* ۴) ⏩ دکمه‌ی جلو بردن ۰.۱ ثانیه */
-    exp_step("Player_SeekFwd(0.1)", Player_SeekFwd(&g_player, 0.1));
+    sd_player_demo_step("Player_SeekFwd(0.1)", Player_SeekFwd(&g_player, 0.1));
     (void)Player_ReadAudio(&g_player, samples, 256, &got);
     printf("after seek+: position %.2f s\n", Player_GetPosition(&g_player));
 
     /* ۵) ⏪ دکمه‌ی عقب بردن */
-    exp_step("Player_SeekBack(0.2)", Player_SeekBack(&g_player, 0.2));
+    sd_player_demo_step("Player_SeekBack(0.2)", Player_SeekBack(&g_player, 0.2));
 
     /* ۶) ⏭ NEXT / ⏮ PREV */
-    exp_step("Player_Next", Player_Next(&g_player));
+    sd_player_demo_step("Player_Next", Player_Next(&g_player));
     printf("now playing: %s\n", Player_ItemPath(&g_player,
                                                 Player_Current(&g_player)));
-    exp_step("Player_Prev", Player_Prev(&g_player));
+    sd_player_demo_step("Player_Prev", Player_Prev(&g_player));
 
     /* ۷) ⏹ STOP و آزادسازی */
-    exp_step("Player_Stop", Player_Stop(&g_player));
+    sd_player_demo_step("Player_Stop", Player_Stop(&g_player));
     Player_Deinit(&g_player);      /* لیست پخش آزاد می‌شود */
     printf("stopped, playlist freed\n");
 }
 
 /*----------------------------------------------------------------------*/
-/* exP_2 — کنترل ویدئو (فریم‌به‌فریم)                                     */
+/* SdPlayerDemo_VideoControls — کنترل ویدئو (فریم‌به‌فریم)                                     */
 /*----------------------------------------------------------------------*/
 
 #define EXP_VW 16
@@ -137,7 +137,7 @@ void exP_1_music_controls(void)
 #define EXP_VFRAMES 8
 
 /* ساخت یک کلیپ کوچک FMRV برای دمو (روی کارت شما هم ساخته می‌شود) */
-static void exp_make_clip(const char *path, uint8_t base)
+static void sd_player_demo_make_clip(const char *path, uint8_t base)
 {
     FM_VideoWriter w;
     static uint8_t px[EXP_VW * EXP_VH * 3];   /* static: از stack نمی‌گیرد */
@@ -161,29 +161,29 @@ static void exp_make_clip(const char *path, uint8_t base)
     (void)VideoWriter_Close(&w);
 }
 
-void exP_2_video_controls(void)
+void SdPlayerDemo_VideoControls(void)
 {
     static uint8_t pixels[EXP_VW * EXP_VH * 3];  /* بافر فریم RGB888 */
     uint16_t w = 0, h = 0;
     uint32_t frame;
 
-    printf("=== exP_2: video controls ===\n");
+    printf("=== SdPlayerDemo_VideoControls: video controls ===\n");
 
     /* ۱) دو کلیپ دمو در /vlist (برای فایل‌های واقعی خودتان فقط پوشه را
      *    عوض کنید — FMRV/AVI-MJPEG/MP4 پشتیبانی می‌شوند) */
     Directory_Create("/vlist");
-    exp_make_clip("/vlist/clip_a.fmrv", 10);
-    exp_make_clip("/vlist/clip_b.fmrv", 100);
+    sd_player_demo_make_clip("/vlist/clip_a.fmrv", 10);
+    sd_player_demo_make_clip("/vlist/clip_b.fmrv", 100);
     printf("made 2 demo clips in /vlist\n");
 
     /* ۲) لیست پخشِ فقط-ویدئویی */
-    exp_step("Player_Init", Player_Init(&g_player));
-    exp_step("Player_ScanFolder(/vlist)",
+    sd_player_demo_step("Player_Init", Player_Init(&g_player));
+    sd_player_demo_step("Player_ScanFolder(/vlist)",
              Player_ScanFolder(&g_player, "/vlist", FM_PLAYER_KIND_VIDEO));
-    exp_print_playlist(&g_player);
+    sd_player_demo_print_playlist(&g_player);
 
     /* ۳) ▶ PLAY کلیپ ۰ */
-    exp_step("Player_Play(0)", Player_Play(&g_player, 0));
+    sd_player_demo_step("Player_Play(0)", Player_Play(&g_player, 0));
 
     /* ۴) پخش: هر Player_DecodeVideo «یک فریم» RGB888 تحویل می‌دهد.
      *    روی برد این حلقه را با تم period تیک 1000/fps میلی‌ثانیه صدا
@@ -199,7 +199,7 @@ void exP_2_video_controls(void)
                    (unsigned long)frame);
             break;   /* پایان → در پخش‌کننده‌ی واقعی: Player_Next */
         }
-        exp_step("Player_DecodeVideo", r);
+        sd_player_demo_step("Player_DecodeVideo", r);
         if (r != FM_OK) break;
         frame++;
         if (frame % 4u == 0u)
@@ -209,19 +209,19 @@ void exP_2_video_controls(void)
     }
 
     /* ۵) ⏪⏩ جابه‌جایی به میانه‌ی کلیپ */
-    exp_step("Player_Seek(0.3)", Player_Seek(&g_player, 0.3));
+    sd_player_demo_step("Player_Seek(0.3)", Player_Seek(&g_player, 0.3));
     (void)Player_DecodeVideo(&g_player, pixels, sizeof(pixels), &w, &h);
     printf("after seek 0.3s: %ux%u frame decoded\n", (unsigned)w, (unsigned)h);
 
     /* ۶) ⏭ NEXT → کلیپ دوم، یک فریم از آن */
-    exp_step("Player_Next", Player_Next(&g_player));
+    sd_player_demo_step("Player_Next", Player_Next(&g_player));
     printf("now playing: %s\n", Player_ItemPath(&g_player,
                                                 Player_Current(&g_player)));
-    exp_step("decode after next",
+    sd_player_demo_step("decode after next",
              Player_DecodeVideo(&g_player, pixels, sizeof(pixels), &w, &h));
 
     /* ۷) ⏹ STOP + پاک‌کردن فایل‌های دمو */
-    exp_step("Player_Stop", Player_Stop(&g_player));
+    sd_player_demo_step("Player_Stop", Player_Stop(&g_player));
     Player_Deinit(&g_player);
     (void)File_Delete("/vlist/clip_a.fmrv");
     (void)File_Delete("/vlist/clip_b.fmrv");
@@ -229,7 +229,7 @@ void exP_2_video_controls(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exP_3 — اتصال دکمه‌های واقعی (ریموت شبیه‌سازی‌شده)                     */
+/* SdPlayerDemo_RemoteButtons — اتصال دکمه‌های واقعی (ریموت شبیه‌سازی‌شده)                     */
 /*----------------------------------------------------------------------*/
 
 /* نگاشت ۱:۱ با GPIOهای برد شما — به‌جای این جدول، در HAL_GPIO_EXTI_Callback
@@ -245,7 +245,7 @@ typedef enum
     BTN_STOP
 } ExpButton;
 
-static void exp_handle_button(FM_Player *p, ExpButton btn)
+static void sd_player_demo_handle_button(FM_Player *p, ExpButton btn)
 {
     int16_t samples[128];
     size_t  got = 0;
@@ -289,7 +289,7 @@ static void exp_handle_button(FM_Player *p, ExpButton btn)
     }
 }
 
-void exP_3_remote_buttons(void)
+void SdPlayerDemo_RemoteButtons(void)
 {
     /* سناریوی فشار دادن دکمه‌ها توسط کاربر */
     static const ExpButton script[] = {
@@ -298,10 +298,10 @@ void exP_3_remote_buttons(void)
     };
     uint32_t i;
 
-    printf("=== exP_3: remote button script ===\n");
+    printf("=== SdPlayerDemo_RemoteButtons: remote button script ===\n");
 
-    exp_step("Player_Init", Player_Init(&g_player));
-    exp_step("Player_ScanFolder(/music)",
+    sd_player_demo_step("Player_Init", Player_Init(&g_player));
+    sd_player_demo_step("Player_ScanFolder(/music)",
              Player_ScanFolder(&g_player, "/music", FM_PLAYER_KIND_AUDIO));
     if (Player_Count(&g_player) == 0)
     {
@@ -311,9 +311,9 @@ void exP_3_remote_buttons(void)
     }
 
     for (i = 0; i < sizeof(script) / sizeof(script[0]); i++)
-        exp_handle_button(&g_player, script[i]);
+        sd_player_demo_handle_button(&g_player, script[i]);
 
     Player_Deinit(&g_player);
 }
 
-#endif /* EXAMPLES_FILE_SDCARD_PLAYER_H_ */
+#endif /* FM_TOPAPI_SDCARD_PLAYER_DEMOS_H */

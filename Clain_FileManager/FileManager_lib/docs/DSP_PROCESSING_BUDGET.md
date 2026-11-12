@@ -4,10 +4,10 @@ This documents how much CPU time the DSP layer has inside each callback, so an
 FFT / filter bank / feature-extraction pipeline can be sized safely. It also
 explains the new track + frame callbacks on this branch.
 
-## Audio (music) — `SimpleAudio` / `Ex13_AudioDma`
+## Audio (music) — `SimpleAudio` / `AudioDma`
 
 The PCM taps (`SimpleAudio_SetPrePcmTap`, `SimpleAudio_SetPostPcmTap`) fire once
-per DMA half-buffer refill, in the super-loop (`Ex13_AudioDmaPoll`), NOT in the
+per DMA half-buffer refill, in the super-loop (`AudioDma_Poll`), NOT in the
 I2S ISR. The refill happens when the DMA has consumed the other half.
 
 Constants (e.g. `examples/simple_audio.h`):
@@ -82,7 +82,7 @@ only until the next call).
 Both players now report which item is being processed:
 
 * **Audio** — `SimpleAudio_SetTrackStartCallback` / `SimpleAudio_SetTrackEndCallback`
-  (backed by `Ex13_AudioDmaSetTrackStart`/`SetTrackEnd`). Start fires once when a
+  (backed by `AudioDma_SetTrackStart`/`SetTrackEnd`). Start fires once when a
   track begins; end fires when it finishes (EOF) or is stopped. `SetTrackStart`
   also reports the already-playing track if installed after `Begin()`.
 * **Video** — `SimpleVideo_SetTrackStartCallback` / `SimpleVideo_SetTrackEndCallback`.

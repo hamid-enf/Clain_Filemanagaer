@@ -69,7 +69,7 @@ xfer_*.bin
 build-asan/
 fm_cachetest
 fm_videohooks
-fm_ex33test
+fm_audiorecordtest
 fm_tapstest
 examples/advanced_handle
 examples/crc_example

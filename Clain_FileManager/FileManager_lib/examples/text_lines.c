@@ -1,5 +1,5 @@
 /*
- * Example 06 — Text Line Editing
+ * text_lines.c — Text Line Editing
  *
  * APIها:
  *   Text_ReadLine   — خواندن یک خط از فایل باز

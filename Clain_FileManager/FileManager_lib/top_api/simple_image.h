@@ -1,10 +1,10 @@
 /*
- * Example 18 — SimpleImage: «عکس ساده» — آلبوم + داده برای TFT
+ * simple_image.h — SimpleImage: «عکس ساده» — آلبوم + داده برای TFT
  *
  * همان سبک SimpleAudio: یک include در main.c، دکمه‌ها را صدا می‌زنید،
  * پیکسل آماده‌ی LCD را می‌گیرید. بافرها را در SDRAM بگذارید (شما 32MB دارید).
  *
- *   SimpleImage_SetPresent(my_lcd_blit); // DMA: example 21 / polling — کار برد
+ *   SimpleImage_SetPresent(App_LcdBlit); // DMA: spi_tft_dma.h / polling — کار برد
  *   SimpleImage_SetOutputSize(320, 240);
  *   SimpleImage_Begin();                 // اسکن /photos + blit اول
  *   SimpleImage_Poll();                  // اسلایدشو / Next / Flip / …

@@ -2,8 +2,8 @@
  * i2c_eeprom_dma.h — پل I2C-EEPROM با DMA برای STM32H7
  * ================================================================
  *
- * پروتکل کتابخانه برای I2C همانی است که مثال ۲۸ نشان داد: دو تابع
- * read/write می‌نویسید و به EEPROM_examples_begin() می‌دهید. این فایل
+ * پروتکل کتابخانه برای I2C همانی است که eeprom_simple.h نشان داد: دو تابع
+ * read/write می‌نویسید و به EepromSimple_Begin() می‌دهید. این فایل
  * همان دو تابع را با HAL و به‌صورت DMA محور آماده دارد — دیگر لازم
  * نیست my_ee_read/my_ee_write را دستی بنویسید.
  *
@@ -12,14 +12,14 @@
  *     #include "i2c_eeprom_dma.h"
  *     ...
  *     MX_I2C1_Init();
- *     if (Ex32_I2cEeprom_Begin(FM_EEPROM_CHIP_24LC256, &hi2c1,
+ *     if (I2cEeprom_Begin(FM_EEPROM_CHIP_24LC256, &hi2c1,
  *                              0x50) == FM_OK)
  *     {
- *         exI_1_i2c_dma_smoke();          <- تست دود همین فایل
- *         exE_1_basic();                  <- بقیه از مثال ۲۸
- *         exE_2_settings_struct();
- *         exE_3_wear_aware_counter();
- *         exE_4_as_storage();
+ *         I2cEepromDemo_Smoke();          <- تست دود همین فایل
+ *         EepromDemo_Basic();                  <- بقیه از eeprom_simple.h
+ *         EepromDemo_SettingsStruct();
+ *         EepromDemo_WearAwareCounter();
+ *         EepromDemo_AsStorage();
  *     }
  *
  * تنظیمات CubeMX — چک‌لیست دقیق
@@ -39,7 +39,7 @@
  *       SDA/SCL       : Open-Drain + پول‌آپ. ترجیح: 4.7K خارجی؛
  *                       پول‌آپ داخلی فقط برای تستِ 100kHz قابل قبول است.
  *     سیم‌کشی قطعه    : WP -> GND (قفل نوشتن باز)، A2/A1/A0 -> GND
- *                       یعنی آدرس پایه 0x50 (در Ex32_I2cEeprom_Begin
+ *                       یعنی آدرس پایه 0x50 (در I2cEeprom_Begin
  *                       همان 0 بده تا از جدول چیپ برداشته شود).
  *
  *   DMA Settings (حالت DMA - هر دو جهت):
@@ -59,7 +59,7 @@
  *     وقفهٔ استریم‌های DMA  : با Addشدن در DMA Settings خودش روشن می‌شود
  *
  *   ترتیب در main: MX_DMA_Init() قبل از MX_I2C1_Init() (کیوب خودش
- *   درست می‌چیند) و هر دو قبل از Ex32_I2cEeprom_Begin().
+ *   درست می‌چیند) و هر دو قبل از I2cEeprom_Begin().
  *
  *   هشدار حافظه (H7): DMA1/DMA2 به DTCM (0x20000000) نمی‌رسند. اگر
  *   .bss پروژه‌ات در DTCM است، بافرهای EEPROM را در AXI/D2 یا SDRAM
@@ -67,7 +67,7 @@
  *   blocking می‌شود — درست کار می‌کند، فقط دیگر DMA نمی‌بینی.
  *   صادقانه: انتقال‌های EEPROM کوچک‌اند (صفحهٔ ۳۲ تا ۱۲۸ بایت)؛ سود
  *   DMA بیشتر آزادسازی CPU است نه سرعت. اگر فقط خواندن‌های بزرگ
- *   (دامپ کالیبراسیون) DMA بروند، EX32_DMA_MIN_LEN را بالا ببرید
+ *   (دامپ کالیبراسیون) DMA بروند، I2C_EEPROM_DMA_MIN_LEN را بالا ببرید
  *   (مثلاً 256).
  *
  * ---------------------------------------------------------------------
@@ -78,14 +78,14 @@
  *   - اگر اولین انتقال DMA شکست بخورد (مثلاً بافر در DTCM است که
  *     DMA1/DMA2 به آن نمی‌رسد، یا وقفه‌ها روشن نیست)، پل یک‌بار برای
  *     همیشه به مسیر blocking برمی‌گردد؛ crash و hang در کار نیست.
- *   - انتقال‌های کوچک‌تر از EX32_DMA_MIN_LEN بایت مستقیم blocking
+ *   - انتقال‌های کوچک‌تر از I2C_EEPROM_DMA_MIN_LEN بایت مستقیم blocking
  *     می‌روند؛ برای چند بایت راه‌اندازی DMA صرف نمی‌کند.
  *
  *   نگهداری کش طبق پروتکل کتابخانه: FM_Cache_CleanForDma قبل از TX و
  *   FM_Cache_InvalidateAfterDma بعد از RX.
  *
  * ---------------------------------------------------------------------
- * نکتهٔ EEPROM که مثال ۲۸ هم می‌گوید
+ * نکتهٔ EEPROM که eeprom_simple.h هم می‌گوید
  * ---------------------------------------------------------------------
  *   بعد از هر نوشتن، قطعه مدت write_cycle_ms مشغول است و جواب نمی‌دهد.
  *   این پل به‌جای تأخیر کورکورانه، ACK-polling می‌کند (IsDeviceReady)
@@ -113,42 +113,42 @@
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
 
-#ifndef EX32_I2C_TIMEOUT_MS
-#define EX32_I2C_TIMEOUT_MS 100u
+#ifndef I2C_EEPROM_TIMEOUT_MS
+#define I2C_EEPROM_TIMEOUT_MS 100u
 #endif
 
-#ifndef EX32_DMA_MIN_LEN
-#define EX32_DMA_MIN_LEN 32u    /* کوچک‌تر از این: blocking ارزان‌تر است */
+#ifndef I2C_EEPROM_DMA_MIN_LEN
+#define I2C_EEPROM_DMA_MIN_LEN 32u    /* کوچک‌تر از این: blocking ارزان‌تر است */
 #endif
 
-static I2C_HandleTypeDef *g_ex32_i2c;
-static uint16_t           g_ex32_dev;      /* آدرس شیفت‌شده (مثل 0xA0) */
-static FM_EepromChipInfo  g_ex32_info;
-static FM_Bool            ex32_dma_ok = FM_TRUE;
-static FM_Bool            ex32_dma_allowed = FM_TRUE;  /* کلید دستی  */
+static I2C_HandleTypeDef *g_i2c_eeprom_handle;
+static uint16_t           g_i2c_eeprom_dev;      /* آدرس شیفت‌شده (مثل 0xA0) */
+static FM_EepromChipInfo  g_i2c_eeprom_info;
+static FM_Bool            i2c_eeprom_dma_ok = FM_TRUE;
+static FM_Bool            i2c_eeprom_dma_allowed = FM_TRUE;  /* کلید دستی  */
 
 /* کلید دستی: مثلاً برای مقایسهٔ عملکرد با/بدون DMA روی همان سیم.
  * پیش‌فرض: خودکار — فقط به DMA وصل بودن در کیوب نگاه می‌کند. */
-void Ex32_I2c_SetDma(FM_Bool enable)
+void I2cEeprom_SetDma(FM_Bool enable)
 {
-    ex32_dma_allowed = enable;
+    i2c_eeprom_dma_allowed = enable;
 }
 
-static FM_Bool ex32_dma_usable(uint32_t len)
+static FM_Bool i2c_eeprom_dma_usable(uint32_t len)
 {
-    return ex32_dma_allowed && ex32_dma_ok && g_ex32_i2c != NULL &&
-           g_ex32_i2c->hdmarx != NULL && g_ex32_i2c->hdmatx != NULL &&
-           len >= EX32_DMA_MIN_LEN;
+    return i2c_eeprom_dma_allowed && i2c_eeprom_dma_ok && g_i2c_eeprom_handle != NULL &&
+           g_i2c_eeprom_handle->hdmarx != NULL && g_i2c_eeprom_handle->hdmatx != NULL &&
+           len >= I2C_EEPROM_DMA_MIN_LEN;
 }
 
 /* پایان انتقال DMA: HAL در وقفهٔ I2C/DMA وضعیت را READY می‌کند. */
-static FM_Result ex32_dma_wait(void)
+static FM_Result i2c_eeprom_dma_wait(void)
 {
     uint32_t t0 = HAL_GetTick();
 
-    while (g_ex32_i2c->State != HAL_I2C_STATE_READY)
+    while (g_i2c_eeprom_handle->State != HAL_I2C_STATE_READY)
     {
-        if ((HAL_GetTick() - t0) > EX32_I2C_TIMEOUT_MS)
+        if ((HAL_GetTick() - t0) > I2C_EEPROM_TIMEOUT_MS)
         {
             return FM_ERR_TIMEOUT;
         }
@@ -156,10 +156,10 @@ static FM_Result ex32_dma_wait(void)
     return FM_OK;
 }
 
-static void ex32_dma_fallback(const char *what)
+static void i2c_eeprom_dma_fallback(const char *what)
 {
-    ex32_dma_ok = FM_FALSE;
-    FM_Log("ex32: %s DMA failed - permanent blocking fallback\n", what);
+    i2c_eeprom_dma_ok = FM_FALSE;
+    FM_Log("I2cEeprom: %s DMA failed - permanent blocking fallback\n", what);
 }
 
 /* بعد از نوشتن: صبر تا پایان چرخهٔ نوشتن با ACK-polling.
@@ -167,14 +167,14 @@ static void ex32_dma_fallback(const char *what)
  * پنجره سخاوتمندانه است (3 برابرِ جدول + 10ms) چون بعضی کلون‌های 24xx
  * کندتر از دیتاشیت‌اند؛ ACK به‌محض آماده‌شدن برمی‌گردد، پس معمولاً
  * خیلی زودتر از سقف خارج می‌شویم. */
-static FM_Result ex32_wait_write_cycle(void)
+static FM_Result i2c_eeprom_wait_write_cycle(void)
 {
-    uint32_t window = ((uint32_t)g_ex32_info.write_cycle_ms * 3u) + 10u;
+    uint32_t window = ((uint32_t)g_i2c_eeprom_info.write_cycle_ms * 3u) + 10u;
     uint32_t t0 = HAL_GetTick();
 
     while ((HAL_GetTick() - t0) <= window)
     {
-        if (HAL_I2C_IsDeviceReady(g_ex32_i2c, g_ex32_dev, 1,
+        if (HAL_I2C_IsDeviceReady(g_i2c_eeprom_handle, g_i2c_eeprom_dev, 1,
                                   2) == HAL_OK)
         {
             return FM_OK;
@@ -188,23 +188,23 @@ static FM_Result ex32_wait_write_cycle(void)
 /* دو تابع پروتکل FM_EEPROM — این‌ها کل پل سخت‌افزاری‌اند              */
 /* ------------------------------------------------------------------ */
 
-static FM_Result Ex32_ee_read(void *ctx, uint32_t address, void *data,
+static FM_Result i2c_eeprom_read(void *ctx, uint32_t address, void *data,
                               uint32_t length)
 {
     I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)ctx;
-    uint16_t msize = (g_ex32_info.addr_bytes == 2u)
+    uint16_t msize = (g_i2c_eeprom_info.addr_bytes == 2u)
                          ? I2C_MEMADD_SIZE_16BIT
                          : I2C_MEMADD_SIZE_8BIT;
 
-    if (ex32_dma_usable(length))
+    if (i2c_eeprom_dma_usable(length))
     {
         /* پروتکل کش: قبل از کیک، خطوط پوشش‌دهندهٔ بافر RX فلش شوند. */
         FM_Cache_CleanForDma(data, length);
-        if (HAL_I2C_Mem_Read_DMA(hi2c, g_ex32_dev, (uint16_t)address,
+        if (HAL_I2C_Mem_Read_DMA(hi2c, g_i2c_eeprom_dev, (uint16_t)address,
                                  msize, (uint8_t *)data,
                                  (uint16_t)length) == HAL_OK)
         {
-            if (ex32_dma_wait() == FM_OK &&
+            if (i2c_eeprom_dma_wait() == FM_OK &&
                 hi2c->ErrorCode == HAL_I2C_ERROR_NONE)
             {
                 /* کش را از دادهٔ کهنهٔ DMA خبر کن — پروتکل کتابخانه. */
@@ -212,52 +212,52 @@ static FM_Result Ex32_ee_read(void *ctx, uint32_t address, void *data,
                 return FM_OK;
             }
         }
-        ex32_dma_fallback("rx");
+        i2c_eeprom_dma_fallback("rx");
     }
 
-    if (HAL_I2C_Mem_Read(hi2c, g_ex32_dev, (uint16_t)address, msize,
+    if (HAL_I2C_Mem_Read(hi2c, g_i2c_eeprom_dev, (uint16_t)address, msize,
                          (uint8_t *)data, (uint16_t)length,
-                         EX32_I2C_TIMEOUT_MS) != HAL_OK)
+                         I2C_EEPROM_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     return FM_OK;
 }
 
-static FM_Result Ex32_ee_write(void *ctx, uint32_t address,
+static FM_Result i2c_eeprom_write(void *ctx, uint32_t address,
                                const void *data, uint32_t length)
 {
     I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)ctx;
-    uint16_t msize = (g_ex32_info.addr_bytes == 2u)
+    uint16_t msize = (g_i2c_eeprom_info.addr_bytes == 2u)
                          ? I2C_MEMADD_SIZE_16BIT
                          : I2C_MEMADD_SIZE_8BIT;
     FM_Result r = FM_OK;
 
-    if (ex32_dma_usable(length))
+    if (i2c_eeprom_dma_usable(length))
     {
         /* قبل از اینکه DMA از RAM بخواند، نوشته‌های CPU را بیرون بده. */
         FM_Cache_CleanForDma(data, length);
 
-        if (HAL_I2C_Mem_Write_DMA(hi2c, g_ex32_dev, (uint16_t)address,
+        if (HAL_I2C_Mem_Write_DMA(hi2c, g_i2c_eeprom_dev, (uint16_t)address,
                                   msize, (uint8_t *)(uintptr_t)data,
                                   (uint16_t)length) == HAL_OK)
         {
-            r = ex32_dma_wait();
+            r = i2c_eeprom_dma_wait();
             if (r == FM_OK && hi2c->ErrorCode == HAL_I2C_ERROR_NONE)
             {
-                return ex32_wait_write_cycle();
+                return i2c_eeprom_wait_write_cycle();
             }
         }
-        ex32_dma_fallback("tx");
+        i2c_eeprom_dma_fallback("tx");
     }
 
-    if (HAL_I2C_Mem_Write(hi2c, g_ex32_dev, (uint16_t)address, msize,
+    if (HAL_I2C_Mem_Write(hi2c, g_i2c_eeprom_dev, (uint16_t)address, msize,
                           (uint8_t *)(uintptr_t)data, (uint16_t)length,
-                          EX32_I2C_TIMEOUT_MS) != HAL_OK)
+                          I2C_EEPROM_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
-    return ex32_wait_write_cycle();
+    return i2c_eeprom_wait_write_cycle();
 }
 
 /* ------------------------------------------------------------------ */
@@ -269,44 +269,44 @@ static FM_Result Ex32_ee_write(void *ctx, uint32_t address,
  * dev_addr_7bit آدرس ۷بیتی قطعه؛ 0 بدهید تا پایهٔ جدول چیپ (0x50) شود.
  *               A2/A1 روی VCC؟ مقدارش را جمع بزنید: 0x50|A2<<2|A1<<1|A0
  */
-static FM_Result Ex32_I2cEeprom_Begin(FM_EepromChip chip,
+static FM_Result I2cEeprom_Begin(FM_EepromChip chip,
                                       I2C_HandleTypeDef *hi2c,
                                       uint8_t dev_addr_7bit)
 {
     FM_Result r;
 
-    g_ex32_i2c = hi2c;
-    r = FM_Eeprom_GetChipInfo(chip, &g_ex32_info);
+    g_i2c_eeprom_handle = hi2c;
+    r = FM_Eeprom_GetChipInfo(chip, &g_i2c_eeprom_info);
     if (r != FM_OK)
     {
-        puts("  ex32: مدل EEPROM ناشناخته است.");
+        puts("  I2cEeprom: مدل EEPROM ناشناخته است.");
         return r;
     }
-    if (g_ex32_info.is_spi)
+    if (g_i2c_eeprom_info.is_spi)
     {
-        puts("  ex32: این مدل SPI است — پل I2C به آن نمی‌خورد.");
+        puts("  I2cEeprom: این مدل SPI است — پل I2C به آن نمی‌خورد.");
         return FM_ERR_INVALID_ARGUMENT;
     }
 
-    g_ex32_dev = (uint16_t)
-        ((dev_addr_7bit != 0u ? dev_addr_7bit : g_ex32_info.i2c_addr) << 1);
+    g_i2c_eeprom_dev = (uint16_t)
+        ((dev_addr_7bit != 0u ? dev_addr_7bit : g_i2c_eeprom_info.i2c_addr) << 1);
 
-    printf("  ex32: %s @ 0x%02X, page %lu B, write-cycle %u ms - %s\n",
-           g_ex32_info.name, (unsigned)(g_ex32_dev >> 1),
-           (unsigned long)g_ex32_info.page_size,
-           (unsigned)g_ex32_info.write_cycle_ms,
+    printf("  I2cEeprom: %s @ 0x%02X, page %lu B, write-cycle %u ms - %s\n",
+           g_i2c_eeprom_info.name, (unsigned)(g_i2c_eeprom_dev >> 1),
+           (unsigned long)g_i2c_eeprom_info.page_size,
+           (unsigned)g_i2c_eeprom_info.write_cycle_ms,
            (hi2c->hdmarx != NULL && hi2c->hdmatx != NULL)
                ? "DMA mode" : "blocking mode");
 
-    /* بقیهٔ راه‌اندازی و تست‌ها از مثال ۲۸ می‌آیند. */
-    return EEPROM_examples_begin(chip, Ex32_ee_read, Ex32_ee_write, hi2c);
+    /* بقیهٔ راه‌اندازی و تست‌ها از eeprom_simple.h می‌آیند. */
+    return EepromSimple_Begin(chip, i2c_eeprom_read, i2c_eeprom_write, hi2c);
 }
 
 /* ------------------------------------------------------------------ */
-/* exI_1 — تست دود: پروب، بنویس، بخوان، تطبیق بده                     */
+/* I2cEepromDemo_Smoke — تست دود: پروب، بنویس، بخوان، تطبیق بده                     */
 /* ------------------------------------------------------------------ */
 
-void exI_1_i2c_dma_smoke(void)
+void I2cEepromDemo_Smoke(void)
 {
     /* تراز خط کش: با بافر تراز، بحث خطِ لبه و همسایه کلاً حذف می‌شود. */
     static FM_CACHE_ALIGN uint8_t out[64];
@@ -317,11 +317,11 @@ void exI_1_i2c_dma_smoke(void)
     FM_Bool same2 = FM_TRUE;
     FM_Bool was_dma;
 
-    puts("\n============== exI_1_i2c_dma_smoke ===============");
+    puts("\n============== I2cEepromDemo_Smoke ===============");
     E_REQUIRE();
 
-    if (HAL_I2C_IsDeviceReady(g_ex32_i2c, g_ex32_dev, 3,
-                              EX32_I2C_TIMEOUT_MS) != HAL_OK)
+    if (HAL_I2C_IsDeviceReady(g_i2c_eeprom_handle, g_i2c_eeprom_dev, 3,
+                              I2C_EEPROM_TIMEOUT_MS) != HAL_OK)
     {
         puts("  دستگاه روی باس جواب نداد — سیم‌کشی/پول‌آپ/آدرس را چک کن.");
         return;
@@ -333,19 +333,19 @@ void exI_1_i2c_dma_smoke(void)
         out[i] = (uint8_t)(i * 5u + 1u);
     }
 
-    e_step("write 64B",
+    eeprom_demo_step("write 64B",
            EEPROM_Write(&g_ee, 0u, out, (uint32_t)sizeof(out)));
 
-    was_dma = ex32_dma_ok;
-    e_step("read 64B (path A)",
+    was_dma = i2c_eeprom_dma_ok;
+    eeprom_demo_step("read 64B (path A)",
            EEPROM_Read(&g_ee, 0u, back, (uint32_t)sizeof(back)));
 
     /* خواندن دوم در مسیر معکوس — عیب‌یابی: اگر A خراب و B درست بود،
      * مشکل مسیر DMA است؛ اگر هر دو خراب بودند، نوشتن نکشیده. */
-    Ex32_I2c_SetDma(was_dma ? FM_FALSE : FM_TRUE);
-    e_step("read 64B (path B)",
+    I2cEeprom_SetDma(was_dma ? FM_FALSE : FM_TRUE);
+    eeprom_demo_step("read 64B (path B)",
            EEPROM_Read(&g_ee, 0u, back2, (uint32_t)sizeof(back2)));
-    Ex32_I2c_SetDma(FM_TRUE);      /* برگرد به حالت خودکار */
+    I2cEeprom_SetDma(FM_TRUE);      /* برگرد به حالت خودکار */
 
     for (i = 0; i < sizeof(out); i++)
     {
@@ -396,7 +396,7 @@ void exI_1_i2c_dma_smoke(void)
         puts("  هر دو مسیر خراب — نوشتن نکشیده (تأمین تغذیه/پول‌آپ/WP؟)");
     }
 
-    /* نشستن روی آدرس 0 بی‌ضرر است: exE_2 در 256 و exE_3 در 512+ اند. */
+    /* نشستن روی آدرس 0 بی‌ضرر است: EepromDemo_SettingsStruct در 256 و EepromDemo_WearAwareCounter در 512+ اند. */
 }
 
 #endif /* !FM_HOST_BUILD */

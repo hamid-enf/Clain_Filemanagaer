@@ -153,7 +153,7 @@ int main(void)
   /* ---- 1) bring-up ------------------------------------------------------ */
   FM_Log_UseHalUart(&huart1);            /* printf / FM_Log -> USART1               */
   FM_SD_Hal_Attach(&hsd1);               /* SD card driver                          */
-  Ex35_Sd_FatRoot();                     /* "/" = FAT32 on the SD card              */
+  UsbSd_FatRoot();                       /* "/" = FAT32 on the SD card              */
   SimpleImage_UseDma2dHandle(&hdma2d);   /* DMA2D for colour conversion             */
   App_PrintBanner();                     /* cache state, port, debug level          */
   App_UartCommandsBegin();               /* UART command line (DMA + idle)          */
@@ -161,12 +161,12 @@ int main(void)
   App_DisplayBegin();                    /* SPI TFT + test screen                   */
   App_LibraryBegin();                    /* SDRAM allocator, FileManager_Init(), hardware JPEG */
 
-  /* ---- 2) examples (comment a line out to skip that group) -------------- */
-  App_RunFileExamples();                 /* ex_1 .. ex_11          RAM disk         */
-  App_RunSdExamples();                   /* exS_*, exM_*, exP_*    SD card          */
-  App_RunQspiExamples();                 /* exQ_*, exQM_*, exQP_*, exT_*  QSPI flash */
-  App_RunSpiFlashExamples();             /* exF_*                  SPI flash (SPI4) */
-  App_RunEepromExamples();               /* exI_*, exE_*           I2C EEPROM       */
+  /* ---- 2) demos (comment a line out to skip that group) ----------------- */
+  App_RunFileDemos();                    /* FileDemo_*                       RAM disk         */
+  App_RunSdDemos();                      /* SdDemo_*, SdMediaDemo_*, SdPlayerDemo_*   SD card */
+  App_RunQspiDemos();                    /* QspiDemo_*, QspiMediaDemo_*, QspiPlayerDemo_*, TransferDemo_*  QSPI flash */
+  App_RunSpiFlashDemos();                /* SpiFlashDemo_*                   SPI flash (SPI4) */
+  App_RunEepromDemos();                  /* I2cEepromDemo_*, EepromDemo_*    I2C EEPROM       */
 
   /* ---- 3) players -------------------------------------------------------- */
   App_PlayersBegin();                    /* slideshow, then music or video (music_activated) */
@@ -194,7 +194,7 @@ int main(void)
     SimpleVideo_Poll();
 
     App_HeartbeatPoll();                 /* every 2 s: LED + live audio level       */
-    Ex35_UsbPoll();                      /* USB is serviced here, not in an interrupt */
+    UsbSd_Poll();                        /* USB is serviced here, not in an interrupt */
 
     App_VideoCommandPoll();              /* vstrt / vstop                           */
     App_FlashEraseCommandPoll();         /* fers                                    */

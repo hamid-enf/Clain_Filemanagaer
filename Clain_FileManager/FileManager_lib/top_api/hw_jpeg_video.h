@@ -1,11 +1,11 @@
 /*
- * Example 23 — STM32H7 JPEG hardware codec → SimpleVideo (MJPEG frames)
+ * hw_jpeg_video.h — STM32H7 JPEG hardware codec → SimpleVideo (MJPEG frames)
  *
  * دیکود نرم‌افزاری MJPEG (picojpeg) گلوگاه FPS ویدیو است. همان
- * سخت‌افزار JPEG که برای عکس‌ها فعال کرده‌اید (مثال 20) می‌تواند
+ * سخت‌افزار JPEG که برای عکس‌ها فعال کرده‌اید (hw_jpeg.h) می‌تواند
  * فریم‌های ویدیوی MJPEG را هم دیکود کند — چند برابر سریع‌تر.
  *
- * استفاده (بعد از مثال 20):
+ * استفاده (بعد از hw_jpeg.h):
  *
  *   #include "simple_image.h"
  *   #include "hw_jpeg.h"
@@ -13,19 +13,19 @@
  *   #include "hw_jpeg_video.h"
  *
  *   MX_JPEG_Init();
- *   SimpleImage_UseHwJpeg(&hjpeg);   // عکس‌ها (مثال 20)
+ *   SimpleImage_UseHwJpeg(&hjpeg);   // عکس‌ها (hw_jpeg.h)
  *   SimpleVideo_UseHwJpeg();         // ویدیوهای MJPEG — همین یک خط
  *
  * از این به بعد Video_DecodeFrame برای هر فریم MJPEG اول سراغ
  * سخت‌افزار می‌رود (HWDecoder_Register). اگر فریمی دیکود نشود
  * (سایز بزرگ‌تر از بافر YCbCr و ...) پلیر خودش خطا را لاگ می‌کند.
  *
- * توجه: این هدر به توابع مثال 20 (si_hjpeg / si_hw_ycbcr /
+ * توجه: این هدر به توابع hw_jpeg.h (si_hjpeg / si_hw_ycbcr /
  * si_jpeg_mcus_to_rgb) تکیه دارد — حتماً 20 را قبل از این include کنید.
  */
 
-#ifndef FM_EXAMPLE_23_HW_JPEG_VIDEO_H
-#define FM_EXAMPLE_23_HW_JPEG_VIDEO_H
+#ifndef FM_TOPAPI_HW_JPEG_VIDEO_H
+#define FM_TOPAPI_HW_JPEG_VIDEO_H
 
 
 #ifndef HW_JPEG_VIDEO_H_
@@ -126,7 +126,7 @@ static inline FM_Result SimpleVideo_UseHwJpeg(void)
     }
     if (sv_hw_mjpeg_announced)
     {
-        return FM_OK;   /* همان دلیل مثال ۲۰: لاگ را پر نکن */
+        return FM_OK;   /* همان دلیل hw_jpeg.h: لاگ را پر نکن */
     }
     r = HWDecoder_Register(FM_VIDEO_CODEC_MJPEG, &sv_hw_mjpeg_ops);
     /*
@@ -149,4 +149,4 @@ static inline FM_Result SimpleVideo_UseHwJpeg(void)
 
 #endif /* HW_JPEG_VIDEO_H_ */
 
-#endif /* FM_EXAMPLE_23_HW_JPEG_VIDEO_H */
+#endif /* FM_TOPAPI_HW_JPEG_VIDEO_H */

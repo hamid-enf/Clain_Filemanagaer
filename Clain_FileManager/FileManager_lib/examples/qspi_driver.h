@@ -13,7 +13,7 @@
  *     static FM_Storage      qspi_storage;
  *
  *     // در main، بعد از MX_QUADSPI_Init():
- *     Ex26_QspiBegin(&qspi_dev, &qspi_storage, &hqspi,
+ *     QspiDriver_Begin(&qspi_dev, &qspi_storage, &hqspi,
  *                    FM_QSPI_CHIP_AUTO);
  *
  * بعد از این، فلش یک حافظهٔ عادی است: mount می‌شود، فایل‌سیستم می‌گیرد،
@@ -28,7 +28,7 @@
  *     - در «DMA Settings» کیوب: کانال MDMA با ریکوئست «QUADSPI_FIFO_TH»
  *       به QUADSPI اضافه کنید (روی H7 فقط MDMA به QUADSPI می‌رسد).
  *     - در NVIC: وقفهٔ QUADSPI و وقفهٔ همان کانال MDMA روشن باشد.
- *     - MX_MDMA_Init() قبل از Ex26_QspiBegin() صدا زده شود.
+ *     - MX_MDMA_Init() قبل از QspiDriver_Begin() صدا زده شود.
  *
  *   اگر MDMA اضافه نشده باشد همه‌چیز به‌صورت polling کار می‌کند؛ و اگر
  *   اولین انتقال DMA شکست بخورد (مثلاً بافر در DTCM است که MDMA به آن
@@ -40,7 +40,7 @@
  *   نکتهٔ صادقانه: با روشن‌بودن memory-mapped reads (پیش‌فرض)، خواندن‌ها
  *   اصلاً از مسیر DMA رد نمی‌شوند — نگاشت سریع‌تر است. DMA به نوشتن‌ها و
  *   به حالت command-read (وقتی FM_Qspi_SetMappedReads(dev, FM_FALSE))
- *   و به درایور مثال ۱۵ که نگاشت ندارد سود می‌دهد.
+ *   و به درایور qspi_w25q.h که نگاشت ندارد سود می‌دهد.
  *
  * ---------------------------------------------------------------------
  * حالت memory-mapped
@@ -52,8 +52,8 @@
  * اگر برنامه‌تان بیشتر می‌نویسد تا بخواند، رفت‌وبرگشت مکرر سربار دارد؛
  * آن‌وقت با FM_Qspi_SetMappedReads(&dev, FM_FALSE) خاموشش کنید.
  */
-#ifndef FM_EXAMPLE_26_QSPI_DRIVER_STM32_H
-#define FM_EXAMPLE_26_QSPI_DRIVER_STM32_H
+#ifndef FM_TOPAPI_QSPI_DRIVER_H
+#define FM_TOPAPI_QSPI_DRIVER_H
 
 #include "quadspi.h"
 #include "fm_qspi.h"
@@ -61,24 +61,24 @@
 #include "fm_log.h"
 #include "fm_xdma.h"
 
-#ifndef EX26_TIMEOUT_MS
-#define EX26_TIMEOUT_MS 1000u
+#ifndef QSPI_DRV_TIMEOUT_MS
+#define QSPI_DRV_TIMEOUT_MS 1000u
 #endif
 
 /* بافر سکتور برای نوشتن‌های جزئی. باید حداقل به اندازهٔ سکتور قطعه
  * باشد (۴ کیلوبایت برای تقریباً همهٔ قطعات رایج). */
-#ifndef EX26_SECTOR_BUF_SIZE
-#define EX26_SECTOR_BUF_SIZE FM_QSPI_SECTOR_SIZE
+#ifndef QSPI_DRV_SECTOR_BUF_SIZE
+#define QSPI_DRV_SECTOR_BUF_SIZE FM_QSPI_SECTOR_SIZE
 #endif
 
 __attribute__((aligned(32)))
-static uint8_t g_ex26_sector[EX26_SECTOR_BUF_SIZE];
+static uint8_t g_qspi_drv_sector[QSPI_DRV_SECTOR_BUF_SIZE];
 
 /* ------------------------------------------------------------------ */
 /* پنج تابع لایهٔ پایین                                                */
 /* ------------------------------------------------------------------ */
 
-static QSPI_CommandTypeDef ex26_base_cmd(uint8_t opcode)
+static QSPI_CommandTypeDef qspi_drv_base_cmd(uint8_t opcode)
 {
     QSPI_CommandTypeDef c;
 
@@ -94,7 +94,7 @@ static QSPI_CommandTypeDef ex26_base_cmd(uint8_t opcode)
     return c;
 }
 
-static uint32_t ex26_addr_size(uint8_t addr_bytes)
+static uint32_t qspi_drv_addr_size(uint8_t addr_bytes)
 {
     return (addr_bytes == 4u) ? QSPI_ADDRESS_32_BITS : QSPI_ADDRESS_24_BITS;
 }
@@ -102,22 +102,22 @@ static uint32_t ex26_addr_size(uint8_t addr_bytes)
 /* ------------------------------------------------------------------ */
 /* DMA محور — فاز داده با موتور مشترک fm_xdma.h                        */
 /* ------------------------------------------------------------------ */
-#ifndef EX26_DMA_MIN_LEN
-#define EX26_DMA_MIN_LEN 64u    /* کوچک‌تر از این: polling ارزان‌تر است */
+#ifndef QSPI_DRV_DMA_MIN_LEN
+#define QSPI_DRV_DMA_MIN_LEN 64u    /* کوچک‌تر از این: polling ارزان‌تر است */
 #endif
-#ifndef EX26_DMA_MAX_LEN
-#define EX26_DMA_MAX_LEN 4096u  /* یک سکتور — سقف امن NbData           */
+#ifndef QSPI_DRV_DMA_MAX_LEN
+#define QSPI_DRV_DMA_MAX_LEN 4096u  /* یک سکتور — سقف امن NbData           */
 #endif
 
-static void ex26_fill_read_cmd(QSPI_CommandTypeDef *c, uint8_t opcode,
+static void qspi_drv_fill_read_cmd(QSPI_CommandTypeDef *c, uint8_t opcode,
                                uint32_t addr, uint8_t addr_bytes,
                                uint8_t dummy, uint32_t len)
 {
-    *c = ex26_base_cmd(opcode);
+    *c = qspi_drv_base_cmd(opcode);
     if (addr_bytes != 0u)
     {
         c->AddressMode = QSPI_ADDRESS_1_LINE;
-        c->AddressSize = ex26_addr_size(addr_bytes);
+        c->AddressSize = qspi_drv_addr_size(addr_bytes);
         c->Address     = addr;
     }
     c->DataMode    = QSPI_DATA_1_LINE;
@@ -125,48 +125,48 @@ static void ex26_fill_read_cmd(QSPI_CommandTypeDef *c, uint8_t opcode,
     c->DummyCycles = dummy;
 }
 
-static void ex26_fill_write_cmd(QSPI_CommandTypeDef *c, uint8_t opcode,
+static void qspi_drv_fill_write_cmd(QSPI_CommandTypeDef *c, uint8_t opcode,
                                 uint32_t addr, uint8_t addr_bytes,
                                 uint32_t len)
 {
-    *c = ex26_base_cmd(opcode);
+    *c = qspi_drv_base_cmd(opcode);
     c->AddressMode = QSPI_ADDRESS_1_LINE;
-    c->AddressSize = ex26_addr_size(addr_bytes);
+    c->AddressSize = qspi_drv_addr_size(addr_bytes);
     c->Address     = addr;
     c->DataMode    = QSPI_DATA_1_LINE;
     c->NbData      = len;
 }
 
-static FM_Result ex26_cmd(void *ctx, uint8_t opcode)
+static FM_Result qspi_drv_cmd(void *ctx, uint8_t opcode)
 {
     QSPI_HandleTypeDef *h = (QSPI_HandleTypeDef *)ctx;
-    QSPI_CommandTypeDef c = ex26_base_cmd(opcode);
+    QSPI_CommandTypeDef c = qspi_drv_base_cmd(opcode);
 
-    if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+    if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     return FM_OK;
 }
 
-static FM_Result ex26_cmd_addr(void *ctx, uint8_t opcode, uint32_t addr,
+static FM_Result qspi_drv_cmd_addr(void *ctx, uint8_t opcode, uint32_t addr,
                                uint8_t addr_bytes)
 {
     QSPI_HandleTypeDef *h = (QSPI_HandleTypeDef *)ctx;
-    QSPI_CommandTypeDef c = ex26_base_cmd(opcode);
+    QSPI_CommandTypeDef c = qspi_drv_base_cmd(opcode);
 
     c.AddressMode = QSPI_ADDRESS_1_LINE;
-    c.AddressSize = ex26_addr_size(addr_bytes);
+    c.AddressSize = qspi_drv_addr_size(addr_bytes);
     c.Address     = addr;
 
-    if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+    if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     return FM_OK;
 }
 
-static FM_Result ex26_read(void *ctx, uint8_t opcode, uint32_t addr,
+static FM_Result qspi_drv_read(void *ctx, uint8_t opcode, uint32_t addr,
                            uint8_t addr_bytes, uint8_t dummy,
                            void *buf, uint32_t len)
 {
@@ -174,31 +174,31 @@ static FM_Result ex26_read(void *ctx, uint8_t opcode, uint32_t addr,
     QSPI_CommandTypeDef c;
 
     /* DMA محور: انتقال بزرگ با موتور fm_xdma؛ نتیجه سه‌حالته است. */
-    if (FM_Xdma_RxEx(buf, len, EX26_TIMEOUT_MS) == FM_XDMA_FAILED)
+    if (FM_Xdma_RxEx(buf, len, QSPI_DRV_TIMEOUT_MS) == FM_XDMA_FAILED)
     {
         /* کنترلر Abort شده و دستور نیمه‌کاره مانده؛ از نو صادرش کن. */
-        ex26_fill_read_cmd(&c, opcode, addr, addr_bytes, dummy, len);
-        if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+        qspi_drv_fill_read_cmd(&c, opcode, addr, addr_bytes, dummy, len);
+        if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
         {
             return FM_ERR_IO;
         }
     }
 
     /* مسیر polling (SKIPPED) یا ادامهٔ همان فرمانِ دوباره‌صادرشده */
-    ex26_fill_read_cmd(&c, opcode, addr, addr_bytes, dummy, len);
+    qspi_drv_fill_read_cmd(&c, opcode, addr, addr_bytes, dummy, len);
 
-    if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+    if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
-    if (HAL_QSPI_Receive(h, (uint8_t *)buf, EX26_TIMEOUT_MS) != HAL_OK)
+    if (HAL_QSPI_Receive(h, (uint8_t *)buf, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     return FM_OK;
 }
 
-static FM_Result ex26_write(void *ctx, uint8_t opcode, uint32_t addr,
+static FM_Result qspi_drv_write(void *ctx, uint8_t opcode, uint32_t addr,
                             uint8_t addr_bytes, const void *buf,
                             uint32_t len)
 {
@@ -206,32 +206,32 @@ static FM_Result ex26_write(void *ctx, uint8_t opcode, uint32_t addr,
     QSPI_CommandTypeDef c;
 
     /* DMA محور: نوشتن صفحه با موتور fm_xdma. */
-    if (FM_Xdma_TxEx(buf, len, EX26_TIMEOUT_MS) == FM_XDMA_FAILED)
+    if (FM_Xdma_TxEx(buf, len, QSPI_DRV_TIMEOUT_MS) == FM_XDMA_FAILED)
     {
         /* کنترلر Abort شده؛ فرمان نوشتن را از نو صادر کن. */
-        ex26_fill_write_cmd(&c, opcode, addr, addr_bytes, len);
-        if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+        qspi_drv_fill_write_cmd(&c, opcode, addr, addr_bytes, len);
+        if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
         {
             return FM_ERR_IO;
         }
     }
 
     /* مسیر polling (SKIPPED) یا ادامهٔ همان فرمانِ دوباره‌صادرشده */
-    ex26_fill_write_cmd(&c, opcode, addr, addr_bytes, len);
+    qspi_drv_fill_write_cmd(&c, opcode, addr, addr_bytes, len);
 
-    if (HAL_QSPI_Command(h, &c, EX26_TIMEOUT_MS) != HAL_OK)
+    if (HAL_QSPI_Command(h, &c, QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     if (HAL_QSPI_Transmit(h, (uint8_t *)(uintptr_t)buf,
-                          EX26_TIMEOUT_MS) != HAL_OK)
+                          QSPI_DRV_TIMEOUT_MS) != HAL_OK)
     {
         return FM_ERR_IO;
     }
     return FM_OK;
 }
 
-static void ex26_delay(void *ctx, uint32_t ms)
+static void qspi_drv_delay(void *ctx, uint32_t ms)
 {
     (void)ctx;
     HAL_Delay(ms);
@@ -247,7 +247,7 @@ static void ex26_delay(void *ctx, uint32_t ms)
  * خارج شدن: HAL_QSPI_Abort کنترلر را به حالت دستوری برمی‌گرداند.
  */
 
-static FM_Result ex26_mmap_enter(void *ctx)
+static FM_Result qspi_drv_mmap_enter(void *ctx)
 {
     QSPI_HandleTypeDef *h = (QSPI_HandleTypeDef *)ctx;
     QSPI_CommandTypeDef c;
@@ -279,7 +279,7 @@ static FM_Result ex26_mmap_enter(void *ctx)
     return FM_OK;
 }
 
-static FM_Result ex26_mmap_exit(void *ctx)
+static FM_Result qspi_drv_mmap_exit(void *ctx)
 {
     QSPI_HandleTypeDef *h = (QSPI_HandleTypeDef *)ctx;
 
@@ -300,7 +300,7 @@ static FM_Result ex26_mmap_exit(void *ctx)
  * اگر فلش جواب ندهد، خطا برمی‌گرداند و چیزی ثبت نمی‌شود — برنامه
  * سالم ادامه می‌دهد.
  */
-static FM_Result Ex26_QspiBegin(FM_QspiDevice *dev, FM_Storage *storage,
+static FM_Result QspiDriver_Begin(FM_QspiDevice *dev, FM_Storage *storage,
                                 QSPI_HandleTypeDef *hqspi,
                                 FM_QspiChip chip)
 {
@@ -309,25 +309,25 @@ static FM_Result Ex26_QspiBegin(FM_QspiDevice *dev, FM_Storage *storage,
 
     /* موتور DMA پیش‌فرض خانواده (H7: MDMA / H5: GPDMA+OCTOSPI).
      * اگر برنامه خودش FM_Xdma_Use زده باشد، دست نمی‌زنیم. */
-    FM_Xdma_SetWindow(EX26_DMA_MIN_LEN, EX26_DMA_MAX_LEN);
+    FM_Xdma_SetWindow(QSPI_DRV_DMA_MIN_LEN, QSPI_DRV_DMA_MAX_LEN);
     FM_Xdma_AutoInstallQspi(hqspi);
 
     memset(&io, 0, sizeof(io));
-    io.cmd        = ex26_cmd;
-    io.cmd_addr   = ex26_cmd_addr;
-    io.read       = ex26_read;
-    io.write      = ex26_write;
-    io.delay_ms   = ex26_delay;
+    io.cmd        = qspi_drv_cmd;
+    io.cmd_addr   = qspi_drv_cmd_addr;
+    io.read       = qspi_drv_read;
+    io.write      = qspi_drv_write;
+    io.delay_ms   = qspi_drv_delay;
     io.ctx        = hqspi;
 
 #if FM_QSPI_USE_MEMORY_MAPPED
-    io.mmap_enter = ex26_mmap_enter;
-    io.mmap_exit  = ex26_mmap_exit;
+    io.mmap_enter = qspi_drv_mmap_enter;
+    io.mmap_exit  = qspi_drv_mmap_exit;
     io.mmap_base  = (const volatile uint8_t *)FM_MEM_QSPI_BASE;
 #endif
 
-    r = FM_Qspi_Init(dev, &io, chip, g_ex26_sector,
-                     (uint32_t)sizeof(g_ex26_sector));
+    r = FM_Qspi_Init(dev, &io, chip, g_qspi_drv_sector,
+                     (uint32_t)sizeof(g_qspi_drv_sector));
     if (r != FM_OK)
     {
         FM_Log("QSPI: init failed (%d) — flash not available\n", (int)r);
@@ -351,4 +351,4 @@ static FM_Result Ex26_QspiBegin(FM_QspiDevice *dev, FM_Storage *storage,
     return FM_OK;
 }
 
-#endif /* FM_EXAMPLE_26_QSPI_DRIVER_STM32_H */
+#endif /* FM_TOPAPI_QSPI_DRIVER_H */

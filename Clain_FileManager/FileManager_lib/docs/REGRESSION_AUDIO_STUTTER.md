@@ -24,7 +24,7 @@ Reference build (RAR, original `19_stm32h7_simple_video.h` + `board/main.c`) rep
 | File | Original | Optimised (`beba2f1`) | Effect |
 |------|----------|------------------------|--------|
 | `board/main.c: MPU_Config` | SDRAM `0xC0000000 32 MiB` cacheable **commented out**, `SCB_EnableDCache()` not called (H7 runs uncached, slow) | Region 1 `0xC0000000` WB cacheable, Region 2 `0x90000000` QSPI 8 MiB WB, **Region 3 `0x30000000` 256 KiB non-cacheable** for `.dma_buffer`, `SCB_EnableICache/DCache()` in `main()` | +70 % SDRAM bandwidth, but requires `FM_Cache_CleanForDma / Invalidate` everywhere. |
-| `board/main.c: my_lcd_blit_video` | `LcdSpiDma_Send` **blocking** (poll to completion) | `LcdSpiDma_Begin` **async** + `SimpleVideo_SetPresentWait(LcdSpiDma_Wait)` — overlap SPI N with decode N+1, `budget = max(decode,SPI)` not sum | Intended to bring 66 ms 15 fps budget inside limits. |
+| `board/main.c: App_LcdBlitVideo` | `LcdSpiDma_Send` **blocking** (poll to completion) | `LcdSpiDma_Begin` **async** + `SimpleVideo_SetPresentWait(LcdSpiDma_Wait)` — overlap SPI N with decode N+1, `budget = max(decode,SPI)` not sum | Intended to bring 66 ms 15 fps budget inside limits. |
 | `examples/spi_tft_dma.h` | `LCD_SPI_DMA_IDLE 0` (no FM_Idle during SPI chunks) | `LCD_SPI_DMA_IDLE 1` → `FM_Idle()` in `lcd_spi_dma_wait_chunk / wait_txc / write_tail`, chunk `LCD_SPI_DMA_CHUNK` from `32768` → `FM_BUF_SCALE(32768)` | Gives I2S refill slots during the ~30 ms SPI transfer. |
 | `examples/simple_i2s_mux.h` | `simple_audio_dma_buf[2*32766]` separate from `sv_i2s_buf[2*8192]` (≈160 KiB total) | **shared `simple_i2s_ring[65534]`**, `simple_audio_dma_buf` and `sv_i2s_buf` both alias it; check `SIMPLE_I2S_RING_SAMPLES` | Saves 32 KiB D2 SRAM, safe because `SimpleI2S_Take` is exclusive, but audio half now 32766 vs video half 8192 → head-room ratio 4:1. |
 | `examples/simple_video.h` | private `sv_i2s_buf`, `sv_pcm_chunk[8192]`, 1-pole DC blocker (`sv_i2s_dc_x/y`), single-LFSR dither, `sv_i2s_board_stop` without `was_running`, profile only `starve` | `#define sv_i2s_buf simple_i2s_ring`, `sv_pcm_chunk[FM_BUF_SCALE(8192)]`, DC blocker **removed**, 2-LFSR TPDF dither, `was_running` guard, **latency metrics** `sv_i2s_irq_tick/lat_max/lat_sum/lat_n`, volume fade logic unchanged, idle hook `SIMPLE_VIDEO_IDLE_REFILL` now always calls `sv_i2s_poll` | Starvation vs. analog pop now measurable; DC blocker removal saves 2×32-bit state and avoids 1-pole colouration for PCM-through. |
@@ -79,7 +79,7 @@ In short: **320 low present = overlap proof; 720 high present = sequential + dro
    hdma_spi2_tx.Instance->CR = (hdma_spi2_tx.Instance->CR & ~DMA_SxCR_PL_Msk) | DMA_PRIORITY_LOW;
    hdma_i2s1_ext_tx.Instance->CR = (hdma_i2s1_ext_tx.Instance->CR & ~DMA_SxCR_PL_Msk) | DMA_PRIORITY_VERY_HIGH;
    ```
-   Alternative/revert: keep `my_lcd_blit_video` **blocking** (`LcdSpiDma_Send`) when `FM_AUDIO_I2S_SHARED==1` and the active clip has PCM (sequential bus) — the 15 fps budget still fits for 320 (45 ms) and 720 plays with intentional drops rather than contended overlap. Async is left as an opt-in (`-DSIMPLE_VIDEO_ASYNC_PRESENT=1`) for LTDC panels, not SPI TFTs.
+   Alternative/revert: keep `App_LcdBlitVideo` **blocking** (`LcdSpiDma_Send`) when `FM_AUDIO_I2S_SHARED==1` and the active clip has PCM (sequential bus) — the 15 fps budget still fits for 320 (45 ms) and 720 plays with intentional drops rather than contended overlap. Async is left as an opt-in (`-DSIMPLE_VIDEO_ASYNC_PRESENT=1`) for LTDC panels, not SPI TFTs.
 
 2. **Double the video ring** — `SIMPLE_VIDEO_HALF_SAMPLES 8192 → 16384` (372 ms/half, 744 ms ring, same as audio’s head-room). Fits in `simple_i2s_ring[65534]` (`2*16384=32768` ≤ 65534). Cost 16 KiB D2, starve margin 2×. `fm_board_config.h` now scales PIR: `SIMPLE_VIDEO_HALF_SAMPLES = FM_BUF_SCALE(8192)` clamped to `SIMPLE_I2S_RING_SAMPLES/2`.
 
@@ -149,7 +149,7 @@ raises `sv_rgb 900 KiB`, `sv_frame 2×1.2 MiB` — fits H7 32 MiB SDRAM, makes 7
 - [x] `src/fm_video.c` rounded fps kept, `audio_part` kept, slicing `FM_Idle` kept.
 - [x] `board/main.c: MPU_Config` region 3 non-cacheable kept, DMA priorities set (manual `CR` patch after `MX_DMA_Init` until CubeMX update). — *done: MPU region 3 0x30000000 256 KiB non-cacheable + SCB_EnableDCache + hdma_i2s VERY_HIGH / hdma_spi2 LOW at 454-463*
 - [x] `examples/simple_video.h` half `8192→16384` (`≤ SIMPLE_I2S_RING_SAMPLES/2`). — *done: SIMPLE_VIDEO_HALF_SAMPLES 16384, ring 32768/65534*
-- [x] `board/main.c: my_lcd_blit_video` revert to `LcdSpiDma_Send` **or** gate async on `!has_audio` / `SIMPLE_VIDEO_ASYNC_PRESENT`. — *done: #if SIMPLE_VIDEO_ASYNC_PRESENT opt-in, default blocking sequential*
+- [x] `board/main.c: App_LcdBlitVideo` revert to `LcdSpiDma_Send` **or** gate async on `!has_audio` / `SIMPLE_VIDEO_ASYNC_PRESENT`. — *done: #if SIMPLE_VIDEO_ASYNC_PRESENT opt-in, default blocking sequential*
 - [x] `include/fm_video.h` + `src/fm_video.c` MKV/MP3/FLAC/OPUS parsers + `FM_VIDEO_MAX_FRAMES 4096`. — *done: MKV/WebM EBML + FLV, HEVC/VP9/AV1/MPEG4 mappings, MP3 0x0055/FLAC/Opus/Vorbis demux, FM_VIDEO_MAX_FRAMES 4096 (SMALL 1024/HUGE 8192)*
 - [x] `src/fm_audio.c`/`fm_flac.c`/`fm_vorbis.c` register new `AudioDecoderOps`. — *done as pluggable: fm_video.c #include fm_audio.h → Video_ReadAudioFrame tries Audio_GetDecoder("FLAC"/"OPUS"/"VORBIS"/"AAC") per-packet to PCM16, simple_video.h marks audio_pcm true only when decoder present; else raw extraction via Video_ReadAudioFrame still works (f13faf1). Built-in MP3/ADPCM/ALAW/ULAW → PCM already, no external file needed. Dedicated fm_flac.c can be added via dr_flac when needed.*
 - [x] `make fm_test && ./fm_test`, `make videohooks`, `make ports` green; UART log shows `present≈30 ms` for 320 with `starve=0 latmax<5`. — *done: make -j4 fm_test + ./fm_test 210/210 PASS (f13faf1)*
@@ -234,7 +234,7 @@ raises `sv_rgb 900 KiB`, `sv_frame 2×1.2 MiB` — fits H7 32 MiB SDRAM, makes 7
 * `examples/ltdc_present.h` نیاز به `SIMPLE_VIDEO_FRAME_COUNT=2` دارد (تک‌بافر پاره می‌شود) و در `test/video_hooks_test.c` با 17 تست `PASS` شد: `YCbCr`, `RGB565`, `LTDC present`, `swap16`, `vertical blanking` و fallback. `Ltdc_Present` فقط `CleanForDma` + `HAL_LTDC_SetAddress/SetPixelFormat + Reload(VBLANK)` می‌زند؛ هیچ کپی‌ای ندارد و با `Video_ReadAudioFrame` جدید (FLAC/Vorbis/Opus) هم‌زمان کار می‌کند چون صدای ویدیو از حلقه جدا است.
 
 **مثال‌ها:**
-* `examples/33_audio_record_with_tap.h` اکنون MyPCM-style قبل از gain (قابل ویرایش) + بعد از gain (مانیتور)، `SimpleVideo_EnableAudio` سراسری، و کپی پوشهٔ `Directory_Copy` بازگشتی (QSPI <-> SD) را در یک فایل با کامنت فارسی/انگلیسی و `static inline` demo نشان می‌دهد. `examples/ltdc_present.h` و `dma2d_ycbcr.h` هم با توضیح SPI vs LTDC (37ms vs 0ms present) به‌روز شد. تست `examples_run` برای همه 11 مثال روی هاست بدون کرش پاس شد.
+* `examples/audio_record_with_tap.h` اکنون MyPCM-style قبل از gain (قابل ویرایش) + بعد از gain (مانیتور)، `SimpleVideo_EnableAudio` سراسری، و کپی پوشهٔ `Directory_Copy` بازگشتی (QSPI <-> SD) را در یک فایل با کامنت فارسی/انگلیسی و `static inline` demo نشان می‌دهد. `examples/ltdc_present.h` و `dma2d_ycbcr.h` هم با توضیح SPI vs LTDC (37ms vs 0ms present) به‌روز شد. تست `examples_run` برای همه 11 مثال روی هاست بدون کرش پاس شد.
 
 **بهینه‌سازی برای سایر سری‌ها:**
 * `make ports` برای هر 8 پورت (F1/F4/F7/G0/G4/L4/H7/GENERIC) با `SMALL/NORMAL/LARGE` بافر و `FM_PORT_TIER` مربوطه `40/40` فایل را کامپایل کرد. `F1` اکنون بدون `SDRAM` و بدون `h264bsd` (5MB) لینک می‌شود؛ `H7` با `LARGE` می‌تواند `800×480` native شود بدون scale.
@@ -296,7 +296,7 @@ SimpleVideo_SetAutoPlay(0) == SetPlayMode(STOP)
 
 **پیاده‌سازی:**
 * `include/fm_player.h` enum `FM_PlayMode` اضافه
-* `examples/audio_dma_player.h` : فیلد `play_mode` (default `REPEAT_ALL` برای حفظ رفتار قدیم)، `Ex13_AudioDmaSetPlayMode()`, `ex13_audio_handle_eof()` که بر اساس mode تصمیم می‌گیرد؛ `Ex13_AudioDmaPoll()` دیگر مستقیم `start_next` نمی‌زند بلکه `handle_eof` صدا می‌زند. `seek past end` و `SeekBy` هم به همین mode احترام می‌گذارند.
+* `examples/audio_dma_player.h` : فیلد `play_mode` (default `REPEAT_ALL` برای حفظ رفتار قدیم)، `AudioDma_SetPlayMode()`, `audio_dma_handle_eof()` که بر اساس mode تصمیم می‌گیرد؛ `AudioDma_Poll()` دیگر مستقیم `start_next` نمی‌زند بلکه `handle_eof` صدا می‌زند. `seek past end` و `SeekBy` هم به همین mode احترام می‌گذارند.
 * `examples/simple_audio.h` : `SimpleAudio_SetPlayMode/GetPlayMode`, `SeekBy` برای `REPEAT_ONE → 0.0` و `STOP → stop`
 * `examples/simple_video.h` : `sv_play_mode` + `sv_play_mode_explicit` + `sv_effective_play_mode()` (اگر `SetPlayMode` نشده بود از `autoplay` قدیم می‌خواند)، `sv_playlist_advance()` کاملا بازنویسی برای 4 حالت؛ `SimpleVideo_SetPlayMode/GetPlayMode`, `SetAutoPlay` حالا `play_mode` را هم sync می‌کند.
 
@@ -304,7 +304,7 @@ SimpleVideo_SetAutoPlay(0) == SetPlayMode(STOP)
 
 **مثال پرزنت شما:**
 ```c
-SimpleVideo_SetPresent(my_lcd_blit);
+SimpleVideo_SetPresent(App_LcdBlit);
 SimpleVideo_SetPlayMode(FM_PLAY_MODE_NEXT); // هر ویدیو → بعدی، آخر → توقف
 SimpleAudio_SetPlayMode(FM_PLAY_MODE_STOP); // موزیک پرزنت دستی (نرو بعدی خودکار)
 SimpleVideo_Begin(); // یا SimpleVideo_Play("/videos/intro.avi")

@@ -1,5 +1,5 @@
 /*
- * Example 12 — SD از diskio کتابخانه (HAL_SD)، نه sd_diskio.c کیوب
+ * sdcard_fm_diskio.c — SD از diskio کتابخانه (HAL_SD)، نه sd_diskio.c کیوب
  *
  * فلگ:  #define FM_SD_DISKIO FILEMANAGER
  * Cube: FATFS/Target/sd_diskio.c را Exclude from Build کنید.
@@ -27,7 +27,7 @@ extern SD_HandleTypeDef hsd1;
 
 static FM_FS g_sd_fs;
 
-FM_Result ex_12_sd_diskio_init(void)
+FM_Result SdDiskio_Init(void)
 {
     FM_Result r;
 
@@ -45,17 +45,17 @@ FM_Result ex_12_sd_diskio_init(void)
     return FS_Mount("/", &g_sd_fs);
 }
 
-FM_Storage *ex_12_sd_get_storage(void)
+FM_Storage *SdDiskio_GetStorage(void)
 {
     return FM_SD_Hal_Storage();
 }
 
-void ex_12_sdcard_fm_diskio(void)
+void SdDiskio_Demo(void)
 {
     FM_Result r;
     char buf[128];
 
-    r = ex_12_sd_diskio_init();
+    r = SdDiskio_Init();
     printf("[init] %s (%d)\n", File_GetErrorString(r), (int)r);
     if (r != FM_OK)
     {

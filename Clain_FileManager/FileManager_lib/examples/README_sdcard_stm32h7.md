@@ -25,7 +25,7 @@ FileManager (File_WriteText/…)
 
 ## ۲) باگ‌های پیدا/رفع‌شده در این شاخه (branch)
 
-با بازسازی دقیق سناریوی `ex_1_SdCard_file_basic` روی هاست (با شبیه‌ساز
+با بازسازی دقیق سناریوی `SdCard_FileBasic` روی هاست (با شبیه‌ساز
 FatFS و AddressSanitizer، `test/build_fatfs_host.sh`) این موارد رفع شد:
 
 1. **نشت استاتیک `g_fatfs[]`** — `fatfs_unmount` آبجکت FATFS را پاک نمی‌کرد
@@ -60,7 +60,7 @@ FatFS و AddressSanitizer، `test/build_fatfs_host.sh`) این موارد رفع
   در کل برنامه:
 
 ```
-main → ex_1_SdCard(buf 128B)
+main → SdCard(buf 128B)
      → File_WriteText → File_WriteAll(80B)
      → File_Open → file_open_internal(240B)          [شامل FM_VFS_Resolve 256B تودرتو]
      → fatfs_file_open(64B)
@@ -144,26 +144,26 @@ void HardFault_Handler(void)
   داده‌ی واقعی پاک نشود) و `fmfs_save` هدر را «آخر» می‌نویسد تا ریست
   وسط ذخیره، state سازگار قبلی را نگه دارد. تست رگرسیون:
   «FMFS auto-formats corrupted RAM metadata».
-- `f_getfree -> 12` (FR_NOT_ENABLED) در ex_11 نسخه‌ی قبل: ترتیب اشتباه
+- `f_getfree -> 12` (FR_NOT_ENABLED) در FileDemo_AudioCodecs نسخه‌ی قبل: ترتیب اشتباه
   بود — بعد از `f_mount(NULL,…,1)` در test_sdcard، درایو 0 ثبت نیست و
   f_getfree خام قبل از FS_Mount کار نمی‌کند. نسخه‌ی جدید: اول
   `FS_Mount("/")` بعد اعتبارسنجی با `FS_GetInfo` (بدون نیاز به ff.h).
 - **greeting.txt با حجم صفر**: یعنی نوشتن entry پوشه (metadata) موفق
   بوده ولی نوشتن data sector انجام نشده — به مسیر `SD_write` در
-  sd_diskio.c مشکوک است (معمولاً DMA). مطمئن‌ترین راه: مثال ۱۲
+  sd_diskio.c مشکوک است (معمولاً DMA). مطمئن‌ترین راه: sdcard_fm_diskio.c
   (`examples/sdcard_fm_diskio.c`) — diskio خود FileManager با
   polling: `FM_FATFS_PROVIDE_DISKIO=1`، حذف `sd_diskio.c` از build، و
-  `ex_12_sd_diskio_init()` اولِ main (قبل از test_sdcard).
+  `SdDiskio_Init()` اولِ main (قبل از test_sdcard).
 - `Lines: zu` و `( bytes)` خالی: `vsnprintf` لینک‌شده در پروژه‌ی شما
-  `%zu` را پشتیبانی نمی‌کند (و `%1l` در ex_9 غلط تایپی است — باید
+  `%zu` را پشتیبانی نمی‌کند (و `%1l` در FileDemo_CrcChecksum غلط تایپی است — باید
   `%lu` باشد). نسخه‌ی فعلی `fm_uart_log.c` این ریپو vsnprintf استاندارد
   newlib را صدا می‌زند؛ فایل قدیمی را جایگزین کنید یا از `%lu` با cast
   استفاده کنید.
-- **بریدن خروجی وسط جمله** (مثل محتوای CSV در ex_8 که روی «66.» قطع
+- **بریدن خروجی وسط جمله** (مثل محتوای CSV در FileDemo_DataLogger که روی «66.» قطع
   می‌شود): بافر داخلی `FM_Log` فقط ۲۵۶ بایت است (`FM_LOG_BUF_SIZE`)؛
   رشته‌های بلندتر truncate می‌شوند. قبل از `#include "fm_uart_log.h"`
   بگذارید `#define FM_LOG_BUF_SIZE 1024` یا متن را تکه‌تکه چاپ کنید.
-- فایل‌های باقی‌مانده در ex_4 بین اجراها همان ماندگاری SDRAM است؛ با
+- فایل‌های باقی‌مانده در FileDemo_Directory بین اجراها همان ماندگاری SDRAM است؛ با
   auto-format جدید دیگر گلودنگ نمی‌شود، ولی اگر خروجی تمیز می‌خواهید
   `memset(g_storage, 0, sizeof(g_storage))` را یک‌بار در اول بوت بزنید.
 - `FileManager_Init` دوبار صدا زدن بی‌ضرر است (فقط آخرین خطا را ریست
@@ -175,20 +175,20 @@ void HardFault_Handler(void)
 bare-metal/super-loop است. همهٔ بافرها را برنامه تأمین می‌کند و wrapper هیچ
 بافر پنهانی allocate نمی‌کند:
 
-- `Ex14_AudioReadMono` خروجی PCM16 تک‌کاناله و
-  `Ex14_AudioReadStereo` خروجی interleaved به‌شکل `L,R,L,R,...` می‌دهد؛
+- `MediaIO_AudioReadMono` خروجی PCM16 تک‌کاناله و
+  `MediaIO_AudioReadStereo` خروجی interleaved به‌شکل `L,R,L,R,...` می‌دهد؛
   ورودی Mono در خروجی Stereo روی هر دو کانال تکرار می‌شود.
-- `Ex14_AudioSavePCM16` برای ذخیرهٔ یک‌مرحله‌ای WAV است؛ برای دادهٔ زنده یا
-  بزرگ از `Ex14_AudioWriterBegin/WriteFrames/End` استفاده کنید.
-- `Ex14_VideoReadRGB888` هر frame را در RGB888 متعلق به caller decode می‌کند؛
+- `MediaIO_AudioSavePCM16` برای ذخیرهٔ یک‌مرحله‌ای WAV است؛ برای دادهٔ زنده یا
+  بزرگ از `MediaIO_AudioWriterBegin/WriteFrames/End` استفاده کنید.
+- `MediaIO_VideoReadRGB888` هر frame را در RGB888 متعلق به caller decode می‌کند؛
   writer داخلی ویدئو FMRV خام است و encoder مربوط به AVI/MP4 ادعا نمی‌شود.
 - تصویر built-in از نوع BMP است: load/save به RGB888، resize با nearest یا
   bilinear، و افکت‌های invert، grayscale، sepia، brightness و contrast.
 
-همان lifecycle مشترک SD را نگه دارید: یک‌بار `SD_examples_begin()`، سپس
-مثال‌های SD/Media/Player و در پایان فقط یک‌بار `SD_examples_end()`.
+همان lifecycle مشترک SD را نگه دارید: یک‌بار `SdCard_Begin()`، سپس
+مثال‌های SD/Media/Player و در پایان فقط یک‌بار `SdCard_End()`.
 
-برای Example 13، تا وقتی DMA Player فعال است `SD_examples_end()` را اجرا
+برای audio_dma_player.h، تا وقتی DMA Player فعال است `SdCard_End()` را اجرا
 نکنید. نیمهٔ 1024-sample در 48kHz stereo فقط 10.7ms مهلت refill می‌دهد؛ مقدار
 شروع مناسب‌تر برای SD و build دیباگ `8192` نمونه در هر نیمه (85.3ms) است.
 مسیر PCM WAV اکنون نمونه‌ها را با یک read گروهی می‌خواند و file cache نیز
@@ -214,17 +214,17 @@ overhead ثابت دارد و هم شانس یک stall موقتِ کارت (10-2
   بایت‌های resync را می‌دهند. برای سنجش در super-loop:
 
       Audio_Mp3StatsReset(&player_audio);
-      Ex13_AudioDmaPoll(&player);              // یک refill
+      AudioDma_Poll(&player);              // یک refill
       Audio_Mp3Stats(&player_audio, &s);
       // s.read_calls باید تک‌رقم بماند؛ s.frames ≈ 14 در نیمهٔ 48kHz
 
 - decode با `-O2` و FPU سخت‌افزاری (Single-Precision در CubeMX) بسازید؛
   soft-float decode را چند برابر کندتر می‌کند. اگر D-Cache را فعال کنید،
-  `port.clean_cache` را مطابق Example 13 بگذارید تا DMA دادهٔ تازه ببیند.
+  `port.clean_cache` را مطابق audio_dma_player.h بگذارید تا DMA دادهٔ تازه ببیند.
 
 ## ۷) SimpleAudio — «صدا ساده»: پخش + داده + ضبط در یک header
 
-`examples/simple_audio.h` لایهٔ «جعبه‌سیاه» روی Example 13 است:
+`examples/simple_audio.h` لایهٔ «جعبه‌سیاه» روی audio_dma_player.h است:
 WAV/MP3 و mono/stereo را **خودکار از هدر** تشخیص می‌دهد و شما فقط
 «دکمه‌ها» را صدا می‌زنید. مثل adapter قدیمی (`test_audio_player.h`) فقط در
 main.c یک‌بار include می‌شود (callbackهای HAL_I2S را تعریف می‌کند) —
@@ -249,7 +249,7 @@ main.c یک‌بار include می‌شود (callbackهای HAL_I2S را تعری
 ```c
 #include "simple_audio.h"        /* یک‌بار در main.c */
 ...
-SD_examples_begin();
+SdCard_Begin();
 SimpleAudio_Begin();
 while (1)
 {
@@ -288,7 +288,7 @@ while (1)
 
 MX_JPEG_Init();
 SimpleImage_UseHwJpeg(&hjpeg);
-SimpleImage_SetPresent(my_lcd_blit); /* SPI DMA/polling یا LTDC — مال برد */
+SimpleImage_SetPresent(App_LcdBlit); /* SPI DMA/polling یا LTDC — مال برد */
 SimpleImage_SetOutputSize(320, 240);
 SimpleImage_Begin();
 /* در while(1): SimpleAudio_Poll(); SimpleImage_Poll(); */
@@ -298,7 +298,7 @@ FileManager درایور ILI9341 نیست. `present` را برنامه می‌ن
 برای SPI: `SIMPLE_IMAGE_SWAP16 1` و معمولاً `FM_PIXEL_BGR565`.
 پنجره: `Set_Address(0,0,w-1,h-1)` و همان `bytes` از callback.
 
-بدون example 20، JPEG با picojpeg نرم‌افزاری decode می‌شود. PNG
+بدون hw_jpeg.h، JPEG با picojpeg نرم‌افزاری decode می‌شود. PNG
 (۸-بیت gray/RGB/RGBA/palette، غیر interlaced) built-in است.
 
 **SPI DMA روی STM32H7 (ویدیو، نه عکس):** polling 1KB برای آلبوم کافی است.
@@ -338,7 +338,7 @@ LcdSpiDma_Bind(&hspi2, LCD_CS_GPIO_Port, LCD_CS_Pin);
 #include "spi_tft_dma.h"
 
 LcdSpiDma_Bind(&hspi2, LCD_CS_GPIO_Port, LCD_CS_Pin);
-SimpleVideo_SetPresent(my_lcd_blit);
+SimpleVideo_SetPresent(App_LcdBlit);
 SimpleVideo_SetOutputSize(320, 240);
 SimpleAudio_Begin();   /* یا SimpleVideo_Begin() — یکی I2S را می‌گیرد */
 while (1) {
@@ -363,14 +363,14 @@ H.264 از `FM_Alloc` هم استفاده می‌کند — allocator را رو�
 3. `examples/qspi_w25q.h` را include کنید. هندسهٔ پیش‌فرض:
    32MB، page برابر 256B و erase sector برابر 4KB است.
 4. اگر SD روی FatFS drive 0 است، `FF_VOLUMES >= 2` و
-   `EX15_QSPI_FATFS_DRIVE=1` تنظیم کنید.
-5. `QSPI_examples_begin()` از `examples/examples_qspi.h` را اجرا کنید؛
-   سپس مثال‌های `exQ_1` تا `exQ_10` دقیقاً روی `/qspi` کار می‌کنند.
+   `QSPI_W25Q_FATFS_DRIVE=1` تنظیم کنید.
+5. `QspiFlash_Begin()` از `examples/examples_qspi.h` را اجرا کنید؛
+   سپس مثال‌های `QspiDemo_Basic` تا `QspiDemo_BmpScaleConvert` دقیقاً روی `/qspi` کار می‌کنند.
    مثال‌های کامل Audio/Video/Image در
    `examples/examples_qspi_media.h` و مثال‌های Player در
    `examples/examples_qspi_player.h` قرار دارند.
 6. flash نو را فقط یک‌بار و با فرمان صریح کاربر توسط
-   `QSPI_examples_format()` فرمت کنید؛ format خودکار نیست تا داده اشتباهی
+   `QspiFlash_Format()` فرمت کنید؛ format خودکار نیست تا داده اشتباهی
    پاک نشود.
 
 لایهٔ `FM_NorBlockDevice` بازنویسی 512 بایتی FatFS را به
@@ -381,15 +381,15 @@ read-modify-erase-program چهار کیلوبایتی تبدیل می‌کند �
 
 1. حافظه باید FAT باشد؛ Windows مستقیماً FMFS/LittleFS را نمی‌شناسد.
 2. همهٔ handleهای فایل MCU را ببندید و filesystem محلی را unmount کنید.
-3. با `Ex16_USB_Begin()` مالکیت volume را به PC بدهید.
+3. با `UsbMsc_Begin()` مالکیت volume را به PC بدهید.
 4. سپس `MX_USB_DEVICE_Init()` را اجرا کنید. callbackهای دقیق
    `usbd_storage_if.c` در ابتدای `examples/usb_msc.h` آمده‌اند.
 5. هنگام PC mode هیچ `File_*` روی همان volume اجرا نکنید.
 6. در PC از Eject/Safely Remove استفاده کنید، بعد `USBD_Stop()` و سپس
-   `Ex16_USB_End()` را اجرا کنید تا volume برای MCU دوباره mount شود.
+   `UsbMsc_End()` را اجرا کنید تا volume برای MCU دوباره mount شود.
 
-برای SD polling، getter و callbackهای مالکیت به Example 12 افزوده شده‌اند؛
-برای QSPI callback آماده و برای RAM یک FAT RAM-disk کامل در Example 16 وجود
+برای SD polling، getter و callbackهای مالکیت به sdcard_fm_diskio.c افزوده شده‌اند؛
+برای QSPI callback آماده و برای RAM یک FAT RAM-disk کامل در usb_msc.h وجود
 دارد.
 
 ## ۹) تست هاست (بدون برد)

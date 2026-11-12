@@ -1,11 +1,11 @@
 /*
- * Example 19 — SimpleVideo: «ویدئو ساده» — آلبوم + فریم TFT + همگام صدا
+ * simple_video.h — SimpleVideo: «ویدئو ساده» — آلبوم + فریم TFT + همگام صدا
  *
  * سبک SimpleAudio: دکمه‌ها را صدا می‌زنید، Poll در while(1) فریم را
  * سرِ زمان fps decode می‌کند. صدا و تصویر روی یک ساعت (HAL_GetTick)
  * جلو می‌روند؛ اگر ترک PCM در کانتینر باشد با همان زمان Seek می‌شود.
  *
- *   SimpleVideo_SetPresent(my_lcd_blit);   // DMA: example 21
+ *   SimpleVideo_SetPresent(App_LcdBlit);   // DMA: spi_tft_dma.h
  *   SimpleVideo_SetOutputSize(320, 240);
  *   SimpleVideo_Begin();
  *   while (1) { LcdSpiDma_Poll(); SimpleVideo_Poll(); }
@@ -18,12 +18,12 @@
  *   (برای 320x240@565 حدود 100ms) بلاک می‌شود. برای هم‌پوشانی انتقال
  *   SPI فریم N با decode فریم N+1 دو خط را عوض کنید:
  *
- *     void my_lcd_blit(...) {
+ *     void App_LcdBlit(...) {
  *         ILI9341_Set_Address(...);
  *         HAL_GPIO_WritePin(LCD_DC..., GPIO_PIN_SET);
  *         LcdSpiDma_Begin(px, bytes);      // به‌جای LcdSpiDma_Send
  *     }
- *     SimpleVideo_SetPresent(my_lcd_blit);
+ *     SimpleVideo_SetPresent(App_LcdBlit);
  *     SimpleVideo_SetPresentWait(LcdSpiDma_Wait);
  *
  *   آن‌وقت بودجهٔ هر فریم = max(decode+convert, SPI) می‌شود نه جمع‌شان.
@@ -70,7 +70,7 @@
  *   #include "simple_audio.h"
  *   #include "simple_video.h"
  *
- *   SimpleVideo_SetPresent(my_lcd_blit);
+ *   SimpleVideo_SetPresent(App_LcdBlit);
  *   SimpleAudio_Begin();                 — یا SimpleVideo_Begin()
  *   while (1) {
  *       (void)SimpleAudio_Poll();
@@ -114,7 +114,7 @@
  *   SIMPLE_VIDEO_HALF_SAMPLES 8192 (نیمهٔ حلقهٔ I2S؛ اگر لاگ starve>0 شد
  *                              و صداخش داشت، این را بالا ببرید)
  *
- * SPI DMA را داخل FileManager نگذار — example 21 را در main.c include کن.
+ * SPI DMA را داخل FileManager نگذار — spi_tft_dma.h را در main.c include کن.
  */
 
 #ifndef SIMPLE_VIDEO_H_
@@ -491,7 +491,7 @@ typedef void (*SimpleVideo_FrameFn)(void *ctx, const void *pixels,
                                     uint16_t width, uint16_t height,
                                     FM_PixelFormat format, size_t bytes);
 
-/* Optional hook, usually LcdSpiDma_Wait() (example 21).  Called at the
+/* Optional hook, usually LcdSpiDma_Wait() (spi_tft_dma.h).  Called at the
  * start of every present so a non-blocking present callback
  * (LcdSpiDma_Begin) can overlap the SPI transfer of frame N with the
  * decode of frame N+1; the hook drains the transfer before frame N+1 is
@@ -670,7 +670,7 @@ static size_t sv_draw_cap(void)
 /*
  * قلاب اختیاری برای تبدیل RGB888 → RGB565 روی سخت‌افزار.
  *
- * مثال ۳۰ (DMA2D) اگر include شود این را پر می‌کند. اگر پر نباشد یا
+ * dma2d_ycbcr.h (DMA2D) اگر include شود این را پر می‌کند. اگر پر نباشد یا
  * خطا برگرداند، حلقهٔ نرم‌افزاری پایین اجرا می‌شود. بدون تغییر رفتار.
  *
  * px تعداد پیکسل، bgr یعنی جای R و B عوض شود، swap یعنی بایت‌های
@@ -858,7 +858,7 @@ static uint8_t sv_i2s_pause_faded[2];
 /* Push CPU-written ring data out of the D-cache so the DMA (which
  * bypasses the cache) plays the fresh samples.  No-op when the region
  * is non-cacheable or the D-cache is off — and therefore always safe
- * (same defence ex17 uses for its I2S ring). */
+ * (same defence simple_audio.h uses for its I2S ring). */
 static void sv_i2s_cache_clean(void *p, size_t bytes)
 {
     /* بی‌اثر وقتی D-Cache خاموش است؛ آدرس/طول را هم خودش به مرز خط
@@ -2393,7 +2393,7 @@ static FM_Result simple_video_start_index(uint32_t index)
             {
                 FM_Log("SimpleVideo: decoder out of memory (%lu refused "
                        "allocation(s)) — route FM_Alloc to SDRAM "
-                       "(example 22: SdramAlloc_Init() before "
+                       "(sdram_alloc.h: SdramAlloc_Init() before "
                        "FileManager_Init) or raise SDRAM_ALLOC_BYTES; "
                        "H.264 320x240 needs ~800KB, 720x480 several MB\n",
                        (unsigned long)d->alloc_failures);

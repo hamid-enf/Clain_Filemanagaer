@@ -1,5 +1,5 @@
 /*
- * Example 14 — Caller-owned Audio / Video / Image data
+ * media_data_io.h — Caller-owned Audio / Video / Image data
  *
  * این فایل یک لایه‌ی نمونه و header-only روی API اصلی است تا داده‌ی decodeشده
  * مستقیماً داخل بافر شما قرار بگیرد. هیچ بافر تصویر/صدا/ویدئو داخل این wrapper
@@ -9,31 +9,31 @@
  * AUDIO — PCM16 استاندارد
  * --------------------------------------------------------------------------
  *
- *   static Ex14_AudioReader audio;
+ *   static MediaIO_AudioReader audio;
  *   static int16_t mono[512];         // 512 نمونه‌ی mono
  *   static int16_t stereo[512 * 2];   // 512 فریم L,R
  *   size_t count;
  *
- *   Ex14_AudioOpen(&audio, "/music/song.mp3");
+ *   MediaIO_AudioOpen(&audio, "/music/song.mp3");
  *
  *   // خروجی mono: هر عنصر یک نمونه‌ی PCM16 استریو را downmix می‌کند.
- *   Ex14_AudioReadMono(&audio, mono, 512, &count);
+ *   MediaIO_AudioReadMono(&audio, mono, 512, &count);
  *   // mono[0..count-1] اکنون برای DSP شما آماده است.
  *
- *   Ex14_AudioSeek(&audio, 0.0);
+ *   MediaIO_AudioSeek(&audio, 0.0);
  *   // خروجی stereo: L,R,L,R...؛ count تعداد frame است نه int16_t.
- *   Ex14_AudioReadStereo(&audio, stereo, 512, &count);
+ *   MediaIO_AudioReadStereo(&audio, stereo, 512, &count);
  *   // L = stereo[2*i], R = stereo[2*i+1]
  *
  *   // پسوند مقصد writer را انتخاب می‌کند: WAV داخلی است؛ MP3 باید encoder
  *   // ثبت‌شده داشته باشد وگرنه خطای صریح FM_ERR_UNSUPPORTED برمی‌گردد.
- *   Ex14_AudioSavePCM16("/processed.wav", stereo, count,
+ *   MediaIO_AudioSavePCM16("/processed.wav", stereo, count,
  *                       audio.info.sample_rate, 2);
- *   Ex14_AudioClose(&audio);
+ *   MediaIO_AudioClose(&audio);
  *
  * برای ضبط/ذخیره‌ی پیوسته و انتخاب خودکار .wav/.mp3 از این سه تابع استفاده
- * کنید: Ex14_AudioFileWriterBegin، Ex14_AudioFileWriterWriteFrames و
- * Ex14_AudioFileWriterEnd. خواندن WAV/MP3 بر اساس محتوای فایل است، نه پسوند.
+ * کنید: MediaIO_AudioFileWriterBegin، MediaIO_AudioFileWriterWriteFrames و
+ * MediaIO_AudioFileWriterEnd. خواندن WAV/MP3 بر اساس محتوای فایل است، نه پسوند.
  * اگر داده از قبل یک فایل MP3/WAV کامل و encodeشده است، دوباره encode نکنید؛
  * Media_SaveEncoded نوع magic را validate و همان bytes را ذخیره می‌کند.
  *
@@ -41,19 +41,19 @@
  * VIDEO — هر فریم در layout انتخابی caller
  * --------------------------------------------------------------------------
  *
- *   static Ex14_VideoReader video;
+ *   static MediaIO_VideoReader video;
  *   static uint8_t rgb_work[320 * 240 * 3];
  *   static uint8_t bgr565[320 * 240 * 2];
  *
- *   Ex14_VideoOpen(&video, "/clip.avi"); // FMRV/AVI/MP4 از محتوا تشخیص داده می‌شود
- *   Ex14_VideoReadAs(&video, FM_PIXEL_BGR565,
+ *   MediaIO_VideoOpen(&video, "/clip.avi"); // FMRV/AVI/MP4 از محتوا تشخیص داده می‌شود
+ *   MediaIO_VideoReadAs(&video, FM_PIXEL_BGR565,
  *                    bgr565, sizeof(bgr565),
  *                    rgb_work, sizeof(rgb_work));
- *   Ex14_VideoClose(&video);
+ *   MediaIO_VideoClose(&video);
  *
  * ذخیره‌ی ویدئو در کتابخانه فعلاً FMRV خام است (نه encoder مربوط به AVI/MP4):
- * Ex14_VideoWriterBeginRGB888 -> Ex14_VideoWriterWriteRGB888 ->
- * Ex14_VideoWriterEnd.
+ * MediaIO_VideoWriterBeginRGB888 -> MediaIO_VideoWriterWriteRGB888 ->
+ * MediaIO_VideoWriterEnd.
  *
  * --------------------------------------------------------------------------
  * IMAGE — BMP به RGB888، resize و effect
@@ -63,11 +63,11 @@
  *   static uint8_t rgb[320 * 240 * 3];
  *   FM_Image image;
  *
- *   Ex14_ImageLoadRGB888("/photo.bmp", &image,
+ *   MediaIO_ImageLoadRGB888("/photo.bmp", &image,
  *                        decode_work, sizeof(decode_work),
  *                        rgb, sizeof(rgb));
  *   Image_ApplyEffect(&image, FM_IMAGE_EFFECT_SEPIA, 0);
- *   Ex14_ImageSaveRGB888("/photo_sepia.bmp", image.data,
+ *   MediaIO_ImageSaveRGB888("/photo_sepia.bmp", image.data,
  *                        image.width, image.height);
  *
  * افکت‌ها: INVERT، GRAYSCALE، SEPIA، BRIGHTNESS (-255..255)،
@@ -75,8 +75,8 @@
  * BGR888، RGBA8888 و BGRA8888. فرمت codec تصویری built-in فعلاً BMP است.
  */
 
-#ifndef FM_EXAMPLE_14_MEDIA_DATA_IO_H
-#define FM_EXAMPLE_14_MEDIA_DATA_IO_H
+#ifndef FM_TOPAPI_MEDIA_DATA_IO_H
+#define FM_TOPAPI_MEDIA_DATA_IO_H
 
 
 #ifndef MEDIA_DATA_IO_H_
@@ -100,9 +100,9 @@ typedef struct
     FM_Audio handle;
     FM_AudioInfo info;
     FM_Bool opened;
-} Ex14_AudioReader;
+} MediaIO_AudioReader;
 
-static inline FM_Result Ex14_AudioOpen(Ex14_AudioReader *reader,
+static inline FM_Result MediaIO_AudioOpen(MediaIO_AudioReader *reader,
                                        const char *path)
 {
     FM_Result r;
@@ -129,7 +129,7 @@ static inline FM_Result Ex14_AudioOpen(Ex14_AudioReader *reader,
 
 /* Native interleaved PCM16. `capacity` and `sample_count` count individual
  * int16_t channel samples. Use reader.info.channels to interpret the data. */
-static inline FM_Result Ex14_AudioReadNative(Ex14_AudioReader *reader,
+static inline FM_Result MediaIO_AudioReadNative(MediaIO_AudioReader *reader,
                                               int16_t *pcm,
                                               size_t capacity,
                                               size_t *sample_count)
@@ -142,7 +142,7 @@ static inline FM_Result Ex14_AudioReadNative(Ex14_AudioReader *reader,
 }
 
 /* Normalized mono PCM16: one output value per sample time. */
-static inline FM_Result Ex14_AudioReadMono(Ex14_AudioReader *reader,
+static inline FM_Result MediaIO_AudioReadMono(MediaIO_AudioReader *reader,
                                             int16_t *mono,
                                             size_t capacity,
                                             size_t *sample_count)
@@ -156,7 +156,7 @@ static inline FM_Result Ex14_AudioReadMono(Ex14_AudioReader *reader,
 
 /* Normalized stereo PCM16: output is L,R,L,R... and capacity counts frames.
  * The destination needs `frame_capacity * 2` int16_t values. */
-static inline FM_Result Ex14_AudioReadStereo(Ex14_AudioReader *reader,
+static inline FM_Result MediaIO_AudioReadStereo(MediaIO_AudioReader *reader,
                                               int16_t *stereo,
                                               size_t frame_capacity,
                                               size_t *frames_read)
@@ -169,7 +169,7 @@ static inline FM_Result Ex14_AudioReadStereo(Ex14_AudioReader *reader,
                             frames_read);
 }
 
-static inline FM_Result Ex14_AudioSeek(Ex14_AudioReader *reader,
+static inline FM_Result MediaIO_AudioSeek(MediaIO_AudioReader *reader,
                                        double seconds)
 {
     if (reader == NULL || !reader->opened)
@@ -179,7 +179,7 @@ static inline FM_Result Ex14_AudioSeek(Ex14_AudioReader *reader,
     return Audio_Seek(&reader->handle, seconds);
 }
 
-static inline FM_Result Ex14_AudioClose(Ex14_AudioReader *reader)
+static inline FM_Result MediaIO_AudioClose(MediaIO_AudioReader *reader)
 {
     FM_Result r;
 
@@ -193,7 +193,7 @@ static inline FM_Result Ex14_AudioClose(Ex14_AudioReader *reader)
 }
 
 /* Streaming WAV writer: counts are PCM frames, not individual channel values. */
-static inline FM_Result Ex14_AudioWriterBegin(FM_AudioWriter *writer,
+static inline FM_Result MediaIO_AudioWriterBegin(FM_AudioWriter *writer,
                                                const char *path,
                                                uint32_t sample_rate,
                                                uint16_t channels)
@@ -201,7 +201,7 @@ static inline FM_Result Ex14_AudioWriterBegin(FM_AudioWriter *writer,
     return AudioWriter_Create(path, sample_rate, channels, 16, writer);
 }
 
-static inline FM_Result Ex14_AudioWriterWriteFrames(FM_AudioWriter *writer,
+static inline FM_Result MediaIO_AudioWriterWriteFrames(FM_AudioWriter *writer,
                                                      const int16_t *pcm,
                                                      size_t frame_count,
                                                      size_t *frames_written)
@@ -231,7 +231,7 @@ static inline FM_Result Ex14_AudioWriterWriteFrames(FM_AudioWriter *writer,
     return r;
 }
 
-static inline FM_Result Ex14_AudioWriterEnd(FM_AudioWriter *writer)
+static inline FM_Result MediaIO_AudioWriterEnd(FM_AudioWriter *writer)
 {
     return AudioWriter_Close(writer);
 }
@@ -239,7 +239,7 @@ static inline FM_Result Ex14_AudioWriterEnd(FM_AudioWriter *writer)
 /* Generic streaming writer. AUTO selects WAV or MP3 from the path extension.
  * WAV is built-in. MP3 uses the FM_AudioEncoderOps registered for
  * FM_AUDIO_FILE_MP3; unsupported output is reported, never mislabeled. */
-static inline FM_Result Ex14_AudioFileWriterBegin(
+static inline FM_Result MediaIO_AudioFileWriterBegin(
     FM_AudioFileWriter *writer, const char *path, uint32_t sample_rate,
     uint16_t channels, uint32_t bitrate_kbps)
 {
@@ -253,7 +253,7 @@ static inline FM_Result Ex14_AudioFileWriterBegin(
     return AudioFileWriter_Open(writer, path, FM_AUDIO_FILE_AUTO, &config);
 }
 
-static inline FM_Result Ex14_AudioFileWriterWriteFrames(
+static inline FM_Result MediaIO_AudioFileWriterWriteFrames(
     FM_AudioFileWriter *writer, const int16_t *pcm, size_t frame_count,
     size_t *frames_written)
 {
@@ -261,7 +261,7 @@ static inline FM_Result Ex14_AudioFileWriterWriteFrames(
                                        frames_written);
 }
 
-static inline FM_Result Ex14_AudioFileWriterEnd(FM_AudioFileWriter *writer)
+static inline FM_Result MediaIO_AudioFileWriterEnd(FM_AudioFileWriter *writer)
 {
     return AudioFileWriter_Close(writer);
 }
@@ -269,7 +269,7 @@ static inline FM_Result Ex14_AudioFileWriterEnd(FM_AudioFileWriter *writer)
 /* One-shot save for a caller-owned PCM16 buffer. The extension selects the
  * actual encoder. For large/live recordings use the generic streaming writer
  * above so the complete sound need not fit in RAM. */
-static inline FM_Result Ex14_AudioSavePCM16(const char *path,
+static inline FM_Result MediaIO_AudioSavePCM16(const char *path,
                                              const int16_t *pcm,
                                              size_t frame_count,
                                              uint32_t sample_rate,
@@ -285,24 +285,24 @@ static inline FM_Result Ex14_AudioSavePCM16(const char *path,
         return FM_ERR_INVALID_ARGUMENT;
     }
     memset(&writer, 0, sizeof(writer));
-    r = Ex14_AudioFileWriterBegin(&writer, path, sample_rate, channels, 128);
+    r = MediaIO_AudioFileWriterBegin(&writer, path, sample_rate, channels, 128);
     if (r != FM_OK) return r;
 
     while (total < frame_count)
     {
         size_t written = 0;
 
-        r = Ex14_AudioFileWriterWriteFrames(&writer,
+        r = MediaIO_AudioFileWriterWriteFrames(&writer,
                                              pcm + total * channels,
                                              frame_count - total, &written);
         total += written;
         if (r != FM_OK || written == 0)
         {
-            (void)Ex14_AudioFileWriterEnd(&writer);
+            (void)MediaIO_AudioFileWriterEnd(&writer);
             return (r != FM_OK) ? r : FM_ERR_IO;
         }
     }
-    return Ex14_AudioFileWriterEnd(&writer);
+    return MediaIO_AudioFileWriterEnd(&writer);
 }
 
 /* ========================================================================== */
@@ -314,9 +314,9 @@ typedef struct
     FM_Video handle;
     FM_VideoInfo info;
     FM_Bool opened;
-} Ex14_VideoReader;
+} MediaIO_VideoReader;
 
-static inline FM_Result Ex14_VideoOpen(Ex14_VideoReader *reader,
+static inline FM_Result MediaIO_VideoOpen(MediaIO_VideoReader *reader,
                                        const char *path)
 {
     FM_Result r;
@@ -339,7 +339,7 @@ static inline FM_Result Ex14_VideoOpen(Ex14_VideoReader *reader,
     return FM_OK;
 }
 
-static inline size_t Ex14_VideoFrameBytes(const Ex14_VideoReader *reader,
+static inline size_t MediaIO_VideoFrameBytes(const MediaIO_VideoReader *reader,
                                           FM_PixelFormat format)
 {
     size_t bytes = 0;
@@ -353,17 +353,17 @@ static inline size_t Ex14_VideoFrameBytes(const Ex14_VideoReader *reader,
     return bytes;
 }
 
-static inline size_t Ex14_VideoRGB888FrameBytes(
-    const Ex14_VideoReader *reader)
+static inline size_t MediaIO_VideoRGB888FrameBytes(
+    const MediaIO_VideoReader *reader)
 {
-    return Ex14_VideoFrameBytes(reader, FM_PIXEL_RGB888);
+    return MediaIO_VideoFrameBytes(reader, FM_PIXEL_RGB888);
 }
 
 /* Decode exactly one frame to a caller-selected raw layout. For RGB888,
  * rgb_work may be NULL. Other layouts need a separate width*height*3 work
  * buffer because bundled decoders produce RGB888 before conversion. */
-static inline FM_Result Ex14_VideoReadAs(
-    Ex14_VideoReader *reader, FM_PixelFormat format,
+static inline FM_Result MediaIO_VideoReadAs(
+    MediaIO_VideoReader *reader, FM_PixelFormat format,
     void *pixels, size_t capacity, void *rgb_work, size_t rgb_work_capacity)
 {
     if (reader == NULL || !reader->opened)
@@ -375,7 +375,7 @@ static inline FM_Result Ex14_VideoReadAs(
 }
 
 /* Decode exactly one frame to top-left-to-bottom-right RGB888. */
-static inline FM_Result Ex14_VideoReadRGB888(Ex14_VideoReader *reader,
+static inline FM_Result MediaIO_VideoReadRGB888(MediaIO_VideoReader *reader,
                                               uint8_t *rgb,
                                               size_t capacity)
 {
@@ -385,7 +385,7 @@ static inline FM_Result Ex14_VideoReadRGB888(Ex14_VideoReader *reader,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    needed = Ex14_VideoRGB888FrameBytes(reader);
+    needed = MediaIO_VideoRGB888FrameBytes(reader);
     if (needed == 0 || capacity < needed)
     {
         return FM_ERR_TOO_LARGE;
@@ -395,8 +395,8 @@ static inline FM_Result Ex14_VideoReadRGB888(Ex14_VideoReader *reader,
 
 /* Decode into caller-owned native_rgb and then resize into scaled_rgb. This
  * variant performs no hidden allocation. */
-static inline FM_Result Ex14_VideoReadRGB888Scaled(
-    Ex14_VideoReader *reader,
+static inline FM_Result MediaIO_VideoReadRGB888Scaled(
+    MediaIO_VideoReader *reader,
     uint8_t *native_rgb, size_t native_capacity,
     uint8_t *scaled_rgb, size_t scaled_capacity,
     uint16_t out_width, uint16_t out_height, FM_ScaleMode mode)
@@ -420,7 +420,7 @@ static inline FM_Result Ex14_VideoReadRGB888Scaled(
     {
         return FM_ERR_TOO_LARGE;
     }
-    r = Ex14_VideoReadRGB888(reader, native_rgb, native_capacity);
+    r = MediaIO_VideoReadRGB888(reader, native_rgb, native_capacity);
     if (r != FM_OK) return r;
 
     return Image_Scale(native_rgb, reader->info.width, reader->info.height,
@@ -428,7 +428,7 @@ static inline FM_Result Ex14_VideoReadRGB888Scaled(
                        mode);
 }
 
-static inline FM_Result Ex14_VideoClose(Ex14_VideoReader *reader)
+static inline FM_Result MediaIO_VideoClose(MediaIO_VideoReader *reader)
 {
     FM_Result r;
 
@@ -443,7 +443,7 @@ static inline FM_Result Ex14_VideoClose(Ex14_VideoReader *reader)
 
 /* Streaming RGB888 video writer. The built-in output container is FMRV raw;
  * an AVI/MP4 encoder is intentionally not claimed by this API. */
-static inline FM_Result Ex14_VideoWriterBeginRGB888(
+static inline FM_Result MediaIO_VideoWriterBeginRGB888(
     FM_VideoWriter *writer, const char *path,
     uint16_t width, uint16_t height, uint32_t fps,
     uint32_t expected_frames)
@@ -463,13 +463,13 @@ static inline FM_Result Ex14_VideoWriterBeginRGB888(
                               (uint32_t)bytes, writer);
 }
 
-static inline FM_Result Ex14_VideoWriterWriteRGB888(
+static inline FM_Result MediaIO_VideoWriterWriteRGB888(
     FM_VideoWriter *writer, const uint8_t *rgb, size_t rgb_size)
 {
     return VideoWriter_WriteFrame(writer, rgb, rgb_size);
 }
 
-static inline FM_Result Ex14_VideoWriterEnd(FM_VideoWriter *writer)
+static inline FM_Result MediaIO_VideoWriterEnd(FM_VideoWriter *writer)
 {
     return VideoWriter_Close(writer);
 }
@@ -481,7 +481,7 @@ static inline FM_Result Ex14_VideoWriterEnd(FM_VideoWriter *writer)
 /* Load built-in BMP input and normalize it to RGB888. A 24-bit BMP decodes
  * directly into rgb_buffer. An 8-bit grayscale BMP uses gray_work first and
  * then expands to RGB888. `image->data` points at rgb_buffer on success. */
-static inline FM_Result Ex14_ImageLoadRGB888(
+static inline FM_Result MediaIO_ImageLoadRGB888(
     const char *path, FM_Image *image,
     uint8_t *gray_work, size_t gray_capacity,
     uint8_t *rgb_buffer, size_t rgb_capacity)
@@ -538,7 +538,7 @@ static inline FM_Result Ex14_ImageLoadRGB888(
 /* Load BMP and convert to a selected caller-owned raw pixel layout. The
  * decoder's native RGB888 image is placed in rgb_work; for RGB888 output,
  * rgb_work and pixel_buffer may be the same pointer. */
-static inline FM_Result Ex14_ImageLoadAs(
+static inline FM_Result MediaIO_ImageLoadAs(
     const char *path, FM_Image *image, FM_PixelFormat format,
     uint8_t *gray_work, size_t gray_capacity,
     uint8_t *rgb_work, size_t rgb_capacity,
@@ -553,7 +553,7 @@ static inline FM_Result Ex14_ImageLoadAs(
         return FM_ERR_INVALID_ARGUMENT;
     }
     memset(&rgb, 0, sizeof(rgb));
-    r = Ex14_ImageLoadRGB888(path, &rgb, gray_work, gray_capacity,
+    r = MediaIO_ImageLoadRGB888(path, &rgb, gray_work, gray_capacity,
                              rgb_work, rgb_capacity);
     if (r != FM_OK) return r;
 
@@ -565,7 +565,7 @@ static inline FM_Result Ex14_ImageLoadAs(
     return r;
 }
 
-static inline FM_Result Ex14_ImageSaveBMP(const char *path,
+static inline FM_Result MediaIO_ImageSaveBMP(const char *path,
                                            const uint8_t *pixels,
                                            uint16_t width, uint16_t height,
                                            FM_PixelFormat format)
@@ -593,16 +593,16 @@ static inline FM_Result Ex14_ImageSaveBMP(const char *path,
     return Image_Save(path, &image);
 }
 
-static inline FM_Result Ex14_ImageSaveRGB888(const char *path,
+static inline FM_Result MediaIO_ImageSaveRGB888(const char *path,
                                               const uint8_t *rgb,
                                               uint16_t width,
                                               uint16_t height)
 {
-    return Ex14_ImageSaveBMP(path, rgb, width, height, FM_PIXEL_RGB888);
+    return MediaIO_ImageSaveBMP(path, rgb, width, height, FM_PIXEL_RGB888);
 }
 
 /* Resize a caller-owned image while preserving its raw pixel layout. */
-static inline FM_Result Ex14_ImageResize(
+static inline FM_Result MediaIO_ImageResize(
     const uint8_t *source, uint16_t source_width, uint16_t source_height,
     uint8_t *destination, size_t destination_capacity,
     uint16_t destination_width, uint16_t destination_height,
@@ -628,13 +628,13 @@ static inline FM_Result Ex14_ImageResize(
                        mode);
 }
 
-static inline FM_Result Ex14_ImageResizeRGB888(
+static inline FM_Result MediaIO_ImageResizeRGB888(
     const uint8_t *source, uint16_t source_width, uint16_t source_height,
     uint8_t *destination, size_t destination_capacity,
     uint16_t destination_width, uint16_t destination_height,
     FM_ScaleMode mode)
 {
-    return Ex14_ImageResize(source, source_width, source_height,
+    return MediaIO_ImageResize(source, source_width, source_height,
                             destination, destination_capacity,
                             destination_width, destination_height,
                             FM_PIXEL_RGB888, mode);
@@ -642,4 +642,4 @@ static inline FM_Result Ex14_ImageResizeRGB888(
 
 #endif /* MEDIA_DATA_IO_H_ */
 
-#endif /* FM_EXAMPLE_14_MEDIA_DATA_IO_H */
+#endif /* FM_TOPAPI_MEDIA_DATA_IO_H */

@@ -2,8 +2,8 @@
  * examples_qspi.h — مالکِ «تنها» begin/end مثال‌های QSPI
  * + معادل کامل مثال‌های File شماره 1 تا 10 روی QSPI
  *
- * این فایل تنها جایی است که QSPI_examples_begin() /
- * QSPI_examples_format() / QSPI_examples_end() را تعریف می‌کند.
+ * این فایل تنها جایی است که QspiFlash_Begin() /
+ * QspiFlash_Format() / QspiFlash_End() را تعریف می‌کند.
  * بقیهٔ فایل‌های QSPI (مدیا، پلیر، انتقال 25) فقط از مونت آمادهٔ
  * "/qspi" استفاده می‌کنند و تعریف تکراری ندارند — پس همه را می‌توان
  * با هم در tests.h включ کرد و پشت‌سرهم تست کرد.
@@ -17,45 +17,45 @@
  * ترتیب کامل تست QSPI (همان ترتیب SD که قبلاً پاس شده):
  *
  *   MX_QUADSPI_Init();                 <- CubeMX، قبل از همهٔ این‌ها
- *   if (QSPI_examples_begin() == FM_OK) {
- *       exQ_1_file_basic();                    <- فایل ۱..۱۰
- *       exQ_2_file_copy_move_rename();
+ *   if (QspiFlash_Begin() == FM_OK) {
+ *       QspiDemo_Basic();                    <- فایل ۱..۱۰
+ *       QspiDemo_CopyMoveRename();
  *       ...
- *       exQ_10_file_BMP_Image_Scale_Convert();
+ *       QspiDemo_BmpScaleConvert();
  *
- *       exQM_1_audio_detect_process_save();    <- مدیا (اختیاری)
- *       exQM_2_video_detect_to_bgr565();
- *       exQM_3_image_bgr_effect_resize_save();
+ *       QspiMediaDemo_AudioDetectProcessSave();    <- مدیا (اختیاری)
+ *       QspiMediaDemo_VideoDetectToBgr565();
+ *       QspiMediaDemo_ImageEffectResizeSave();
  *
- *       exQP_1_music_controls();               <- پلیر (اختیاری)
- *       exQP_2_video_controls();
- *       exQP_3_remote_buttons();
+ *       QspiPlayerDemo_MusicControls();               <- پلیر (اختیاری)
+ *       QspiPlayerDemo_VideoControls();
+ *       QspiPlayerDemo_RemoteButtons();
  *
- *       exT_1_sd_to_qspi();                    <- انتقال ۲۵
- *       exT_2_qspi_to_sdram();
- *       exT_3_verify_roundtrip();
- *       exT_4_all_combinations();
+ *       TransferDemo_SdToQspi();                    <- انتقال ۲۵
+ *       TransferDemo_QspiToSdram();
+ *       TransferDemo_VerifyRoundtrip();
+ *       TransferDemo_AllCombinations();
  *
- *       QSPI_examples_end();
+ *       QspiFlash_End();
  *   }
  *   else if (service_button_confirmed)         <- فقط flash نو/خراب
- *       QSPI_examples_format();
+ *       QspiFlash_Format();
  *
  * دو راه انداختن درایور — begin خودش انتخاب می‌کند:
- *   ۱) خودکار (پیش‌فرض همین فایل): Ex15_QSPI_Begin() با درایور W25Q256.
+ *   ۱) خودکار (پیش‌فرض همین فایل): QspiW25q_Begin() با درایور W25Q256.
  *   ۲) از بیرون: اگر خودتان قبلش فلش را با درایور دیگر (مثلاً
- *      Ex26_QspiBegin در qspi_driver.h) راه انداخته و روی
+ *      QspiDriver_Begin در qspi_driver.h) راه انداخته و روی
  *      "/qspi" مونت کرده باشید، begin همان را پیدا می‌کند، دوباره
  *      کاری نمی‌کند و فقط گزارش فضای آزاد می‌دهد. در این حالت
- *      QSPI_examples_end() هم چیزی را نمی‌بندد — بستنش با caller.
+ *      QspiFlash_End() هم چیزی را نمی‌بندد — بستنش با caller.
  *
  * نکته: W25Q256 نو باید یک‌بار FAT format شود. برای جلوگیری از پاک‌شدن
- * اتفاقی داده، format خودکار نیست؛ QSPI_examples_format() را فقط با فرمان
+ * اتفاقی داده، format خودکار نیست؛ QspiFlash_Format() را فقط با فرمان
  * کاربر/دکمهٔ سرویس اجرا کنید.
  */
 
-#ifndef EXAMPLES_FILE_QSPI_ALL_H_
-#define EXAMPLES_FILE_QSPI_ALL_H_
+#ifndef FM_TOPAPI_QSPI_DEMOS_H
+#define FM_TOPAPI_QSPI_DEMOS_H
 
 #if !defined(FM_HOST_BUILD) || (FM_HOST_BUILD == 0)
 
@@ -82,7 +82,7 @@ static void qspi_step(const char *what, FM_Result r)
  * end حق ندارد چیزی را ببندد. */
 static FM_Bool qspi_started_here = FM_FALSE;
 
-FM_Result QSPI_examples_begin(void)
+FM_Result QspiFlash_Begin(void)
 {
     FM_FSInfo info;
     FM_Bool mounted = FM_FALSE;
@@ -90,14 +90,14 @@ FM_Result QSPI_examples_begin(void)
 
     qspi_started_here = FM_FALSE;
 
-    /* اگر caller خودش QSPI را راه انداخته باشد (مثلاً Ex26_QspiBegin
+    /* اگر caller خودش QSPI را راه انداخته باشد (مثلاً QspiDriver_Begin
      * + FMFS_Init + FS_Mount("/qspi"))، همان مونت را استفاده کن —
      * راه‌اندازی دوم باعث دو فایل‌سیستم روی یک مسیر می‌شود. */
-    (void)FS_IsMounted(EX15_QSPI_MOUNT_PATH, &mounted);
+    (void)FS_IsMounted(QSPI_W25Q_MOUNT_PATH, &mounted);
     if (mounted)
     {
         printf("QSPI: /qspi already mounted - reusing it.\n");
-        r = FS_GetInfo(EX15_QSPI_MOUNT_PATH, &info);
+        r = FS_GetInfo(QSPI_W25Q_MOUNT_PATH, &info);
         qspi_step("FS_GetInfo(/qspi)", r);
         if (r == FM_OK)
         {
@@ -107,21 +107,21 @@ FM_Result QSPI_examples_begin(void)
         return r;
     }
 
-    r = Ex15_QSPI_Begin();
-    qspi_step("Ex15_QSPI_Begin", r);
+    r = QspiW25q_Begin();
+    qspi_step("QspiW25q_Begin", r);
     if (r != FM_OK)
     {
         /* ریشهٔ رایج این خطاها فلش نو/خالی است — نه خرابی سخت‌افزار. */
         if (r == FM_ERR_CORRUPTED || r == FM_ERR_NOT_FOUND)
         {
             printf("  QSPI flash khali/new ast - yek bar: "
-                   "QSPI_examples_format();\n");
+                   "QspiFlash_Format();\n");
         }
         return r;
     }
     qspi_started_here = FM_TRUE;
 
-    r = FS_GetInfo(EX15_QSPI_MOUNT_PATH, &info);
+    r = FS_GetInfo(QSPI_W25Q_MOUNT_PATH, &info);
     qspi_step("FS_GetInfo(/qspi)", r);
     if (r == FM_OK)
     {
@@ -131,63 +131,63 @@ FM_Result QSPI_examples_begin(void)
     else
     {
         printf("QSPI FAT is missing/corrupt; after explicit user approval, "
-               "run QSPI_examples_format() once.\n");
+               "run QspiFlash_Format() once.\n");
     }
     return r;
 }
 
-FM_Result QSPI_examples_format(void)
+FM_Result QspiFlash_Format(void)
 {
     /* تشخیص درست: مونت هست یا نه — نه started_here. در حالت فلش نو/خالی
      * اولین FS_Mount با -12 شکست خورده و /qspi اصلاً مونت نیست؛
      * FS_Format روی مسیر مونت‌نشده NOT_MOUNTED می‌داد و فرمت هرگز
      * انجام نمی‌شد (باگ واقعی برد). آنجا باید مستقیم از طریق درایو
-     * فرمت کرد و مونت کرد — همین کار را Ex15_QSPI_FormatAndMount
+     * فرمت کرد و مونت کرد — همین کار را QspiW25q_FormatAndMount
      * می‌کند. اگر /qspi مونت است (شروع بیرونی یا begin موفق)، همان
      * FS_Format کافی است. */
     {
         FM_Bool mounted = FM_FALSE;
 
-        (void)FS_IsMounted(EX15_QSPI_MOUNT_PATH, &mounted);
+        (void)FS_IsMounted(QSPI_W25Q_MOUNT_PATH, &mounted);
         if (!mounted)
         {
-            FM_Result r = Ex15_QSPI_FormatAndMount();
+            FM_Result r = QspiW25q_FormatAndMount();
 
             if (r == FM_ERR_NOT_READY)
             {
                 /* format قبل از هر begin ی هم صدا زده شده؟ خودم دستگاه
                  * را ثبت می‌کنم (-12 روی فلش خالی طبیعی است) و بعد
                  * فرمت می‌کنم - ترتیب فراخوانی دیگر مهم نیست. */
-                (void)Ex15_QSPI_Begin();
-                r = Ex15_QSPI_FormatAndMount();
+                (void)QspiW25q_Begin();
+                r = QspiW25q_FormatAndMount();
             }
-            qspi_step("Ex15_QSPI_FormatAndMount", r);
+            qspi_step("QspiW25q_FormatAndMount", r);
             return r;
         }
     }
     {
-        FM_Result r = FS_Format(EX15_QSPI_MOUNT_PATH);
+        FM_Result r = FS_Format(QSPI_W25Q_MOUNT_PATH);
 
         qspi_step("FS_Format(/qspi)", r);
         return r;
     }
 }
 
-void QSPI_examples_end(void)
+void QspiFlash_End(void)
 {
     /* فقط چیزی را می‌بندیم که خودمان باز کرده‌ایم. */
     if (qspi_started_here)
     {
-        Ex15_QSPI_End();
+        QspiW25q_End();
         qspi_started_here = FM_FALSE;
     }
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_1 — File Basics (معادل ex_1_file_basic روی QSPI)                    */
+/* QspiDemo_Basic — File Basics (معادل FileDemo_Basic روی QSPI)                    */
 /*----------------------------------------------------------------------*/
 
-void exQ_1_file_basic(void)
+void QspiDemo_Basic(void)
 {
     char buf[128];
     FM_Bool exists;
@@ -222,16 +222,16 @@ void exQ_1_file_basic(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_2 — Copy, Move, Rename                                            */
+/* QspiDemo_CopyMoveRename — Copy, Move, Rename                                            */
 /*----------------------------------------------------------------------*/
 
-static void qs_copy_progress(uint64_t done, uint64_t total, void *ud)
+static void qspi_demo_copy_progress(uint64_t done, uint64_t total, void *ud)
 {
     (void)ud;
     printf("  copy: %lu / %lu\n", (unsigned long)done, (unsigned long)total);
 }
 
-void exQ_2_file_copy_move_rename(void)
+void QspiDemo_CopyMoveRename(void)
 {
     char buf[128];
 
@@ -239,7 +239,7 @@ void exQ_2_file_copy_move_rename(void)
 
     printf("Copy:\n");
     qspi_step("File_Copy", File_Copy("/qspi/original.txt", "/qspi/copy.txt",
-                                   qs_copy_progress, NULL));
+                                   qspi_demo_copy_progress, NULL));
 
     File_ReadText("/qspi/copy.txt", buf, sizeof(buf), NULL);
     printf("  content: %s\n", buf);
@@ -262,10 +262,10 @@ void exQ_2_file_copy_move_rename(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_3 — Advanced File Handle                                          */
+/* QspiDemo_Advanced — Advanced File Handle                                          */
 /*----------------------------------------------------------------------*/
 
-void exQ_3_file_advance(void)
+void QspiDemo_Advanced(void)
 {
     FM_File *f;
     uint64_t pos, size;
@@ -323,10 +323,10 @@ void exQ_3_file_advance(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_4 — Directories                                                   */
+/* QspiDemo_Directory — Directories                                                   */
 /*----------------------------------------------------------------------*/
 
-static FM_Result qs_print_item(const FM_FileInfo *info, void *ud)
+static FM_Result qspi_demo_print_item(const FM_FileInfo *info, void *ud)
 {
     (void)ud;
     printf("  [%s] %-18s %lu bytes\n",
@@ -335,7 +335,7 @@ static FM_Result qs_print_item(const FM_FileInfo *info, void *ud)
     return FM_OK;
 }
 
-void exQ_4_file_directory(void)
+void QspiDemo_Directory(void)
 {
     FM_Dir *d;
     FM_DirEntry entry;
@@ -359,7 +359,7 @@ void exQ_4_file_directory(void)
     if (d) Directory_Close(d);
 
     printf("\nRecursive scan:\n");
-    Directory_ScanRecursive("/qspi/", qs_print_item, NULL, NULL, NULL);
+    Directory_ScanRecursive("/qspi/", qspi_demo_print_item, NULL, NULL, NULL);
 
     Directory_Count("/qspi/logs", FM_ITEM_FILE, &count);
     printf("\nFiles in /logs: %lu\n", (unsigned long)count);
@@ -376,7 +376,7 @@ void exQ_4_file_directory(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_5 — JSON                                                          */
+/* QspiDemo_Json — JSON                                                          */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_JSON
@@ -384,7 +384,7 @@ static char     qs_text[256];
 static uint32_t qs_tokens[FM_JSON_TOKEN_BUFFER_SIZE / 4];
 #endif /* FM_USE_JSON */
 
-void exQ_5_file_json(void)
+void QspiDemo_Json(void)
 {
 #if FM_USE_JSON
     /* 1. نوشتن */
@@ -455,16 +455,16 @@ void exQ_5_file_json(void)
         printf("[api] baud = %d\n", (int)baud);
     }
 #else
-    printf("exQ_5 JSON: skipped (FM_USE_JSON=0)\n");
+    printf("QspiDemo_Json JSON: skipped (FM_USE_JSON=0)\n");
 #endif /* FM_USE_JSON */
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_6 — Text Line Editing                                             */
+/* QspiDemo_TextLineEdit — Text Line Editing                                             */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_TEXT
-static void qs_show(const char *label, const char *path)
+static void qspi_demo_show(const char *label, const char *path)
 {
     char buf[512];
     printf("--- %s ---\n", label);
@@ -473,23 +473,23 @@ static void qs_show(const char *label, const char *path)
 }
 #endif /* FM_USE_TEXT */
 
-void exQ_6_file_text_line_edit(void)
+void QspiDemo_TextLineEdit(void)
 {
 #if FM_USE_TEXT
     size_t n;
 
     File_WriteText("/qspi/cfg.txt",
         "host=192.168.1.1\nport=8080\ntimeout=30\ndebug=false\n");
-    qs_show("Original", "/qspi/cfg.txt");
+    qspi_demo_show("Original", "/qspi/cfg.txt");
 
     qspi_step("Text_Replace", Text_Replace("/qspi/cfg.txt", "8080", "9090"));
-    qs_show("Replace 8080->9090", "/qspi/cfg.txt");
+    qspi_demo_show("Replace 8080->9090", "/qspi/cfg.txt");
 
     qspi_step("Text_InsertLine", Text_InsertLine("/qspi/cfg.txt", 3, "retry=3"));
-    qs_show("InsertLine 3", "/qspi/cfg.txt");
+    qspi_demo_show("InsertLine 3", "/qspi/cfg.txt");
 
     qspi_step("Text_DeleteLine", Text_DeleteLine("/qspi/cfg.txt", 4));
-    qs_show("DeleteLine 4", "/qspi/cfg.txt");
+    qspi_demo_show("DeleteLine 4", "/qspi/cfg.txt");
 
     Text_CountLines("/qspi/cfg.txt", &n);
     printf("Lines: %lu\n", (unsigned long)n);
@@ -510,16 +510,16 @@ void exQ_6_file_text_line_edit(void)
         if (f) File_Close(f);
     }
 #else
-    printf("exQ_6 text line edit: skipped (FM_USE_TEXT=0)\n");
+    printf("QspiDemo_TextLineEdit text line edit: skipped (FM_USE_TEXT=0)\n");
 #endif /* FM_USE_TEXT */
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_7 — Crash-Safe Writes                                             */
+/* QspiDemo_CrashSafeWrites — Crash-Safe Writes                                             */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_SAFE_WRITE
-static void qs_show2(const char *label)
+static void qspi_demo_show2(const char *label)
 {
     char buf[256];
     File_ReadText("/qspi/settings.txt", buf, sizeof(buf), NULL);
@@ -527,40 +527,40 @@ static void qs_show2(const char *label)
 }
 #endif /* FM_USE_SAFE_WRITE */
 
-void exQ_7_file_Crash_Safe_Writes(void)
+void QspiDemo_CrashSafeWrites(void)
 {
 #if FM_USE_SAFE_WRITE
     File_WriteText("/qspi/settings.txt", "version=1");
-    qs_show2("Initial");
+    qspi_demo_show2("Initial");
 
     qspi_step("File_SafeReplace",
             File_SafeReplace("/qspi/settings.txt", "version=2", 9));
-    qs_show2("SafeReplace");
+    qspi_demo_show2("SafeReplace");
 
     qspi_step("File_SafeWriteText",
             File_SafeWriteText("/qspi/settings.txt", "version=3"));
-    qs_show2("SafeWriteText");
+    qspi_demo_show2("SafeWriteText");
 
     qspi_step("File_SafeAppend",
             File_SafeAppend("/qspi/settings.txt", "\nextra=data", 11));
-    qs_show2("SafeAppend");
+    qspi_demo_show2("SafeAppend");
 
     qspi_step("File_Transaction",
             File_Transaction("/qspi/settings.txt", "version=FINAL", 14));
-    qs_show2("Transaction");
+    qspi_demo_show2("Transaction");
 
     File_Recover("/qspi/settings.txt");
     printf("  Recover done (no stale .fm_tmp).\n");
 #else
-    printf("exQ_7 crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
+    printf("QspiDemo_CrashSafeWrites crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
 #endif /* FM_USE_SAFE_WRITE */
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_8 — Data Logger (CSV)                                             */
+/* QspiDemo_DataLogger — Data Logger (CSV)                                             */
 /*----------------------------------------------------------------------*/
 
-void exQ_8_file_Data_Logger(void)
+void QspiDemo_DataLogger(void)
 {
 #if FM_USE_DATA_LOGGER
     FM_Logger lg;
@@ -632,15 +632,15 @@ void exQ_8_file_Data_Logger(void)
         if (d) Directory_Close(d);
     }
 #else
-    printf("exQ_8 data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
+    printf("QspiDemo_DataLogger data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
 #endif /* FM_USE_DATA_LOGGER */
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_9 — CRC & Checksum                                                */
+/* QspiDemo_CrcChecksum — CRC & Checksum                                                */
 /*----------------------------------------------------------------------*/
 
-void exQ_9_file_crc_cheaksum(void)
+void QspiDemo_CrcChecksum(void)
 {
 #if FM_USE_CRC
     const char *data = "123456789";
@@ -666,15 +666,15 @@ void exQ_9_file_crc_cheaksum(void)
                (unsigned long)CRC_Calculate32(text, rd), (unsigned long)rd);
     }
 #else
-    printf("exQ_9 CRC / checksum: skipped (FM_USE_CRC=0)\n");
+    printf("QspiDemo_CrcChecksum CRC / checksum: skipped (FM_USE_CRC=0)\n");
 #endif /* FM_USE_CRC */
 }
 
 /*----------------------------------------------------------------------*/
-/* exQ_10 — BMP Image + Scale + Convert                                  */
+/* QspiDemo_BmpScaleConvert — BMP Image + Scale + Convert                                  */
 /*----------------------------------------------------------------------*/
 
-void exQ_10_file_BMP_Image_Scale_Convert(void)
+void QspiDemo_BmpScaleConvert(void)
 {
     FM_ImageInfo info;
 
@@ -758,4 +758,4 @@ void exQ_10_file_BMP_Image_Scale_Convert(void)
 }
 
 #endif /* !FM_HOST_BUILD */
-#endif /* EXAMPLES_FILE_QSPI_ALL_H_ */
+#endif /* FM_TOPAPI_QSPI_DEMOS_H */

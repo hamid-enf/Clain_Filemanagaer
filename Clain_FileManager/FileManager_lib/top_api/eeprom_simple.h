@@ -7,12 +7,12 @@
  *
  * ساده‌ترین شکل:
  *
- *     EEPROM_examples_begin(FM_EEPROM_CHIP_24LC256, my_read, my_write,
+ *     EepromSimple_Begin(FM_EEPROM_CHIP_24LC256, my_read, my_write,
  *                           &hi2c1);
- *     exE_1_basic();
- *     exE_2_settings_struct();
- *     exE_3_wear_aware_counter();
- *     exE_4_as_filesystem();
+ *     EepromDemo_Basic();
+ *     EepromDemo_SettingsStruct();
+ *     EepromDemo_WearAwareCounter();
+ *     EepromDemo_AsStorage();
  *
  * شما فقط مدل را می‌گویید؛ ظرفیت، اندازهٔ صفحه و زمان نوشتن خودکار
  * تنظیم می‌شود.
@@ -26,10 +26,10 @@
  *    باشد.
  *
  * ۲) عمر: حدود یک میلیون بار نوشتن روی هر سلول. اگر هر ثانیه بنویسید،
- *    یازده روزه تمام می‌شود. سه راهکار در exE_3 نشان داده شده.
+ *    یازده روزه تمام می‌شود. سه راهکار در EepromDemo_WearAwareCounter نشان داده شده.
  */
-#ifndef FM_EXAMPLE_28_EEPROM_SIMPLE_H
-#define FM_EXAMPLE_28_EEPROM_SIMPLE_H
+#ifndef FM_TOPAPI_EEPROM_SIMPLE_H
+#define FM_TOPAPI_EEPROM_SIMPLE_H
 
 #include <stdio.h>
 #include <string.h>
@@ -43,11 +43,11 @@
  * has no CRC module, so the example carries the same loop itself
  * (reflected 0xEDB88320, no init / final XOR: identical results to
  * CRC_Compute32) instead of breaking the build. */
-#ifndef EX_CRC32
+#ifndef DEMO_CRC32
 #if FM_USE_CRC
-#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
 #else
-static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+static uint32_t demo_crc32_local(const void *data, size_t len, uint32_t crc)
 {
     const uint8_t *p = (const uint8_t *)data;
     size_t i;
@@ -63,9 +63,9 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
     }
     return crc;
 }
-#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) demo_crc32_local((data), (len), (crc))
 #endif
-#endif /* EX_CRC32 */
+#endif /* DEMO_CRC32 */
 
 #define printf FM_Log
 #define puts(s) FM_Log("%s\n", (s))
@@ -74,7 +74,7 @@ static FM_EEPROM g_ee;
 static FM_EepromChipInfo g_ee_info;
 static FM_Bool g_ee_ready;
 
-static void e_step(const char *what, FM_Result r)
+static void eeprom_demo_step(const char *what, FM_Result r)
 {
     if (r != FM_OK)
     {
@@ -89,7 +89,7 @@ static void e_step(const char *what, FM_Result r)
  * read و write دو تابع کوچک شما هستند که با I2C/SPI کار می‌کنند.
  * نمونهٔ I2C در انتهای همین فایل هست.
  */
-static FM_Result EEPROM_examples_begin(FM_EepromChip chip,
+static FM_Result EepromSimple_Begin(FM_EepromChip chip,
                                        FM_EEPROM_ReadFn read,
                                        FM_EEPROM_WriteFn write,
                                        void *context)
@@ -97,7 +97,7 @@ static FM_Result EEPROM_examples_begin(FM_EepromChip chip,
     FM_EEPROMConfig cfg;
     FM_Result r;
 
-    puts("\n*************** EEPROM_examples_begin ***************");
+    puts("\n*************** EepromSimple_Begin ***************");
 
     r = FM_Eeprom_GetChipInfo(chip, &g_ee_info);
     if (r != FM_OK)
@@ -118,7 +118,7 @@ static FM_Result EEPROM_examples_begin(FM_EepromChip chip,
     cfg.context = context;
 
     r = EEPROM_Init(&g_ee, &cfg);
-    e_step("EEPROM_Init", r);
+    eeprom_demo_step("EEPROM_Init", r);
     g_ee_ready = (r == FM_OK) ? FM_TRUE : FM_FALSE;
 
     if (g_ee_ready)
@@ -132,14 +132,14 @@ static FM_Result EEPROM_examples_begin(FM_EepromChip chip,
 }
 
 __attribute__((unused))   /* optional: a project may leave the EEPROM mounted */
-static void EEPROM_examples_end(void)
+static void EepromSimple_End(void)
 {
     if (g_ee_ready)
     {
         (void)EEPROM_Sync(&g_ee);
         g_ee_ready = FM_FALSE;
     }
-    puts("*************** EEPROM_examples_end ***************\n");
+    puts("*************** EepromSimple_End ***************\n");
 }
 
 #define E_REQUIRE()                                                        \
@@ -148,19 +148,19 @@ static void EEPROM_examples_end(void)
     } while (0)
 
 /* ------------------------------------------------------------------ */
-/* exE_1 — خواندن و نوشتن ساده                                         */
+/* EepromDemo_Basic — خواندن و نوشتن ساده                                         */
 /* ------------------------------------------------------------------ */
-static void exE_1_basic(void)
+static void EepromDemo_Basic(void)
 {
     char text[32];
 
-    puts("\n=================== exE_1_basic ==================");
+    puts("\n=================== EepromDemo_Basic ==================");
     E_REQUIRE();
 
-    e_step("write", EEPROM_Write(&g_ee, 0u, "board-01", 9u));
+    eeprom_demo_step("write", EEPROM_Write(&g_ee, 0u, "board-01", 9u));
 
     memset(text, 0, sizeof(text));
-    e_step("read", EEPROM_Read(&g_ee, 0u, text, 9u));
+    eeprom_demo_step("read", EEPROM_Read(&g_ee, 0u, text, 9u));
     printf("  خوانده شد: %s\n", text);
 
     /* نوشتن روی مرز صفحه — لایه خودش تکه می‌کند */
@@ -175,9 +175,9 @@ static void exE_1_basic(void)
             big[i] = (uint8_t)(i + 1u);
         }
         /* آدرس ۵۰ عمداً وسط صفحه است تا مرز رد شود */
-        e_step("cross-page write", EEPROM_Write(&g_ee, 50u, big,
+        eeprom_demo_step("cross-page write", EEPROM_Write(&g_ee, 50u, big,
                                                 sizeof(big)));
-        e_step("cross-page read", EEPROM_Read(&g_ee, 50u, back,
+        eeprom_demo_step("cross-page read", EEPROM_Read(&g_ee, 50u, back,
                                               sizeof(back)));
         for (i = 0; i < sizeof(big); i++)
         {
@@ -189,7 +189,7 @@ static void exE_1_basic(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exE_2 — ذخیرهٔ یک ساختار تنظیمات، با CRC                            */
+/* EepromDemo_SettingsStruct — ذخیرهٔ یک ساختار تنظیمات، با CRC                            */
 /* ------------------------------------------------------------------ */
 /*
  * الگوی درست: ساختار + شمارهٔ نسخه + CRC. اگر برق وسط نوشتن برود یا
@@ -208,18 +208,18 @@ typedef struct
 #define EXE_SETTINGS_ADDR    256u
 #define EXE_SETTINGS_VERSION 2u
 
-static uint32_t exE_settings_crc(const ExE_Settings *s)
+static uint32_t eeprom_demo_settings_crc(const ExE_Settings *s)
 {
     /* CRC روی همه چیز جز خود فیلد crc */
-    return EX_CRC32(s, sizeof(*s) - sizeof(uint32_t), 0u);
+    return DEMO_CRC32(s, sizeof(*s) - sizeof(uint32_t), 0u);
 }
 
-static void exE_2_settings_struct(void)
+static void EepromDemo_SettingsStruct(void)
 {
     ExE_Settings s;
     ExE_Settings back;
 
-    puts("\n============== exE_2_settings_struct =============");
+    puts("\n============== EepromDemo_SettingsStruct =============");
     E_REQUIRE();
 
     /* این دمو آدرس 256 را لازم دارد — روی چیپ‌های کوچک (مثل 24LC02
@@ -237,15 +237,15 @@ static void exE_2_settings_struct(void)
     s.brightness = 80u;
     s.baudrate = 500000u;
     s.language = 1u;
-    s.crc = exE_settings_crc(&s);
+    s.crc = eeprom_demo_settings_crc(&s);
 
-    e_step("save", EEPROM_Write(&g_ee, EXE_SETTINGS_ADDR, &s, sizeof(s)));
+    eeprom_demo_step("save", EEPROM_Write(&g_ee, EXE_SETTINGS_ADDR, &s, sizeof(s)));
 
     memset(&back, 0, sizeof(back));
-    e_step("load", EEPROM_Read(&g_ee, EXE_SETTINGS_ADDR, &back,
+    eeprom_demo_step("load", EEPROM_Read(&g_ee, EXE_SETTINGS_ADDR, &back,
                                sizeof(back)));
 
-    if (back.crc != exE_settings_crc(&back))
+    if (back.crc != eeprom_demo_settings_crc(&back))
     {
         puts("  CRC غلط — تنظیمات خراب است، پیش‌فرض بگذارید.");
     }
@@ -264,7 +264,7 @@ static void exE_2_settings_struct(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exE_3 — شمارنده با ملاحظهٔ عمر                                      */
+/* EepromDemo_WearAwareCounter — شمارنده با ملاحظهٔ عمر                                      */
 /* ------------------------------------------------------------------ */
 /*
  * سه ترفند برای اینکه EEPROM زود نسوزد:
@@ -280,11 +280,11 @@ static void exE_2_settings_struct(void)
 #define EXE_SLOTS      16u
 #define EXE_SLOT_BASE  1024u
 
-static void exE_3_wear_aware_counter(void)
+static void EepromDemo_WearAwareCounter(void)
 {
     uint32_t boot_count = 0;
 
-    puts("\n============ exE_3_wear_aware_counter ============");
+    puts("\n============ EepromDemo_WearAwareCounter ============");
     E_REQUIRE();
 
     /* 16 اسلات ۴بایتی از آدرس 1024 — روی چیپ‌های کوچک جا نیست. */
@@ -300,9 +300,9 @@ static void exE_3_wear_aware_counter(void)
     {
         uint8_t v = 42u;
 
-        e_step("update (first)", EEPROM_Update(&g_ee, 512u, &v, 1u));
+        eeprom_demo_step("update (first)", EEPROM_Update(&g_ee, 512u, &v, 1u));
         /* بار دوم همان مقدار — نباید چرخهٔ نوشتنی مصرف شود */
-        e_step("update (same)", EEPROM_Update(&g_ee, 512u, &v, 1u));
+        eeprom_demo_step("update (same)", EEPROM_Update(&g_ee, 512u, &v, 1u));
         puts("  EEPROM_Update: نوشتن دوم چرخه‌ای مصرف نکرد.");
     }
 
@@ -332,7 +332,7 @@ static void exE_3_wear_aware_counter(void)
         {
             uint32_t next_slot = (best_slot + 1u) % EXE_SLOTS;
 
-            e_step("rotate", EEPROM_Write(&g_ee,
+            eeprom_demo_step("rotate", EEPROM_Write(&g_ee,
                                           EXE_SLOT_BASE + (next_slot * 4u),
                                           &boot_count, 4u));
             printf("  بوت شمارهٔ %lu، در خانهٔ %lu ذخیره شد "
@@ -344,7 +344,7 @@ static void exE_3_wear_aware_counter(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exE_4 — EEPROM به‌عنوان یک حافظهٔ عادی کتابخانه                     */
+/* EepromDemo_AsStorage — EEPROM به‌عنوان یک حافظهٔ عادی کتابخانه                     */
 /* ------------------------------------------------------------------ */
 /*
  * می‌شود EEPROM را به لایهٔ Storage وصل کرد و بعد با همان API فایل
@@ -353,22 +353,22 @@ static void exE_3_wear_aware_counter(void)
  * برای قطعات خیلی کوچک (کمتر از ۴KB) فایل‌سیستم صرف نمی‌کند؛ آدرس
  * مستقیم بهتر است. برای ۶۴KB به بالا منطقی است.
  */
-static void exE_4_as_storage(void)
+static void EepromDemo_AsStorage(void)
 {
     static FM_Storage ee_storage;
     FM_Result r;
 
-    puts("\n=============== exE_4_as_storage ================");
+    puts("\n=============== EepromDemo_AsStorage ================");
     E_REQUIRE();
 
     r = EEPROM_StorageInit(&g_ee, &ee_storage, FM_STORAGE_CUSTOM);
-    e_step("EEPROM_StorageInit", r);
+    eeprom_demo_step("EEPROM_StorageInit", r);
     if (r != FM_OK)
     {
         return;
     }
     r = Storage_Register(&ee_storage);
-    e_step("Storage_Register", r);
+    eeprom_demo_step("Storage_Register", r);
     if (r != FM_OK)
     {
         return;
@@ -430,9 +430,9 @@ static void exE_4_as_storage(void)
  *
  * و بعد:
  *
- *   EEPROM_examples_begin(FM_EEPROM_CHIP_24LC256, my_ee_read,
+ *   EepromSimple_Begin(FM_EEPROM_CHIP_24LC256, my_ee_read,
  *                         my_ee_write, &hi2c1);
  * ---------------------------------------------------------------------
  */
 
-#endif /* FM_EXAMPLE_28_EEPROM_SIMPLE_H */
+#endif /* FM_TOPAPI_EEPROM_SIMPLE_H */

@@ -35,40 +35,40 @@ uint32_t len_p = 0;
 /* Commands                                                                   */
 /* -------------------------------------------------------------------------- */
 
-void next(void)
+void CmdMusic_Next(void)
 {
     printf("next\n");
     SimpleAudio_Next();
 }
 
-void prev(void)
+void CmdMusic_Prev(void)
 {
     printf("prev\n");
     SimpleAudio_Prev();
 }
 
-void np10(void)
+void CmdMusic_Forward10(void)
 {
     printf("np10\n");
 //    SimpleAudio_SeekTo(10.0);
     SimpleAudio_SeekBy(+10.0);
 }
 
-void pn10(void)
+void CmdMusic_Back10(void)
 {
     printf("pn10\n");
     SimpleAudio_SeekBy(-10.0);
 }
 
-void pauset(void) {
+void CmdMusic_TogglePause(void) {
 	printf("pauset \n");
 	SimpleAudio_TogglePause();
 }
-void pause(void) {
+void CmdMusic_Pause(void) {
 	printf("pause \n");
 	SimpleAudio_Pause();
 }
-void resume(void) {
+void CmdMusic_Resume(void) {
 	printf("resume \n");
 	SimpleAudio_Resume();
 }
@@ -87,39 +87,39 @@ void resume(void) {
  */
 volatile uint8_t music_cmd = 0;   /* 1 = start music, 2 = stop music */
 
-void start(void)
+void CmdMusic_Start(void)
 {
     printf("start\n");
     music_cmd = 1;
 }
 
-void stop(void)
+void CmdMusic_Stop(void)
 {
     printf("stop\n");
     music_cmd = 2;
 }
 
-SimpleAudioInfo i;
-void info(void)
+SimpleAudioInfo g_music_info;
+void CmdMusic_Info(void)
 {
     printf("info\n");
-    SimpleAudio_Info(&i);
-    printf("bit:%d - channels:%d - codec:%s  - duration:%0.2f -  name:%s -  playlist_count:%lu -  playlist_index:%lu  -sample_rate:%lu  - volume_pct:%d  \n",i.bits,i.channels,i.codec,i.duration,
-    		i.name,(unsigned long)i.playlist_count,(unsigned long)i.playlist_index,(unsigned long)i.sample_rate,i.volume_pct);
+    SimpleAudio_Info(&g_music_info);
+    printf("bit:%d - channels:%d - codec:%s  - duration:%0.2f -  name:%s -  playlist_count:%lu -  playlist_index:%lu  -sample_rate:%lu  - volume_pct:%d  \n",g_music_info.bits,g_music_info.channels,g_music_info.codec,g_music_info.duration,
+    		g_music_info.name,(unsigned long)g_music_info.playlist_count,(unsigned long)g_music_info.playlist_index,(unsigned long)g_music_info.sample_rate,g_music_info.volume_pct);
 }
 
-void vol50(void)
+void CmdMusic_Volume50(void)
 {
     printf("vol50\n");
     SimpleAudio_SetVolume(50);
-//    SimpleAudio_SetVolume(i.volume_pct + 5);
+//    SimpleAudio_SetVolume(g_music_info.volume_pct + 5);
 }
 
-void vol90(void)
+void CmdMusic_Volume90(void)
 {
     printf("vol90\n");
     SimpleAudio_SetVolume(90);
-//    SimpleAudio_SetVolume(i.volume_pct + 5);
+//    SimpleAudio_SetVolume(g_music_info.volume_pct + 5);
 }
 
 /* -------------------------------------------------------------------------- */

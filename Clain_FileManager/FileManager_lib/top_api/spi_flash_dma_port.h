@@ -26,21 +26,21 @@
  *     static FM_QspiDevice   flash;          <- یک حافظهٔ عادی کتابخانه
  *     static uint8_t sector_buf[4096];
  *
- *     if (Ex33_SpiFlash_Begin(&flash, &spi_port, &hspi1,
+ *     if (SpiFlash_Begin(&flash, &spi_port, &hspi1,
  *                             FM_QSPI_CHIP_AUTO,
  *                             sector_buf, sizeof(sector_buf)) == FM_OK)
  *     {
- *         یک‌بار برای فلش نو: Ex33_SpiFlash_Format();
- *         exF_1_spi_flash_smoke();      <- دود: write/read/verify
- *         exF_2_file_ops();             <- متن/باینری/CRC/پوشه
- *         exF_3_sd_to_flash();          <- انتقال SD به فلش با CRC
- *         exF_4_ram_roundtrip();        <- RAM به فلش و برگشت
- *         exF_5_stats();                <- آمار erase/write/پرش
- *         Ex33_SpiFlash_End();          <- اختیاری: بستن
+ *         یک‌بار برای فلش نو: SpiFlash_Format();
+ *         SpiFlashDemo_Smoke();      <- دود: write/read/verify
+ *         SpiFlashDemo_FileOps();             <- متن/باینری/CRC/پوشه
+ *         SpiFlashDemo_SdToFlash();          <- انتقال SD به فلش با CRC
+ *         SpiFlashDemo_RamRoundtrip();        <- RAM به فلش و برگشت
+ *         SpiFlashDemo_Stats();                <- آمار erase/write/پرش
+ *         SpiFlash_End();          <- اختیاری: بستن
  *     }
  *
- *     نمایش روی USB (مثل QSPI مثال ۳۴):
- *       Ex34_Usb_PresentSpiFlash()  -  release/acquire اش خودش هست
+ *     نمایش روی USB (مثل QSPI usb_present.h):
+ *       UsbPresent_ShowSpiFlash()  -  release/acquire اش خودش هست
  *
  * قاعدهٔ سوئیت‌های file/transfers روی /flash همان /qspi است؛ تفاوت
  * فقط درایورِ سخت‌افزار زیرش است (SPI معمولی به‌جای QUADSPI).
@@ -51,8 +51,8 @@
  *     CPOL=Low / CPHA=1Edge (حالت ۰، استاندارد اکثر فلش‌ها)،
  *     NSS=Disable (CS نرم‌افزاری با GPIO).
  *   - پایهٔ CS فلش: قبل از include این را به پایهٔ خودت بده (پیش‌فرض PB6):
- *       #define EX33_CS_PORT  GPIOB
- *       #define EX33_CS_PIN   GPIO_PIN_6
+ *       #define SPI_FLASH_CS_PORT  GPIOB
+ *       #define SPI_FLASH_CS_PIN   GPIO_PIN_6
  *     و پین را در کیوب Output Push-Pull + سطح اولیه High بگذار.
  *     CS با cs_select/cs_release دور «کل قاب» هر op کوبیده می‌شود
  *     (فرمان+آدرس+داده = یک فریم — این را spif_txn انجام می‌دهد).
@@ -79,8 +79,8 @@
  * باشد و DMA هم هرگز بین فرمان و CS آزاد، وقفه نخورد.
  */
 
-#ifndef FM_EXAMPLE_33_STM32_SPI_FLASH_DMA_PORT_H
-#define FM_EXAMPLE_33_STM32_SPI_FLASH_DMA_PORT_H
+#ifndef FM_TOPAPI_SPI_FLASH_DMA_PORT_H
+#define FM_TOPAPI_SPI_FLASH_DMA_PORT_H
 
 #if !defined(FM_HOST_BUILD) || (FM_HOST_BUILD == 0)
 
@@ -99,11 +99,11 @@
  * has no CRC module, so the example carries the same loop itself
  * (reflected 0xEDB88320, no init / final XOR: identical results to
  * CRC_Compute32) instead of breaking the build. */
-#ifndef EX_CRC32
+#ifndef DEMO_CRC32
 #if FM_USE_CRC
-#define EX_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) CRC_Compute32((data), (len), (crc))
 #else
-static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
+static uint32_t demo_crc32_local(const void *data, size_t len, uint32_t crc)
 {
     const uint8_t *p = (const uint8_t *)data;
     size_t i;
@@ -119,36 +119,36 @@ static uint32_t ex_crc32_local(const void *data, size_t len, uint32_t crc)
     }
     return crc;
 }
-#define EX_CRC32(data, len, crc) ex_crc32_local((data), (len), (crc))
+#define DEMO_CRC32(data, len, crc) demo_crc32_local((data), (len), (crc))
 #endif
-#endif /* EX_CRC32 */
+#endif /* DEMO_CRC32 */
 
 #define printf FM_Log
 
-/* گام‌های تست با نام یکتا - با e_step ی هدرهای دیگر (مثل 28) تداخل نکند */
-static void ex33_step(const char *what, FM_Result r)
+/* گام‌های تست با نام یکتا - با eeprom_demo_step ی هدرهای دیگر (مثل 28) تداخل نکند */
+static void spi_flash_demo_step(const char *what, FM_Result r)
 {
     printf("  %s: %s\n", what, (r == FM_OK) ? "ok" : "FAILED");
 }
 
-#ifndef EX33_DMA_MIN_LEN
-#define EX33_DMA_MIN_LEN 64u    /* کوچک‌تر از این: blocking ارزان‌تر است */
+#ifndef SPI_FLASH_DMA_MIN_LEN
+#define SPI_FLASH_DMA_MIN_LEN 64u    /* کوچک‌تر از این: blocking ارزان‌تر است */
 #endif
-#ifndef EX33_DMA_MAX_LEN
-#define EX33_DMA_MAX_LEN 4096u  /* سقف امن رجیستر اندازهٔ انتقال SPI    */
-#endif
-
-#ifndef EX33_SPI_TIMEOUT_MS
-#define EX33_SPI_TIMEOUT_MS 500u
+#ifndef SPI_FLASH_DMA_MAX_LEN
+#define SPI_FLASH_DMA_MAX_LEN 4096u  /* سقف امن رجیستر اندازهٔ انتقال SPI    */
 #endif
 
-static FM_Bool ex33_dma_ok = FM_TRUE;   /* بعد از اولین شکست: FALSE    */
+#ifndef SPI_FLASH_TIMEOUT_MS
+#define SPI_FLASH_TIMEOUT_MS 500u
+#endif
 
-static FM_Bool ex33_dma_usable(const SPI_HandleTypeDef *h, uint32_t len)
+static FM_Bool spi_flash_dma_ok = FM_TRUE;   /* بعد از اولین شکست: FALSE    */
+
+static FM_Bool spi_flash_dma_usable(const SPI_HandleTypeDef *h, uint32_t len)
 {
-    return ex33_dma_ok && h != NULL && h->hdmatx != NULL &&
-           h->hdmarx != NULL && len >= EX33_DMA_MIN_LEN &&
-           len <= EX33_DMA_MAX_LEN;
+    return spi_flash_dma_ok && h != NULL && h->hdmatx != NULL &&
+           h->hdmarx != NULL && len >= SPI_FLASH_DMA_MIN_LEN &&
+           len <= SPI_FLASH_DMA_MAX_LEN;
 }
 
 /* پایان انتقال DMA: HAL در وقفهٔ SPI/DMA وضعیت را READY می‌کند. */
@@ -156,7 +156,7 @@ static FM_Bool ex33_dma_usable(const SPI_HandleTypeDef *h, uint32_t len)
  * باشد — «op بعدی» را شیفت می‌دهد و به‌شکل یک erase گیرکرده/فیکس-خطا
  * دیده می‌شود (لاگ برد: اولین op بعد از page program گیر می‌کرد ولی
  * chip erase در context تمیز 16s سالم تمام می‌شد). */
-static void ex33_spi_quiet(SPI_HandleTypeDef *h)
+static void spi_flash_bus_quiet(SPI_HandleTypeDef *h)
 {
     if (h == NULL || h->Instance == NULL)
     {
@@ -178,27 +178,27 @@ static void ex33_spi_quiet(SPI_HandleTypeDef *h)
     (void)HAL_SPI_FlushRxFifo(h);
 }
 
-static FM_Result ex33_dma_wait(SPI_HandleTypeDef *h)
+static FM_Result spi_flash_dma_wait(SPI_HandleTypeDef *h)
 {
     uint32_t t0 = HAL_GetTick();
 
     while (h->State != HAL_SPI_STATE_READY)
     {
-        if ((HAL_GetTick() - t0) > EX33_SPI_TIMEOUT_MS)
+        if ((HAL_GetTick() - t0) > SPI_FLASH_TIMEOUT_MS)
         {
             (void)HAL_SPI_Abort(h);   /* باس را برای blocking سالم کن */
-            ex33_spi_quiet(h);
+            spi_flash_bus_quiet(h);
             return FM_ERR_TIMEOUT;
         }
     }
-    ex33_spi_quiet(h);
+    spi_flash_bus_quiet(h);
     return FM_OK;
 }
 
-static void ex33_dma_fallback(const char *what)
+static void spi_flash_dma_fallback(const char *what)
 {
-    ex33_dma_ok = FM_FALSE;
-    FM_Log("ex33: %s DMA failed - permanent blocking fallback\n", what);
+    spi_flash_dma_ok = FM_FALSE;
+    FM_Log("SpiFlash: %s DMA failed - permanent blocking fallback\n", what);
 }
 
 /* ------------------------------------------------------------------ */
@@ -208,47 +208,47 @@ static void ex33_dma_fallback(const char *what)
 /* ------------------------------------------------------------------ */
 /* CS نرم‌افزاری — حیاتی: فلش بدون بالا/پایین‌شدن CS جواب نمی‌دهد       */
 /* ------------------------------------------------------------------ */
-/* پیش‌فرض: PB6. با EX33_CS_PORT/EX33_CS_PIN قبل از include عوض کن،
- * یا در runtime با Ex33_SpiFlash_SetCs(). */
-#ifndef EX33_CS_PORT
-#define EX33_CS_PORT  GPIOB
+/* پیش‌فرض: PB6. با SPI_FLASH_CS_PORT/SPI_FLASH_CS_PIN قبل از include عوض کن،
+ * یا در runtime با SpiFlash_SetCs(). */
+#ifndef SPI_FLASH_CS_PORT
+#define SPI_FLASH_CS_PORT  GPIOB
 #endif
-#ifndef EX33_CS_PIN
-#define EX33_CS_PIN   GPIO_PIN_6
+#ifndef SPI_FLASH_CS_PIN
+#define SPI_FLASH_CS_PIN   GPIO_PIN_6
 #endif
 
-static GPIO_TypeDef *ex33_cs_port = EX33_CS_PORT;
-static uint16_t      ex33_cs_pin  = EX33_CS_PIN;
+static GPIO_TypeDef *spi_flash_cs_port = SPI_FLASH_CS_PORT;
+static uint16_t      spi_flash_cs_pin  = SPI_FLASH_CS_PIN;
 
 /* اگر سیم‌کشی CS متفاوت است، قبل از Begin صدا بزن. */
-void Ex33_SpiFlash_SetCs(GPIO_TypeDef *port, uint16_t pin)
+void SpiFlash_SetCs(GPIO_TypeDef *port, uint16_t pin)
 {
-    ex33_cs_port = port;
-    ex33_cs_pin  = pin;
+    spi_flash_cs_port = port;
+    spi_flash_cs_pin  = pin;
 }
 
 /* امضا با FM_SpiFlashPort هم‌خوان است: (void *ctx) - ctx همان port. */
-static void ex33_cs_low(void *ctx)
+static void spi_flash_cs_low(void *ctx)
 {
     (void)ctx;
-    HAL_GPIO_WritePin(ex33_cs_port, ex33_cs_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(spi_flash_cs_port, spi_flash_cs_pin, GPIO_PIN_RESET);
 }
 
-static void ex33_cs_high(void *ctx)
+static void spi_flash_cs_high(void *ctx)
 {
     (void)ctx;
-    HAL_GPIO_WritePin(ex33_cs_port, ex33_cs_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(spi_flash_cs_port, spi_flash_cs_pin, GPIO_PIN_SET);
 }
 
 
-static FM_Result ex33_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
+static FM_Result spi_flash_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
                                uint32_t len)
 {
     SPI_HandleTypeDef *h = (SPI_HandleTypeDef *)ctx;
     HAL_StatusTypeDef st;
 
     if (len == 0u) return FM_OK;
-    if (len > EX33_DMA_MAX_LEN) return FM_ERR_INVALID_ARGUMENT;
+    if (len > SPI_FLASH_DMA_MAX_LEN) return FM_ERR_INVALID_ARGUMENT;
 
     /* CS اینجا کوبیده نمیشود! هر op فلش از دو فراخوانی transfer
      * ساخته میشود (سرایند، بعد داده) و CS باید دور «کل قاب» باشد —
@@ -259,7 +259,7 @@ static FM_Result ex33_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
     /* مسیر DMA — همان شرایط و همان کد برای هر سه حالت جهت.
      * پروتکل کش: TX و RX هر دو قبل از کیک Clean می‌شوند (RX یعنی
      * فلش‌کردن خطوط پوشش‌دهندهٔ بافر؛ Invalidateِ بعدش فقط می‌ریزد). */
-    if (ex33_dma_usable(h, len))
+    if (spi_flash_dma_usable(h, len))
     {
         if (tx != NULL) FM_Cache_CleanForDma(tx, len);
         if (rx != NULL) FM_Cache_CleanForDma(rx, len);
@@ -279,12 +279,12 @@ static FM_Result ex33_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
             st = HAL_SPI_Receive_DMA(h, rx, (uint16_t)len);
         }
 
-        if (st == HAL_OK && ex33_dma_wait(h) == FM_OK)
+        if (st == HAL_OK && spi_flash_dma_wait(h) == FM_OK)
         {
             if (rx != NULL) FM_Cache_InvalidateAfterDma(rx, len);
             return FM_OK;
         }
-        ex33_dma_fallback("transfer");
+        spi_flash_dma_fallback("transfer");
         /* بدون برگشت خطا: ادامه با همان داده از مسیر blocking */
     }
 
@@ -292,16 +292,16 @@ static FM_Result ex33_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
     if (tx != NULL && rx != NULL)
     {
         st = HAL_SPI_TransmitReceive(h, (uint8_t *)(uintptr_t)tx, rx,
-                                     (uint16_t)len, EX33_SPI_TIMEOUT_MS);
+                                     (uint16_t)len, SPI_FLASH_TIMEOUT_MS);
     }
     else if (tx != NULL)
     {
         st = HAL_SPI_Transmit(h, (uint8_t *)(uintptr_t)tx,
-                              (uint16_t)len, EX33_SPI_TIMEOUT_MS);
+                              (uint16_t)len, SPI_FLASH_TIMEOUT_MS);
     }
     else
     {
-        st = HAL_SPI_Receive(h, rx, (uint16_t)len, EX33_SPI_TIMEOUT_MS);
+        st = HAL_SPI_Receive(h, rx, (uint16_t)len, SPI_FLASH_TIMEOUT_MS);
     }
     return (st == HAL_OK) ? FM_OK : FM_ERR_IO;
 }
@@ -311,7 +311,7 @@ static FM_Result ex33_transfer(void *ctx, const uint8_t *tx, uint8_t *rx,
 /* ------------------------------------------------------------------ */
 
 /* پیشرفت پلهٔ ۲۵٪ — مثل exT: بدون اسپم */
-static FM_Bool q33_progress(uint64_t done, uint64_t total, void *user)
+static FM_Bool spi_flash_demo_progress(uint64_t done, uint64_t total, void *user)
 {
     (void)user;
     if (total != 0u && ((done * 4u) / total) != (((done * 4u) - 1u) / total))
@@ -322,85 +322,85 @@ static FM_Bool q33_progress(uint64_t done, uint64_t total, void *user)
     return FM_TRUE;
 }
 
-static FM_QspiDevice   *g_ex33_dev;
-static FM_SpiFlashPort *g_ex33_portp;   /* برای عیب‌یابی باس */
-static FM_Storage      g_ex33_st;      /* ثبت فلش به‌عنوان حافظهٔ کتابخانه */
-static FM_FS          g_ex33_fs;      /* فایل‌سیستم FMFS روی /flash       */
-static FM_Bool        g_ex33_mounted;
+static FM_QspiDevice   *g_spi_flash_dev;
+static FM_SpiFlashPort *g_spi_flash_portp;   /* برای عیب‌یابی باس */
+static FM_Storage      g_spi_flash_st;      /* ثبت فلش به‌عنوان حافظهٔ کتابخانه */
+static FM_FS          g_spi_flash_fs;      /* فایل‌سیستم FMFS روی /flash       */
+static FM_Bool        g_spi_flash_mounted;
 
-#ifndef EX33_MOUNT_PATH
-#define EX33_MOUNT_PATH "/flash"
+#ifndef SPI_FLASH_MOUNT_PATH
+#define SPI_FLASH_MOUNT_PATH "/flash"
 #endif
-#ifndef EX33_STORAGE_NAME
-#define EX33_STORAGE_NAME "flash"
+#ifndef SPI_FLASH_STORAGE_NAME
+#define SPI_FLASH_STORAGE_NAME "flash"
 #endif
 
 /*
- * فلش نو/خالی؟ یک‌بار: Ex33_SpiFlash_Format() — بعد از آن FS_Mount
+ * فلش نو/خالی؟ یک‌بار: SpiFlash_Format() — بعد از آن FS_Mount
  * درست کار می‌کند. مثل QSPI، فرمت خودکار نیست که داده از بین نرود.
  */
-FM_Result Ex33_SpiFlash_Format(void)
+FM_Result SpiFlash_Format(void)
 {
     FM_Result r;
 
-    if (g_ex33_dev == NULL) return FM_ERR_NOT_READY;
-    if (g_ex33_mounted)
+    if (g_spi_flash_dev == NULL) return FM_ERR_NOT_READY;
+    if (g_spi_flash_mounted)
     {
-        r = FS_Format(EX33_MOUNT_PATH);   /* فرمت از طریق مونت فعلی */
+        r = FS_Format(SPI_FLASH_MOUNT_PATH);   /* فرمت از طریق مونت فعلی */
     }
     else
     {
-        r = FMFS_Init(&g_ex33_fs);
-        if (r == FM_OK) r = g_ex33_fs.ops.format(&g_ex33_fs);
-        if (r == FM_OK) r = FS_Mount(EX33_MOUNT_PATH, &g_ex33_fs);
+        r = FMFS_Init(&g_spi_flash_fs);
+        if (r == FM_OK) r = g_spi_flash_fs.ops.format(&g_spi_flash_fs);
+        if (r == FM_OK) r = FS_Mount(SPI_FLASH_MOUNT_PATH, &g_spi_flash_fs);
     }
-    if (r == FM_OK) g_ex33_mounted = FM_TRUE;
-    printf("ex33: format %s\n", (r == FM_OK) ? "OK" : "FAILED");
+    if (r == FM_OK) g_spi_flash_mounted = FM_TRUE;
+    printf("SpiFlash: format %s\n", (r == FM_OK) ? "OK" : "FAILED");
     return r;
 }
 
-/* انتقال مالکیت به PC (USB MSC مثال ۳۴): مونت بسته شود. */
-FM_Result Ex33_SpiFlash_ReleaseForUsb(void)
+/* انتقال مالکیت به PC (USB MSC usb_present.h): مونت بسته شود. */
+FM_Result SpiFlash_ReleaseForUsb(void)
 {
     FM_Result r = FM_OK;
 
-    if (g_ex33_mounted)
+    if (g_spi_flash_mounted)
     {
-        r = FS_Unmount(EX33_MOUNT_PATH);
-        if (r == FM_OK) g_ex33_mounted = FM_FALSE;
+        r = FS_Unmount(SPI_FLASH_MOUNT_PATH);
+        if (r == FM_OK) g_spi_flash_mounted = FM_FALSE;
     }
-    if (r == FM_OK) r = Storage_Sync(EX33_STORAGE_NAME);
+    if (r == FM_OK) r = Storage_Sync(SPI_FLASH_STORAGE_NAME);
     return r;
 }
 
-FM_Result Ex33_SpiFlash_ReturnFromUsb(void)
+FM_Result SpiFlash_ReturnFromUsb(void)
 {
-    if (g_ex33_mounted) return FM_OK;
+    if (g_spi_flash_mounted) return FM_OK;
     {
-        FM_Result r = FMFS_Init(&g_ex33_fs);
+        FM_Result r = FMFS_Init(&g_spi_flash_fs);
 
         if (r != FM_OK) return r;
-        r = FS_Mount(EX33_MOUNT_PATH, &g_ex33_fs);
-        if (r == FM_OK) g_ex33_mounted = FM_TRUE;
+        r = FS_Mount(SPI_FLASH_MOUNT_PATH, &g_spi_flash_fs);
+        if (r == FM_OK) g_spi_flash_mounted = FM_TRUE;
         return r;
     }
 }
 
-/* برای USB MSC (مثال ۳۴): فلش ثبت‌شده را بده — اگر راه نیفتاده NULL. */
-FM_Storage *Ex33_SpiFlash_GetStorage(void)
+/* برای USB MSC (usb_present.h): فلش ثبت‌شده را بده — اگر راه نیفتاده NULL. */
+FM_Storage *SpiFlash_GetStorage(void)
 {
-    return (g_ex33_dev != NULL && g_ex33_mounted) ? &g_ex33_st : NULL;
+    return (g_spi_flash_dev != NULL && g_spi_flash_mounted) ? &g_spi_flash_st : NULL;
 }
 
-void Ex33_SpiFlash_End(void)
+void SpiFlash_End(void)
 {
-    if (g_ex33_mounted)
+    if (g_spi_flash_mounted)
     {
-        (void)FS_Unmount(EX33_MOUNT_PATH);
-        g_ex33_mounted = FM_FALSE;
+        (void)FS_Unmount(SPI_FLASH_MOUNT_PATH);
+        g_spi_flash_mounted = FM_FALSE;
     }
-    (void)Storage_Unregister(EX33_STORAGE_NAME);
-    g_ex33_dev = NULL;
+    (void)Storage_Unregister(SPI_FLASH_STORAGE_NAME);
+    g_spi_flash_dev = NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -410,23 +410,23 @@ void Ex33_SpiFlash_End(void)
  * عیب‌یاب گیرِ erase هم هست: اگر تا آخر پیشرفت کرد و تمام شد یعنی
  * قطعه/باس سالم‌اند و مشکل در مسیر erase-سکتوری بود؛ اگر وسطش WIP
  * هولد شد یعنی مشکل سخت‌افزاری است (کلاک/سیم‌بندی). */
-FM_Result Ex33_SpiFlash_EraseAll(void)
+FM_Result SpiFlash_EraseAll(void)
 {
-    FM_QspiDevice *dev = g_ex33_dev;
+    FM_QspiDevice *dev = g_spi_flash_dev;
     FM_Result r;
     uint32_t t0;
     uint32_t last_pct = 0xFFu;
 
     if (dev == NULL)
     {
-        FM_Log("%s\n", ("ex33: aval Ex33_SpiFlash_Begin()"));
+        FM_Log("%s\n", ("SpiFlash: aval SpiFlash_Begin()"));
         return FM_ERR_NOT_READY;
     }
-    FM_Log("%s\n", ("ex33: chip erase (ta 100s) ..."));
+    FM_Log("%s\n", ("SpiFlash: chip erase (ta 100s) ..."));
     r = FM_Qspi_EraseChipStart(dev);
     if (r != FM_OK)
     {
-        printf("ex33: erase-chip start failed (%d)\n", (int)r);
+        printf("SpiFlash: erase-chip start failed (%d)\n", (int)r);
         return r;
     }
     t0 = HAL_GetTick();
@@ -439,12 +439,12 @@ FM_Result Ex33_SpiFlash_EraseAll(void)
 
         if (rs != FM_OK)
         {
-            printf("ex33: status read failed (%d)\n", (int)rs);
+            printf("SpiFlash: status read failed (%d)\n", (int)rs);
             return rs;
         }
         if ((status & 0x01u) == 0u)     /* WIP pak shod */
         {
-            printf("ex33: chip erase TAMAM dar %lu ms\n",
+            printf("SpiFlash: chip erase TAMAM dar %lu ms\n",
                    (unsigned long)elapsed);
             return FM_OK;
         }
@@ -452,13 +452,13 @@ FM_Result Ex33_SpiFlash_EraseAll(void)
         if (pct > 100u) pct = 100u;
         if (pct != last_pct && (pct % 5u) == 0u)
         {
-            printf("ex33: erase %lu%% (%lu ms)\n",
+            printf("SpiFlash: erase %lu%% (%lu ms)\n",
                    (unsigned long)pct, (unsigned long)elapsed);
             last_pct = pct;
         }
         if (elapsed > 120000u)
         {
-            FM_Log("%s\n", ("ex33: !! chip erase ham gir kard - moshkel "
+            FM_Log("%s\n", ("SpiFlash: !! chip erase ham gir kard - moshkel "
                             "sekt-hardware (SCK ra kam kon / simha)"));
             return FM_ERR_TIMEOUT;
         }
@@ -471,38 +471,38 @@ FM_Result Ex33_SpiFlash_EraseAll(void)
  *   0x00 0x00 0x00  -> MISO صفر میدهد: سیم MISO قطع، یا WP(پایه3)/
  *                      HOLD(پایه7) به 3V وصل نیست، یا AF پین‌ها غلط.
  *   0xAA 0xAA 0xAA  -> اصلاً کلاک نرفت: handle SPI یا پین‌های SCK/MOSI. */
-void Ex33_SpiFlash_BusDiag(void)
+void SpiFlash_BusDiag(void)
 {
     uint8_t hdr = 0x9F;
     uint8_t tx[3] = { 0xFFu, 0xFFu, 0xFFu };
     uint8_t rx[3];
     SPI_HandleTypeDef *h;
 
-    if (g_ex33_portp == NULL)
+    if (g_spi_flash_portp == NULL)
     {
-        FM_Log("%s\n", "ex33 diag: aval Ex33_SpiFlash_Begin()");
+        FM_Log("%s\n", "SpiFlash diag: aval SpiFlash_Begin()");
         return;
     }
-    h = (SPI_HandleTypeDef *)g_ex33_portp->ctx;
+    h = (SPI_HandleTypeDef *)g_spi_flash_portp->ctx;
     memset(rx, 0xAA, sizeof(rx));
-    ex33_cs_low(NULL);
-    (void)ex33_transfer(h, &hdr, NULL, 1u);
-    (void)ex33_transfer(h, tx, rx, 3u);
-    ex33_cs_high(NULL);
-    printf("ex33 diag: JEDEC = %02X %02X %02X (salem: EF 40 17)\n",
+    spi_flash_cs_low(NULL);
+    (void)spi_flash_transfer(h, &hdr, NULL, 1u);
+    (void)spi_flash_transfer(h, tx, rx, 3u);
+    spi_flash_cs_high(NULL);
+    printf("SpiFlash diag: JEDEC = %02X %02X %02X (salem: EF 40 17)\n",
            rx[0], rx[1], rx[2]);
     if (rx[0] == 0xAAu && rx[1] == 0xAAu && rx[2] == 0xAAu)
     {
-        FM_Log("%s\n", "ex33 diag: 0xAA -> SPI clock nakard - SCK/MOSI ya handle");
+        FM_Log("%s\n", "SpiFlash diag: 0xAA -> SPI clock nakard - SCK/MOSI ya handle");
     }
     else if (rx[0] == 0x00u && rx[1] == 0x00u && rx[2] == 0x00u)
     {
-        FM_Log("%s\n", "ex33 diag: 0x00 -> MISO javab nemidad - sim MISO, ya "
+        FM_Log("%s\n", "SpiFlash diag: 0x00 -> MISO javab nemidad - sim MISO, ya "
              "WP(pin3)/HOLD(pin7) bayad High bashand");
     }
 }
 
-static FM_Result Ex33_SpiFlash_Begin(FM_QspiDevice *dev,
+static FM_Result SpiFlash_Begin(FM_QspiDevice *dev,
                                      FM_SpiFlashPort *port,
                                      SPI_HandleTypeDef *hspi,
                                      FM_QspiChip chip,
@@ -513,50 +513,50 @@ static FM_Result Ex33_SpiFlash_Begin(FM_QspiDevice *dev,
     uint32_t id = 0;
 
     memset(port, 0, sizeof(*port));
-    port->transfer = ex33_transfer;
-    port->cs_select = ex33_cs_low;    /* دور کل قاب هر op - در spif_txn */
-    port->cs_release = ex33_cs_high;
+    port->transfer = spi_flash_transfer;
+    port->cs_select = spi_flash_cs_low;    /* دور کل قاب هر op - در spif_txn */
+    port->cs_release = spi_flash_cs_high;
     port->delay_ms = NULL;
     port->ctx = hspi;
 
     r = FM_SpiFlash_Init(dev, port, chip, sector_buf, sector_buf_size);
     if (r != FM_OK)
     {
-        printf("ex33: spi flash init failed (%d)\n", (int)r);
+        printf("SpiFlash: spi flash init failed (%d)\n", (int)r);
         return r;
     }
-    g_ex33_dev = dev;
-    g_ex33_portp = port;
+    g_spi_flash_dev = dev;
+    g_spi_flash_portp = port;
 
     r = FM_Qspi_ReadId(dev, &id);
     if (r != FM_OK)
     {
-        printf("ex33: flash does not answer (JEDEC read failed)\n");
+        printf("SpiFlash: flash does not answer (JEDEC read failed)\n");
         return r;
     }
     {
         uint32_t cs_pos = 0;
 
-        while (cs_pos < 16u && ((ex33_cs_pin >> cs_pos) & 1u) == 0u)
+        while (cs_pos < 16u && ((spi_flash_cs_pin >> cs_pos) & 1u) == 0u)
         {
             cs_pos++;
         }
-        if ((ex33_cs_port->MODER & (3uL << (cs_pos * 2u))) == 0u)
+        if ((spi_flash_cs_port->MODER & (3uL << (cs_pos * 2u))) == 0u)
         {
-            FM_Log("%s\n", "ex33: !! CS pin dar halate INPUT ast! dar CubeMX: "
+            FM_Log("%s\n", "SpiFlash: !! CS pin dar halate INPUT ast! dar CubeMX: "
                  "GPIO_Output + Push-Pull + Level:High (bedun-e in CS "
                  "sado nemishavad va flash javab nemidad)");
         }
         else
         {
-            printf("ex33: CS port %p pin %u - OUTPUT OK\n",
-                   (void *)ex33_cs_port, (unsigned)cs_pos);
+            printf("SpiFlash: CS port %p pin %u - OUTPUT OK\n",
+                   (void *)spi_flash_cs_port, (unsigned)cs_pos);
         }
     }
-    printf("ex33: %s ready, JEDEC 0x%06lX, %lu KB - %s\n",
+    printf("SpiFlash: %s ready, JEDEC 0x%06lX, %lu KB - %s\n",
            dev->info.name, (unsigned long)id,
            (unsigned long)(dev->info.size_bytes / 1024u),
-           ex33_dma_ok ? "DMA-capable port" : "blocking port");
+           spi_flash_dma_ok ? "DMA-capable port" : "blocking port");
     {
         /* روی سیم‌بندی سیمی، کلاک بالای ~10MHz برای erase/program
          * پرریسک است (خواندن تحمل می‌کند، دستور نوشتن ممکن است خراب
@@ -574,24 +574,24 @@ static FM_Result Ex33_SpiFlash_Begin(FM_QspiDevice *dev,
                 /* لاگ برد: با /2 (60MHz!) روی سیم‌بندی سیمی، خواندن سالم
                  * است ولی هر erase ~۴ ثانیه گیر می‌کند (فریم دستور خراب
                  * لچ می‌شود). زیر 10MHz برو. */
-                printf("ex33: !! SPI prescaler /%lu (=sari'e ziadesh baraye "
+                printf("SpiFlash: !! SPI prescaler /%lu (=sari'e ziadesh baraye "
                        "sim-basi) - dar CubeMX: SPI4 Prescaler = 64 bezan, "
                        "bad az erase haye ~45ms mibini\n",
                        (unsigned long)div);
             }
             else
             {
-                printf("ex33: SPI prescaler /%lu - OK baraye sim-basi\n",
+                printf("SpiFlash: SPI prescaler /%lu - OK baraye sim-basi\n",
                        (unsigned long)div);
             }
         }
     }
 
-#ifndef EX33_NO_SCRATCH_ERASE
+#ifndef SPI_FLASH_NO_SCRATCH_ERASE
     /* عیب‌یابی یک‌خطی پاک‌سازی: آخرین سکتور (به‌ندرت استفاده‌شده) را
      * پاک کن و زمان واقعی را نشان بده. سالم: زیر ~400ms. اگر تا 4
      * ثانیه هم تمام نشد، قطعه یا کند واقعی است یا در حالت گیر.
-     * غیرفعال‌سازی: EX33_NO_SCRATCH_ERASE قبل از include تعریف کن. */
+     * غیرفعال‌سازی: SPI_FLASH_NO_SCRATCH_ERASE قبل از include تعریف کن. */
     {
         uint32_t t0 = HAL_GetTick();
         /* سکتور صفر - دقیقاً همان آدرسی که مسیر mount گیر می‌کند.
@@ -603,12 +603,12 @@ static FM_Result Ex33_SpiFlash_Begin(FM_QspiDevice *dev,
 
         if (re == FM_OK)
         {
-            printf("ex33: scratch erase OK dar %lu ms (salem: <400)\n",
+            printf("SpiFlash: scratch erase OK dar %lu ms (salem: <400)\n",
                    (unsigned long)(HAL_GetTick() - t0));
         }
         else
         {
-            printf("ex33: !! scratch erase NASHOD (%d) - taghvie ya "
+            printf("SpiFlash: !! scratch erase NASHOD (%d) - taghvie ya "
                    "kiep gire\n", (int)re);
         }
     }
@@ -616,52 +616,52 @@ static FM_Result Ex33_SpiFlash_Begin(FM_QspiDevice *dev,
 
     /* ثبت به‌عنوان حافظهٔ کتابخانه + مونت /flash (FMFS).
      * FMFS پیش‌فرض است تا با SD روی درایو 0 فت‌فس تداخل نکند؛
-     * برای USB MSC، PC خودش FAT می‌گذارد یا EX33_USE_FATFS بسازید. */
+     * برای USB MSC، PC خودش FAT می‌گذارد یا SPI_FLASH_USE_FATFS بسازید. */
     {
-        FM_Result rs = FM_Qspi_RegisterStorage(dev, &g_ex33_st,
-                                               EX33_STORAGE_NAME);
+        FM_Result rs = FM_Qspi_RegisterStorage(dev, &g_spi_flash_st,
+                                               SPI_FLASH_STORAGE_NAME);
 
         if (rs != FM_OK && rs != FM_ERR_EXISTS)
         {
-            printf("ex33: register storage failed (%d)\n", (int)rs);
+            printf("SpiFlash: register storage failed (%d)\n", (int)rs);
             return rs;
         }
-        rs = FMFS_Init(&g_ex33_fs);
+        rs = FMFS_Init(&g_spi_flash_fs);
         if (rs != FM_OK)
         {
-            printf("ex33: FMFS_Init failed (%d)\n", (int)rs);
+            printf("SpiFlash: FMFS_Init failed (%d)\n", (int)rs);
             return rs;
         }
-        rs = FS_Mount(EX33_MOUNT_PATH, &g_ex33_fs);
+        rs = FS_Mount(SPI_FLASH_MOUNT_PATH, &g_spi_flash_fs);
         if (rs == FM_OK)
         {
-            g_ex33_mounted = FM_TRUE;
-            FM_Log("%s\n", "ex33: /flash mounted (FMFS)");
+            g_spi_flash_mounted = FM_TRUE;
+            FM_Log("%s\n", "SpiFlash: /flash mounted (FMFS)");
         }
         else
         {
-            printf("ex33: /flash khali/new (mount=%d) - yek bar: "
-                   "Ex33_SpiFlash_Format();\n", (int)rs);
+            printf("SpiFlash: /flash khali/new (mount=%d) - yek bar: "
+                   "SpiFlash_Format();\n", (int)rs);
         }
     }
     return FM_OK;
 }
 
 /* ------------------------------------------------------------------ */
-/* exF_1 — تست دود: بنویس، بخوان، تطبیق بده                            */
+/* SpiFlashDemo_Smoke — تست دود: بنویس، بخوان، تطبیق بده                            */
 /* ------------------------------------------------------------------ */
 
-void exF_1_spi_flash_smoke(void)
+void SpiFlashDemo_Smoke(void)
 {
     static FM_CACHE_ALIGN uint8_t out[256];   /* تراز خط کش */
     static FM_CACHE_ALIGN uint8_t back[256];
     size_t i;
     FM_Bool same = FM_TRUE;
 
-    FM_Log("%s\n", "\n============== exF_1_spi_flash_smoke ==============");
-    if (g_ex33_dev == NULL)
+    FM_Log("%s\n", "\n============== SpiFlashDemo_Smoke ==============");
+    if (g_spi_flash_dev == NULL)
     {
-        FM_Log("%s\n", "  اول Ex33_SpiFlash_Begin() را صدا بزنید.");
+        FM_Log("%s\n", "  اول SpiFlash_Begin() را صدا بزنید.");
         return;
     }
 
@@ -670,12 +670,12 @@ void exF_1_spi_flash_smoke(void)
         out[i] = (uint8_t)(i * 7u + 3u);
     }
 
-    if (FM_Qspi_Write(g_ex33_dev, 0, out, sizeof(out)) != FM_OK)
+    if (FM_Qspi_Write(g_spi_flash_dev, 0, out, sizeof(out)) != FM_OK)
     {
         FM_Log("%s\n", "  write failed");
         return;
     }
-    if (FM_Qspi_Read(g_ex33_dev, 0, back, sizeof(back)) != FM_OK)
+    if (FM_Qspi_Read(g_spi_flash_dev, 0, back, sizeof(back)) != FM_OK)
     {
         FM_Log("%s\n", "  read failed");
         return;
@@ -686,16 +686,16 @@ void exF_1_spi_flash_smoke(void)
     }
     printf("  verify: %s  (%s, erases=%lu skipped=%lu)\n",
            same ? "IDENTICAL" : "CORRUPTED",
-           ex33_dma_ok ? "DMA" : "blocking",
-           (unsigned long)g_ex33_dev->stat_erases,
-           (unsigned long)g_ex33_dev->stat_erases_skipped);
+           spi_flash_dma_ok ? "DMA" : "blocking",
+           (unsigned long)g_spi_flash_dev->stat_erases,
+           (unsigned long)g_spi_flash_dev->stat_erases_skipped);
 }
 
 /* ------------------------------------------------------------------ */
-/* exF_2 — عملیات فایل روی /flash: متن، باینری+CRC، پوشه               */
+/* SpiFlashDemo_FileOps — عملیات فایل روی /flash: متن، باینری+CRC، پوشه               */
 /* ------------------------------------------------------------------ */
 
-void exF_2_file_ops(void)
+void SpiFlashDemo_FileOps(void)
 {
     static uint8_t blob[1024];
     static uint8_t back[1024];
@@ -706,18 +706,18 @@ void exF_2_file_ops(void)
     uint32_t crc_w;
     uint32_t crc_r;
 
-    FM_Log("%s\n", "\n=============== exF_2_file_ops ====================");
-    if (g_ex33_dev == NULL || !g_ex33_mounted)
+    FM_Log("%s\n", "\n=============== SpiFlashDemo_FileOps ====================");
+    if (g_spi_flash_dev == NULL || !g_spi_flash_mounted)
     {
         FM_Log("%s\n", "  (فلش آماده نیست — رد شد)");
         return;
     }
 
     /* ۱) متن: بنویس/بخوان/بازنویسی */
-    ex33_step("write text",
-           File_WriteText(EX33_MOUNT_PATH "/hello.txt",
+    spi_flash_demo_step("write text",
+           File_WriteText(SPI_FLASH_MOUNT_PATH "/hello.txt",
                           "Hello from plain-SPI flash!"));
-    File_ReadText(EX33_MOUNT_PATH "/hello.txt", text, sizeof(text), NULL);
+    File_ReadText(SPI_FLASH_MOUNT_PATH "/hello.txt", text, sizeof(text), NULL);
     printf("  read back: %s\n", text);
 
     /* ۲) باینری ۱KB + CRC رفت‌وبرگشت (از مسیر DMA اگر فعال باشد) */
@@ -725,24 +725,24 @@ void exF_2_file_ops(void)
     {
         blob[i] = (uint8_t)(i * 13u + 5u);
     }
-    crc_w = EX_CRC32(blob, sizeof(blob), 0u);
-    ex33_step("write 1K",
-           File_WriteAll(EX33_MOUNT_PATH "/blob.bin",
+    crc_w = DEMO_CRC32(blob, sizeof(blob), 0u);
+    spi_flash_demo_step("write 1K",
+           File_WriteAll(SPI_FLASH_MOUNT_PATH "/blob.bin",
                          blob, (uint32_t)sizeof(blob)));
-    ex33_step("read 1K",
-           File_ReadAll(EX33_MOUNT_PATH "/blob.bin",
+    spi_flash_demo_step("read 1K",
+           File_ReadAll(SPI_FLASH_MOUNT_PATH "/blob.bin",
                         back, sizeof(back), NULL));
-    crc_r = EX_CRC32(back, sizeof(back), 0u);
+    crc_r = DEMO_CRC32(back, sizeof(back), 0u);
     printf("  CRC 1K: %08lX -> %08lX : %s\n",
            (unsigned long)crc_w, (unsigned long)crc_r,
            (crc_w == crc_r) ? "IDENTICAL" : "CORRUPTED");
 
     /* ۳) پوشه + فهرست */
-    (void)Directory_Create(EX33_MOUNT_PATH "/cfg");
-    ex33_step("write cfg",
-           File_WriteText(EX33_MOUNT_PATH "/cfg/net.txt", "ip=10.0.0.5"));
+    (void)Directory_Create(SPI_FLASH_MOUNT_PATH "/cfg");
+    spi_flash_demo_step("write cfg",
+           File_WriteText(SPI_FLASH_MOUNT_PATH "/cfg/net.txt", "ip=10.0.0.5"));
     FM_Log("%s\n", "  /flash:");
-    d = Directory_Open(EX33_MOUNT_PATH);
+    d = Directory_Open(SPI_FLASH_MOUNT_PATH);
     if (d != NULL)
     {
         while (Directory_Read(d, &e) == FM_OK)
@@ -755,17 +755,17 @@ void exF_2_file_ops(void)
     }
 
     /* ۴) پاک‌سازی فایل‌های دموی همین تست (نه کل فلش) */
-    (void)File_Delete(EX33_MOUNT_PATH "/hello.txt");
-    (void)File_Delete(EX33_MOUNT_PATH "/blob.bin");
-    (void)File_Delete(EX33_MOUNT_PATH "/cfg/net.txt");
-    (void)Directory_Delete(EX33_MOUNT_PATH "/cfg");
+    (void)File_Delete(SPI_FLASH_MOUNT_PATH "/hello.txt");
+    (void)File_Delete(SPI_FLASH_MOUNT_PATH "/blob.bin");
+    (void)File_Delete(SPI_FLASH_MOUNT_PATH "/cfg/net.txt");
+    (void)Directory_Delete(SPI_FLASH_MOUNT_PATH "/cfg");
 }
 
 /* ------------------------------------------------------------------ */
-/* exF_3 — SD -> فلش با وریفای CRC (کاربرد: فونت/لوگو بدون کارت)       */
+/* SpiFlashDemo_SdToFlash — SD -> فلش با وریفای CRC (کاربرد: فونت/لوگو بدون کارت)       */
 /* ------------------------------------------------------------------ */
 
-void exF_3_sd_to_flash(void)
+void SpiFlashDemo_SdToFlash(void)
 {
     FM_TransferOpts o;
     FM_TransferInfo info;
@@ -773,23 +773,23 @@ void exF_3_sd_to_flash(void)
     const char *src = "/config.json";
     FM_Bool exists = FM_FALSE;
 
-    FM_Log("%s\n", "\n=============== exF_3_sd_to_flash ================");
-    if (g_ex33_dev == NULL || !g_ex33_mounted)
+    FM_Log("%s\n", "\n=============== SpiFlashDemo_SdToFlash ================");
+    if (g_spi_flash_dev == NULL || !g_spi_flash_mounted)
     {
         FM_Log("%s\n", "  (فلش آماده نیست — رد شد)");
         return;
     }
     if (File_Exists(src, &exists) != FM_OK || !exists)
     {
-        src = "/ex33_src.txt";
-        ex33_step("make demo source",
-               File_WriteText(src, "ex33 transfer demo payload"));
+        src = "/spi_flash_src.txt";
+        spi_flash_demo_step("make demo source",
+               File_WriteText(src, "SpiFlash transfer demo payload"));
     }
 
     memset(&o, 0, sizeof(o));
     o.verify = FM_TRUE;
-    o.progress = q33_progress;
-    r = FM_Transfer_CopyEx(src, EX33_MOUNT_PATH "/from_sd.bin",
+    o.progress = spi_flash_demo_progress;
+    r = FM_Transfer_CopyEx(src, SPI_FLASH_MOUNT_PATH "/from_sd.bin",
                            &o, &info);
     if (r == FM_OK)
     {
@@ -800,10 +800,10 @@ void exF_3_sd_to_flash(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* exF_4 — RAM -> فلش -> RAM با CRC (رفت‌وبرگشت کامل مسیر DMA)         */
+/* SpiFlashDemo_RamRoundtrip — RAM -> فلش -> RAM با CRC (رفت‌وبرگشت کامل مسیر DMA)         */
 /* ------------------------------------------------------------------ */
 
-void exF_4_ram_roundtrip(void)
+void SpiFlashDemo_RamRoundtrip(void)
 {
     static FM_CACHE_ALIGN uint8_t src[2048];
     static FM_CACHE_ALIGN uint8_t dst[2048];
@@ -812,8 +812,8 @@ void exF_4_ram_roundtrip(void)
     uint32_t c1;
     uint32_t c2;
 
-    FM_Log("%s\n", "\n============== exF_4_ram_roundtrip ===============");
-    if (g_ex33_dev == NULL || !g_ex33_mounted)
+    FM_Log("%s\n", "\n============== SpiFlashDemo_RamRoundtrip ===============");
+    if (g_spi_flash_dev == NULL || !g_spi_flash_mounted)
     {
         FM_Log("%s\n", "  (فلش آماده نیست — رد شد)");
         return;
@@ -823,42 +823,42 @@ void exF_4_ram_roundtrip(void)
     {
         src[i] = (uint8_t)((i * 31u) ^ (i >> 3));
     }
-    c1 = EX_CRC32(src, sizeof(src), 0u);
+    c1 = DEMO_CRC32(src, sizeof(src), 0u);
 
-    ex33_step("RAM -> flash",
-           FM_Transfer_SaveFile(EX33_MOUNT_PATH "/rt.bin",
+    spi_flash_demo_step("RAM -> flash",
+           FM_Transfer_SaveFile(SPI_FLASH_MOUNT_PATH "/rt.bin",
                                 src, sizeof(src)));
-    ex33_step("flash -> RAM",
-           FM_Transfer_LoadFile(EX33_MOUNT_PATH "/rt.bin",
+    spi_flash_demo_step("flash -> RAM",
+           FM_Transfer_LoadFile(SPI_FLASH_MOUNT_PATH "/rt.bin",
                                 dst, sizeof(dst), &got));
-    c2 = EX_CRC32(dst, got, 0u);
+    c2 = DEMO_CRC32(dst, got, 0u);
     printf("  %lu bytes, CRC %08lX -> %08lX : %s\n",
            (unsigned long)got, (unsigned long)c1, (unsigned long)c2,
            (c1 == c2 && got == sizeof(src)) ? "IDENTICAL" : "CORRUPTED");
-    (void)File_Delete(EX33_MOUNT_PATH "/rt.bin");
+    (void)File_Delete(SPI_FLASH_MOUNT_PATH "/rt.bin");
 }
 
 /* ------------------------------------------------------------------ */
-/* exF_5 — آمار: چقدر نوشتیم/پاک کردیم/چند سکتور خالی رد شد            */
+/* SpiFlashDemo_Stats — آمار: چقدر نوشتیم/پاک کردیم/چند سکتور خالی رد شد            */
 /* ------------------------------------------------------------------ */
 
-void exF_5_stats(void)
+void SpiFlashDemo_Stats(void)
 {
-    FM_Log("%s\n", "\n================= exF_5_stats ====================");
-    if (g_ex33_dev == NULL)
+    FM_Log("%s\n", "\n================= SpiFlashDemo_Stats ====================");
+    if (g_spi_flash_dev == NULL)
     {
         FM_Log("%s\n", "  (فلش آماده نیست — رد شد)");
         return;
     }
     printf("  reads=%lu writes=%lu erases=%lu blank-skipped=%lu "
            "mmap? (SPI: no)\n",
-           (unsigned long)g_ex33_dev->stat_reads,
-           (unsigned long)g_ex33_dev->stat_writes,
-           (unsigned long)g_ex33_dev->stat_erases,
-           (unsigned long)g_ex33_dev->stat_erases_skipped);
+           (unsigned long)g_spi_flash_dev->stat_reads,
+           (unsigned long)g_spi_flash_dev->stat_writes,
+           (unsigned long)g_spi_flash_dev->stat_erases,
+           (unsigned long)g_spi_flash_dev->stat_erases_skipped);
     printf("  data phase: %s\n",
-           ex33_dma_ok ? "DMA" : "blocking");
+           spi_flash_dma_ok ? "DMA" : "blocking");
 }
 
 #endif /* !FM_HOST_BUILD */
-#endif /* FM_EXAMPLE_33_STM32_SPI_FLASH_DMA_PORT_H */
+#endif /* FM_TOPAPI_SPI_FLASH_DMA_PORT_H */

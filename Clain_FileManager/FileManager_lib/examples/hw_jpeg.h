@@ -1,5 +1,5 @@
 /*
- * Example 20 — STM32H7 JPEG hardware codec → Image_Load / SimpleImage
+ * hw_jpeg.h — STM32H7 JPEG hardware codec → Image_Load / SimpleImage
  *
  * CubeMX: JPEG peripheral را فعال کنید (hjpeg). بعد فقط:
  *
@@ -20,8 +20,8 @@
  * .sdram_buffers) و YCbCr هم در .sdram_buffers است — heap لمس نمی‌شود.
  */
 
-#ifndef FM_EXAMPLE_20_HW_JPEG_H
-#define FM_EXAMPLE_20_HW_JPEG_H
+#ifndef FM_TOPAPI_HW_JPEG_H
+#define FM_TOPAPI_HW_JPEG_H
 
 
 #ifndef HW_JPEG_H_
@@ -48,7 +48,7 @@ static JPEG_HandleTypeDef *si_hjpeg;
 
 /*
  * قلاب تبدیل رنگ. اگر شتاب‌دهنده‌ای ثبت شده باشد (مثلاً DMA2D در
- * مثال ۳۰) اول آن امتحان می‌شود؛ هر خطایی برگرداند، بی‌سروصدا به
+ * dma2d_ycbcr.h) اول آن امتحان می‌شود؛ هر خطایی برگرداند، بی‌سروصدا به
  * مسیر نرم‌افزاری پایین برمی‌گردیم. ترتیب include مهم نیست.
  */
 typedef FM_Result (*si_color_convert_fn)(const JPEG_ConfTypeDef *cfg,
@@ -502,4 +502,4 @@ static inline FM_Result SimpleImage_UseHwJpeg(JPEG_HandleTypeDef *hjpeg)
 
 #endif /* HW_JPEG_H_ */
 
-#endif /* FM_EXAMPLE_20_HW_JPEG_H */
+#endif /* FM_TOPAPI_HW_JPEG_H */

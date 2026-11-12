@@ -60,8 +60,8 @@
  * اگر کش را روشن نکنید، همهٔ این توابع بی‌اثرند و کد بدون تغییر کار
  * می‌کند.
  */
-#ifndef FM_CACHE_EXAMPLE_H
-#define FM_CACHE_EXAMPLE_H
+#ifndef FM_TOPAPI_CACHE_H
+#define FM_TOPAPI_CACHE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -195,4 +195,4 @@ extern "C" {
 }
 #endif
 
-#endif /* FM_CACHE_EXAMPLE_H */
+#endif /* FM_TOPAPI_CACHE_H */

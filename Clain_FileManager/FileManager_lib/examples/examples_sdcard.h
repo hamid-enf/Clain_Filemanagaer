@@ -5,8 +5,8 @@
  * از طریق FatFS adapter کتابخانه (fm_fatfs.c).
  *
  * تفاوت‌ها با نسخه‌ی RAM:
- *   - مونت فقط «یک‌بار» در SD_examples_begin() انجام می‌شود (به‌جای
- *     mount/unmount در هر مثال) و در SD_examples_end() بسته می‌شود.
+ *   - مونت فقط «یک‌بار» در SdCard_Begin() انجام می‌شود (به‌جای
+ *     mount/unmount در هر مثال) و در SdCard_End() بسته می‌شود.
  *   - FileManager_MountMemory / Storage_Unregister("RAM") اینجا معنا ندارد؛
  *     درایو 0 (sd_diskio کیوب) از قبل هست و FatFS_Init به آن وصل می‌شود.
  *   - همه‌ی printfها با %lu/%d/%s هستند (سازگار با mini-printf).
@@ -18,16 +18,16 @@
  * استفاده در main:
  *     #include "examples_sdcard.h"
  *     ...
- *     SD_examples_begin();
- *     exS_1_file_basic();          ... تا exS_10
- *     SD_examples_end();
+ *     SdCard_Begin();
+ *     SdDemo_Basic();          ... تا SdDemo_BmpScaleConvert
+ *     SdCard_End();
  *
  * نکته: خروجی مثال‌ها روی SD مانا است (فایل‌ها می‌مانند) ولی اجرای
  * دوباره بی‌خطر است چون File_WriteText فایل قبلی را truncate می‌کند.
  */
 
-#ifndef EXAMPLES_FILE_SDCARD_ALL_H_
-#define EXAMPLES_FILE_SDCARD_ALL_H_
+#ifndef FM_TOPAPI_SDCARD_DEMOS_H
+#define FM_TOPAPI_SDCARD_DEMOS_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -45,7 +45,7 @@
 
 static FM_FS g_sd_fs;      /* آبجکت FS متصل به درایو 0 (SD) */
 
-static void sd_step(const char *what, FM_Result r)
+static void sd_demo_step(const char *what, FM_Result r)
 {
     /* چاپ خطا فقط وقتی چیزی شکست خورده — خروجی تمیز می‌ماند */
     if (r != FM_OK)
@@ -53,7 +53,7 @@ static void sd_step(const char *what, FM_Result r)
 }
 
 /* صدا زدن یک‌بار در main، قبل از مثال‌ها */
-FM_Result SD_examples_begin(void)
+FM_Result SdCard_Begin(void)
 {
     FM_Result r;
     FM_Bool already = FM_FALSE;
@@ -64,14 +64,14 @@ FM_Result SD_examples_begin(void)
     /* اگر ریشه از قبل مونت است (مثلاً FMFS خودکار بعد از FM_SD_Hal_Attach،
      * یا begin دوم در همان بوت)، دوباره روی آن FS نگذار - دو فایل‌سیستم
      * روی یک volume = طوفان خطا و خرابی متادیتا. همان مونت را استفاده کن.
-     * (همین الگو در QSPI_examples_begin هم هست.) */
+     * (همین الگو در QspiFlash_Begin هم هست.) */
     (void)FS_IsMounted("/", &already);
     if (already)
     {
         FM_FSInfo info;
 
         r = FS_GetInfo("/", &info);
-        sd_step("FS_GetInfo(/) [reusing existing mount]", r);
+        sd_demo_step("FS_GetInfo(/) [reusing existing mount]", r);
         if (r == FM_OK)
         {
             printf("SD: %s, free %lu KB (existing root mount reused)\n",
@@ -81,17 +81,17 @@ FM_Result SD_examples_begin(void)
     }
 
     r = FatFS_Init(&g_sd_fs, 0);          /* درایو 0 -> FileManager */
-    sd_step("FatFS_Init(0)", r);
+    sd_demo_step("FatFS_Init(0)", r);
     if (r != FM_OK) return r;
 
     r = FS_Mount("/", &g_sd_fs);          /* ریشه = SD */
-    sd_step("FS_Mount(\"/\")", r);
+    sd_demo_step("FS_Mount(\"/\")", r);
     if (r != FM_OK) return r;
 
     {
         FM_FSInfo info;                    /* اولین دسترسی واقعی به کارت */
         r = FS_GetInfo("/", &info);
-        sd_step("FS_GetInfo", r);
+        sd_demo_step("FS_GetInfo", r);
         if (r == FM_OK)
             printf("SD: %s, free %lu KB\n", info.type,
                    (unsigned long)(info.free_space / 1024u));
@@ -100,16 +100,16 @@ FM_Result SD_examples_begin(void)
 }
 
 /* در پایان (اختیاری — مونت را می‌بندد) */
-void SD_examples_end(void)
+void SdCard_End(void)
 {
     (void)FS_Unmount("/");
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_1 — File Basics (معادل ex_1_file_basic روی SD)                    */
+/* SdDemo_Basic — File Basics (معادل FileDemo_Basic روی SD)                    */
 /*----------------------------------------------------------------------*/
 
-void exS_1_file_basic(void)
+void SdDemo_Basic(void)
 {
     char buf[128];
     FM_Bool exists;
@@ -144,34 +144,34 @@ void exS_1_file_basic(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_2 — Copy, Move, Rename                                            */
+/* SdDemo_CopyMoveRename — Copy, Move, Rename                                            */
 /*----------------------------------------------------------------------*/
 
-static void sds_copy_progress(uint64_t done, uint64_t total, void *ud)
+static void sd_demo_copy_progress(uint64_t done, uint64_t total, void *ud)
 {
     (void)ud;
     printf("  copy: %lu / %lu\n", (unsigned long)done, (unsigned long)total);
 }
 
-void exS_2_file_copy_move_rename(void)
+void SdDemo_CopyMoveRename(void)
 {
     char buf[128];
 
     File_WriteText("/original.txt", "This is the original file content.");
 
     printf("Copy:\n");
-    sd_step("File_Copy", File_Copy("/original.txt", "/copy.txt",
-                                   sds_copy_progress, NULL));
+    sd_demo_step("File_Copy", File_Copy("/original.txt", "/copy.txt",
+                                   sd_demo_copy_progress, NULL));
 
     File_ReadText("/copy.txt", buf, sizeof(buf), NULL);
     printf("  content: %s\n", buf);
 
-    sd_step("File_Rename", File_Rename("/copy.txt", "/renamed.txt"));
+    sd_demo_step("File_Rename", File_Rename("/copy.txt", "/renamed.txt"));
     File_ReadText("/renamed.txt", buf, sizeof(buf), NULL);
     printf("Renamed: %s\n", buf);
 
     Directory_Create("/backup");               /* بار دوم: EXISTS، عادی */
-    sd_step("File_Move", File_Move("/renamed.txt", "/backup/final.txt",
+    sd_demo_step("File_Move", File_Move("/renamed.txt", "/backup/final.txt",
                                    NULL, NULL));
     File_ReadText("/backup/final.txt", buf, sizeof(buf), NULL);
     printf("Moved: %s\n", buf);
@@ -184,10 +184,10 @@ void exS_2_file_copy_move_rename(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_3 — Advanced File Handle                                          */
+/* SdDemo_Advanced — Advanced File Handle                                          */
 /*----------------------------------------------------------------------*/
 
-void exS_3_file_advance(void)
+void SdDemo_Advanced(void)
 {
     FM_File *f;
     uint64_t pos, size;
@@ -245,10 +245,10 @@ void exS_3_file_advance(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_4 — Directories                                                   */
+/* SdDemo_Directory — Directories                                                   */
 /*----------------------------------------------------------------------*/
 
-static FM_Result sds_print_item(const FM_FileInfo *info, void *ud)
+static FM_Result sd_demo_print_item(const FM_FileInfo *info, void *ud)
 {
     (void)ud;
     printf("  [%s] %-18s %lu bytes\n",
@@ -257,7 +257,7 @@ static FM_Result sds_print_item(const FM_FileInfo *info, void *ud)
     return FM_OK;
 }
 
-void exS_4_file_directory(void)
+void SdDemo_Directory(void)
 {
     FM_Dir *d;
     FM_DirEntry entry;
@@ -281,7 +281,7 @@ void exS_4_file_directory(void)
     if (d) Directory_Close(d);
 
     printf("\nRecursive scan:\n");
-    Directory_ScanRecursive("/", sds_print_item, NULL, NULL, NULL);
+    Directory_ScanRecursive("/", sd_demo_print_item, NULL, NULL, NULL);
 
     Directory_Count("/logs", FM_ITEM_FILE, &count);
     printf("\nFiles in /logs: %lu\n", (unsigned long)count);
@@ -298,7 +298,7 @@ void exS_4_file_directory(void)
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_5 — JSON                                                          */
+/* SdDemo_Json — JSON                                                          */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_JSON
@@ -306,7 +306,7 @@ static char     sds_text[256];
 static uint32_t sds_tokens[FM_JSON_TOKEN_BUFFER_SIZE / 4];
 #endif /* FM_USE_JSON */
 
-void exS_5_file_json(void)
+void SdDemo_Json(void)
 {
 #if FM_USE_JSON
     /* 1. نوشتن */
@@ -327,7 +327,7 @@ void exS_5_file_json(void)
           JsonWriter_EndArray(&w);
         JsonWriter_EndObject(&w);
 
-        sd_step("WriteText config.json",
+        sd_demo_step("WriteText config.json",
                 File_WriteText("/config.json", JsonWriter_StringValue(&w)));
         printf("Written:\n%s\n\n", JsonWriter_StringValue(&w));
     }
@@ -341,7 +341,7 @@ void exS_5_file_json(void)
         size_t count;
         float v0, v1, v2;
 
-        sd_step("Json_LoadFile",
+        sd_demo_step("Json_LoadFile",
                 Json_LoadFile("/config.json", &doc, sds_text,
                               sizeof(sds_text), sds_tokens,
                               sizeof(sds_tokens)));
@@ -377,16 +377,16 @@ void exS_5_file_json(void)
         printf("[api] baud = %d\n", (int)baud);
     }
 #else
-    printf("exS_5 JSON: skipped (FM_USE_JSON=0)\n");
+    printf("SdDemo_Json JSON: skipped (FM_USE_JSON=0)\n");
 #endif /* FM_USE_JSON */
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_6 — Text Line Editing                                             */
+/* SdDemo_TextLineEdit — Text Line Editing                                             */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_TEXT
-static void sds_show(const char *label, const char *path)
+static void sd_demo_show(const char *label, const char *path)
 {
     char buf[512];
     printf("--- %s ---\n", label);
@@ -395,23 +395,23 @@ static void sds_show(const char *label, const char *path)
 }
 #endif /* FM_USE_TEXT */
 
-void exS_6_file_text_line_edit(void)
+void SdDemo_TextLineEdit(void)
 {
 #if FM_USE_TEXT
     size_t n;
 
     File_WriteText("/cfg.txt",
         "host=192.168.1.1\nport=8080\ntimeout=30\ndebug=false\n");
-    sds_show("Original", "/cfg.txt");
+    sd_demo_show("Original", "/cfg.txt");
 
-    sd_step("Text_Replace", Text_Replace("/cfg.txt", "8080", "9090"));
-    sds_show("Replace 8080->9090", "/cfg.txt");
+    sd_demo_step("Text_Replace", Text_Replace("/cfg.txt", "8080", "9090"));
+    sd_demo_show("Replace 8080->9090", "/cfg.txt");
 
-    sd_step("Text_InsertLine", Text_InsertLine("/cfg.txt", 3, "retry=3"));
-    sds_show("InsertLine 3", "/cfg.txt");
+    sd_demo_step("Text_InsertLine", Text_InsertLine("/cfg.txt", 3, "retry=3"));
+    sd_demo_show("InsertLine 3", "/cfg.txt");
 
-    sd_step("Text_DeleteLine", Text_DeleteLine("/cfg.txt", 4));
-    sds_show("DeleteLine 4", "/cfg.txt");
+    sd_demo_step("Text_DeleteLine", Text_DeleteLine("/cfg.txt", 4));
+    sd_demo_show("DeleteLine 4", "/cfg.txt");
 
     Text_CountLines("/cfg.txt", &n);
     printf("Lines: %lu\n", (unsigned long)n);
@@ -432,16 +432,16 @@ void exS_6_file_text_line_edit(void)
         if (f) File_Close(f);
     }
 #else
-    printf("exS_6 text line edit: skipped (FM_USE_TEXT=0)\n");
+    printf("SdDemo_TextLineEdit text line edit: skipped (FM_USE_TEXT=0)\n");
 #endif /* FM_USE_TEXT */
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_7 — Crash-Safe Writes                                             */
+/* SdDemo_CrashSafeWrites — Crash-Safe Writes                                             */
 /*----------------------------------------------------------------------*/
 
 #if FM_USE_SAFE_WRITE
-static void sds_show2(const char *label)
+static void sd_demo_show2(const char *label)
 {
     char buf[256];
     File_ReadText("/settings.txt", buf, sizeof(buf), NULL);
@@ -449,40 +449,40 @@ static void sds_show2(const char *label)
 }
 #endif /* FM_USE_SAFE_WRITE */
 
-void exS_7_file_Crash_Safe_Writes(void)
+void SdDemo_CrashSafeWrites(void)
 {
 #if FM_USE_SAFE_WRITE
     File_WriteText("/settings.txt", "version=1");
-    sds_show2("Initial");
+    sd_demo_show2("Initial");
 
-    sd_step("File_SafeReplace",
+    sd_demo_step("File_SafeReplace",
             File_SafeReplace("/settings.txt", "version=2", 9));
-    sds_show2("SafeReplace");
+    sd_demo_show2("SafeReplace");
 
-    sd_step("File_SafeWriteText",
+    sd_demo_step("File_SafeWriteText",
             File_SafeWriteText("/settings.txt", "version=3"));
-    sds_show2("SafeWriteText");
+    sd_demo_show2("SafeWriteText");
 
-    sd_step("File_SafeAppend",
+    sd_demo_step("File_SafeAppend",
             File_SafeAppend("/settings.txt", "\nextra=data", 11));
-    sds_show2("SafeAppend");
+    sd_demo_show2("SafeAppend");
 
-    sd_step("File_Transaction",
+    sd_demo_step("File_Transaction",
             File_Transaction("/settings.txt", "version=FINAL", 14));
-    sds_show2("Transaction");
+    sd_demo_show2("Transaction");
 
     File_Recover("/settings.txt");
     printf("  Recover done (no stale .fm_tmp).\n");
 #else
-    printf("exS_7 crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
+    printf("SdDemo_CrashSafeWrites crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
 #endif /* FM_USE_SAFE_WRITE */
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_8 — Data Logger (CSV)                                             */
+/* SdDemo_DataLogger — Data Logger (CSV)                                             */
 /*----------------------------------------------------------------------*/
 
-void exS_8_file_Data_Logger(void)
+void SdDemo_DataLogger(void)
 {
 #if FM_USE_DATA_LOGGER
     FM_Logger lg;
@@ -497,7 +497,7 @@ void exS_8_file_Data_Logger(void)
     cfg.max_files     = 3;
     cfg.flush_records = 5;
 
-    sd_step("Logger_Init",
+    sd_demo_step("Logger_Init",
             Logger_Init(&lg, "/logs", "sensor", FM_LOG_FORMAT_CSV, &cfg));
     Logger_Start(&lg);
 
@@ -554,15 +554,15 @@ void exS_8_file_Data_Logger(void)
         if (d) Directory_Close(d);
     }
 #else
-    printf("exS_8 data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
+    printf("SdDemo_DataLogger data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
 #endif /* FM_USE_DATA_LOGGER */
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_9 — CRC & Checksum                                                */
+/* SdDemo_CrcChecksum — CRC & Checksum                                                */
 /*----------------------------------------------------------------------*/
 
-void exS_9_file_crc_cheaksum(void)
+void SdDemo_CrcChecksum(void)
 {
 #if FM_USE_CRC
     const char *data = "123456789";
@@ -588,15 +588,15 @@ void exS_9_file_crc_cheaksum(void)
                (unsigned long)CRC_Calculate32(text, rd), (unsigned long)rd);
     }
 #else
-    printf("exS_9 CRC / checksum: skipped (FM_USE_CRC=0)\n");
+    printf("SdDemo_CrcChecksum CRC / checksum: skipped (FM_USE_CRC=0)\n");
 #endif /* FM_USE_CRC */
 }
 
 /*----------------------------------------------------------------------*/
-/* exS_10 — BMP Image + Scale + Convert                                  */
+/* SdDemo_BmpScaleConvert — BMP Image + Scale + Convert                                  */
 /*----------------------------------------------------------------------*/
 
-void exS_10_file_BMP_Image_Scale_Convert(void)
+void SdDemo_BmpScaleConvert(void)
 {
     FM_ImageInfo info;
 
@@ -624,7 +624,7 @@ void exS_10_file_BMP_Image_Scale_Convert(void)
                 pixels[i + 2] = 128;
             }
 
-        sd_step("Image_Save", Image_Save("/test.bmp", &img));
+        sd_demo_step("Image_Save", Image_Save("/test.bmp", &img));
         printf("Saved 4x4 BMP to /test.bmp\n");
     }
 
@@ -671,7 +671,7 @@ void exS_10_file_BMP_Image_Scale_Convert(void)
     }
 
     /* 5. Resize فایل مستقیم */
-    sd_step("Image_ResizeFile",
+    sd_demo_step("Image_ResizeFile",
             Image_ResizeFile("/test.bmp", "/small.bmp", 2, 2,
                              FM_SCALE_NEAREST));
     Image_GetInfo("/small.bmp", &info);
@@ -679,4 +679,4 @@ void exS_10_file_BMP_Image_Scale_Convert(void)
            (unsigned long)info.width, (unsigned long)info.height);
 }
 
-#endif /* EXAMPLES_FILE_SDCARD_ALL_H_ */
+#endif /* FM_TOPAPI_SDCARD_DEMOS_H */

@@ -5,28 +5,28 @@
  * این فایل جایگزین/بازسازی‌شده‌ی `examples_file.h` است که در `defines.h`
  * include می‌شود. همه‌ی توابعی که `main.c` صدا می‌زند اینجاست:
  *
- *     ex_1_file_basic                    (File Basics)
- *     ex_2_file_copy_move_rename         (Copy / Move / Rename)
- *     ex_3_file_advance                  (Advanced handle)
- *     ex_4_file_directory                (Directories)
- *     ex_5_file_json                     (JSON)
- *     ex_6_file_text_line_edit           (Text line editing)
- *     ex_7_file_Crash_Safe_Writes        (Safe/crash-safe writes)
- *     ex_8_file_Data_Logger              (CSV logger)
- *     ex_9_file_crc_cheaksum             (CRC / checksum)
- *     ex_10_file_BMP_Image_Scale_Convert (BMP + scale + convert)
+ *     FileDemo_Basic                    (File Basics)
+ *     FileDemo_CopyMoveRename         (Copy / Move / Rename)
+ *     FileDemo_Advanced                  (Advanced handle)
+ *     FileDemo_Directory                (Directories)
+ *     FileDemo_Json                     (JSON)
+ *     FileDemo_TextLineEdit           (Text line editing)
+ *     FileDemo_CrashSafeWrites        (Safe/crash-safe writes)
+ *     FileDemo_DataLogger              (CSV logger)
+ *     FileDemo_CrcChecksum             (CRC / checksum)
+ *     FileDemo_BmpScaleConvert (BMP + scale + convert)
  *
  * طراحی:
  *   - یک بافر ۱۲۸KB در `.sdram_buffers` برای RAM-disk استفاده می‌شود.
  *   - هر مثال مستقل است: در ابتدا RAM را mount می‌کند و در انتها
- *     unmount + unregister می‌کند تا بعد از بلوک `ex_*` بتوانیم در
- *     `SD_examples_begin()` دوباره "/" را روی SD بگذاریم.
+ *     unmount + unregister می‌کند تا بعد از بلوک `FileDemo_*` بتوانیم در
+ *     `SdCard_Begin()` دوباره "/" را روی SD بگذاریم.
  *   - چون توابع static هستند و این فایل توسط چند کد (`main.c`, `mdma.c`, ...)
  *     به‌صورت یکسان include می‌شود، هیچ نماد (symbol) تکراری در لینک نمی‌دهد.
  */
 
-#ifndef BOARD_EXAMPLES_FILE_H_
-#define BOARD_EXAMPLES_FILE_H_
+#ifndef FM_TOPAPI_FILE_DEMOS_H
+#define FM_TOPAPI_FILE_DEMOS_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -46,21 +46,21 @@
 /* ------------------------------------------------------------------ */
 /* Setup / teardown                                                   */
 /* ------------------------------------------------------------------ */
-/* نکته‌ی مهم: در main این برد Ex35_Sd_FatRoot() قبل از این بلوک فراخوانی
+/* نکته‌ی مهم: در main این برد UsbSd_FatRoot() قبل از این بلوک فراخوانی
  * می‌شود و "/" را روی SD مونت کرده است. پس این مثال‌ها همان "/" آماده را
  * استفاده می‌کنند و هیچ RAM-disk تکراری/بزرگی نمی‌سازیم. این هم دقیقاً
  * همان چیزی است که بهینه‌سازی بافرها را حفظ می‌کند (بدون ۱۲۸KB اضافه).
  */
 static FM_Bool g_file_ready = FM_FALSE;
 
-static void ex_file_step(const char *what, FM_Result r)
+static void file_demo_step(const char *what, FM_Result r)
 {
     /* چاپ خطا فقط وقتی چیزی شکست خورده — خروجی تمیز می‌ماند */
     if (r != FM_OK)
         printf("  !! %s -> %s (%d)\n", what, File_GetErrorString(r), (int)r);
 }
 
-static void ex_file_begin(void)
+static void file_demo_begin(void)
 {
     FM_Result r;
     FM_Bool mounted = FM_FALSE;
@@ -69,38 +69,38 @@ static void ex_file_begin(void)
         return;
 
     r = FileManager_Init();
-    ex_file_step("FileManager_Init", r);
+    file_demo_step("FileManager_Init", r);
     if (r != FM_OK)
         return;
 
     (void)FS_IsMounted("/", &mounted);
     if (!mounted)
     {
-        printf("  !! ex_file: '/' is not mounted - call Ex35_Sd_FatRoot() "
-               "or SD_examples_begin() first\n");
+        printf("  !! FileDemo: '/' is not mounted - call UsbSd_FatRoot() "
+               "or SdCard_Begin() first\n");
         return;
     }
 
     g_file_ready = FM_TRUE;
 }
 
-static void ex_file_end(void)
+static void file_demo_end(void)
 {
-    /* "/" متعلق به SD است و توسط Ex35_Sd_FatRoot / SD_examples_begin مدیریت
+    /* "/" متعلق به SD است و توسط UsbSd_FatRoot / SdCard_Begin مدیریت
      * می‌شود؛ این‌جا آن را unmount نمی‌کنیم. */
     g_file_ready = FM_FALSE;
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_1 — File Basics                                                 */
+/* FileDemo_Basic — File Basics                                                 */
 /* ------------------------------------------------------------------ */
-static void ex_1_file_basic(void)
+static void FileDemo_Basic(void)
 {
     char buf[128];
     FM_Bool exists;
     uint64_t size;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     File_WriteText("/greeting.txt", "Hello, FileManager!");
@@ -130,40 +130,40 @@ static void ex_1_file_basic(void)
     File_Exists("/greeting.txt", &exists);
     printf("Deleted? %s\n", exists ? "no" : "yes");
 
-    ex_file_end();
+    file_demo_end();
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_2 — Copy, Move, Rename                                          */
+/* FileDemo_CopyMoveRename — Copy, Move, Rename                                          */
 /* ------------------------------------------------------------------ */
-static void rmc_copy_progress(uint64_t done, uint64_t total, void *ud)
+static void file_demo_copy_progress(uint64_t done, uint64_t total, void *ud)
 {
     (void)ud;
     printf("  copy: %lu / %lu\n", (unsigned long)done, (unsigned long)total);
 }
 
-static void ex_2_file_copy_move_rename(void)
+static void FileDemo_CopyMoveRename(void)
 {
     char buf[128];
     FM_Bool exists;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     File_WriteText("/original.txt", "This is the original file content.");
 
     printf("Copy:\n");
-    ex_file_step("File_Copy", File_Copy("/original.txt", "/copy.txt",
-                                        rmc_copy_progress, NULL));
+    file_demo_step("File_Copy", File_Copy("/original.txt", "/copy.txt",
+                                        file_demo_copy_progress, NULL));
     File_ReadText("/copy.txt", buf, sizeof(buf), NULL);
     printf("  content: %s\n", buf);
 
-    ex_file_step("File_Rename", File_Rename("/copy.txt", "/renamed.txt"));
+    file_demo_step("File_Rename", File_Rename("/copy.txt", "/renamed.txt"));
     File_ReadText("/renamed.txt", buf, sizeof(buf), NULL);
     printf("Renamed: %s\n", buf);
 
     Directory_Create("/backup");               /* بار دوم: EXISTS، عادی */
-    ex_file_step("File_Move",
+    file_demo_step("File_Move",
                  File_Move("/renamed.txt", "/backup/final.txt", NULL, NULL));
     File_ReadText("/backup/final.txt", buf, sizeof(buf), NULL);
     printf("Moved: %s\n", buf);
@@ -171,24 +171,24 @@ static void ex_2_file_copy_move_rename(void)
     File_Exists("/renamed.txt", &exists);
     printf("Original exists? %s\n", exists ? "yes" : "no");
 
-    ex_file_end();
+    file_demo_end();
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_3 — Advanced File Handle                                         */
+/* FileDemo_Advanced — Advanced File Handle                                         */
 /* ------------------------------------------------------------------ */
-static void ex_3_file_advance(void)
+static void FileDemo_Advanced(void)
 {
     FM_File *f;
     uint64_t pos, size;
     char buf[32];
     uint32_t n;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     f = File_Open("/data.bin", FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
-    if (!f) { printf("open failed\n"); ex_file_end(); return; }
+    if (!f) { printf("open failed\n"); file_demo_end(); return; }
     File_Write(f, "AAAA", 4, &n);
     File_Write(f, "BBBB", 4, &n);
     File_Write(f, "CCCC", 4, &n);
@@ -232,13 +232,13 @@ static void ex_3_file_advance(void)
     printf("EOF? %s\n", File_EOF(f) ? "yes" : "no");
     File_Close(f);
 
-    ex_file_end();
+    file_demo_end();
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_4 — Directories                                                 */
+/* FileDemo_Directory — Directories                                                 */
 /* ------------------------------------------------------------------ */
-static FM_Result dir_print_item(const FM_FileInfo *info, void *ud)
+static FM_Result file_demo_print_item(const FM_FileInfo *info, void *ud)
 {
     (void)ud;
     printf("  [%s] %-18s %lu bytes\n",
@@ -247,14 +247,14 @@ static FM_Result dir_print_item(const FM_FileInfo *info, void *ud)
     return FM_OK;
 }
 
-static void ex_4_file_directory(void)
+static void FileDemo_Directory(void)
 {
     FM_Dir *d;
     FM_DirEntry entry;
     uint32_t count;
     uint64_t total;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     Directory_Create("/logs");
@@ -274,7 +274,7 @@ static void ex_4_file_directory(void)
     Directory_Close(d);
 
     printf("\nRecursive scan:\n");
-    Directory_ScanRecursive("/", dir_print_item, NULL, NULL, NULL);
+    Directory_ScanRecursive("/", file_demo_print_item, NULL, NULL, NULL);
 
     Directory_Count("/logs", FM_ITEM_FILE, &count);
     printf("\nFiles in /logs: %u\n", (unsigned)count);
@@ -289,16 +289,16 @@ static void ex_4_file_directory(void)
         printf("  %s\n", entry.name);
     Directory_Close(d);
 
-    ex_file_end();
+    file_demo_end();
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_5 — JSON                                                       */
+/* FileDemo_Json — JSON                                                       */
 /* ------------------------------------------------------------------ */
-static void ex_5_file_json(void)
+static void FileDemo_Json(void)
 {
 #if FM_USE_JSON
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     {
@@ -367,17 +367,17 @@ static void ex_5_file_json(void)
         printf("[api] baud = %d\n", (int)baud);
     }
 
-    ex_file_end();
+    file_demo_end();
 #else
-    printf("ex_5 JSON: skipped (FM_USE_JSON=0)\n");
+    printf("FileDemo_Json JSON: skipped (FM_USE_JSON=0)\n");
 #endif /* FM_USE_JSON */
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_6 — Text Line Editing                                           */
+/* FileDemo_TextLineEdit — Text Line Editing                                           */
 /* ------------------------------------------------------------------ */
 #if FM_USE_TEXT
-static void txt_show(const char *label, const char *path)
+static void file_demo_show_text(const char *label, const char *path)
 {
     char buf[512];
     printf("--- %s ---\n", label);
@@ -386,26 +386,26 @@ static void txt_show(const char *label, const char *path)
 }
 #endif /* FM_USE_TEXT */
 
-static void ex_6_file_text_line_edit(void)
+static void FileDemo_TextLineEdit(void)
 {
 #if FM_USE_TEXT
     size_t n;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     File_WriteText("/cfg.txt",
                    "host=192.168.1.1\nport=8080\ntimeout=30\ndebug=false\n");
-    txt_show("Original", "/cfg.txt");
+    file_demo_show_text("Original", "/cfg.txt");
 
     Text_Replace("/cfg.txt", "8080", "9090");
-    txt_show("Replace 8080->9090", "/cfg.txt");
+    file_demo_show_text("Replace 8080->9090", "/cfg.txt");
 
     Text_InsertLine("/cfg.txt", 3, "retry=3");
-    txt_show("InsertLine 3", "/cfg.txt");
+    file_demo_show_text("InsertLine 3", "/cfg.txt");
 
     Text_DeleteLine("/cfg.txt", 4);
-    txt_show("DeleteLine 4", "/cfg.txt");
+    file_demo_show_text("DeleteLine 4", "/cfg.txt");
 
     Text_CountLines("/cfg.txt", &n);
     printf("Lines: %lu\n", (unsigned long)n);
@@ -426,17 +426,17 @@ static void ex_6_file_text_line_edit(void)
         File_Close(f);
     }
 
-    ex_file_end();
+    file_demo_end();
 #else
-    printf("ex_6 text line edit: skipped (FM_USE_TEXT=0)\n");
+    printf("FileDemo_TextLineEdit text line edit: skipped (FM_USE_TEXT=0)\n");
 #endif /* FM_USE_TEXT */
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_7 — Safe / Crash-Safe Writes                                    */
+/* FileDemo_CrashSafeWrites — Safe / Crash-Safe Writes                                    */
 /* ------------------------------------------------------------------ */
 #if FM_USE_SAFE_WRITE
-static void safe_show(const char *label)
+static void file_demo_show_safe(const char *label)
 {
     char buf[256];
     File_ReadText("/settings.txt", buf, sizeof(buf), NULL);
@@ -444,40 +444,40 @@ static void safe_show(const char *label)
 }
 #endif /* FM_USE_SAFE_WRITE */
 
-static void ex_7_file_Crash_Safe_Writes(void)
+static void FileDemo_CrashSafeWrites(void)
 {
 #if FM_USE_SAFE_WRITE
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     File_WriteText("/settings.txt", "version=1");
-    safe_show("Initial");
+    file_demo_show_safe("Initial");
 
     File_SafeReplace("/settings.txt", "version=2", 9);
-    safe_show("SafeReplace");
+    file_demo_show_safe("SafeReplace");
 
     File_SafeWriteText("/settings.txt", "version=3");
-    safe_show("SafeWriteText");
+    file_demo_show_safe("SafeWriteText");
 
     File_SafeAppend("/settings.txt", "\nextra=data", 11);
-    safe_show("SafeAppend");
+    file_demo_show_safe("SafeAppend");
 
     File_Transaction("/settings.txt", "version=FINAL", 14);
-    safe_show("Transaction");
+    file_demo_show_safe("Transaction");
 
     File_Recover("/settings.txt");
     printf("  Recover done (no stale .fm_tmp).\n");
 
-    ex_file_end();
+    file_demo_end();
 #else
-    printf("ex_7 crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
+    printf("FileDemo_CrashSafeWrites crash-safe writes: skipped (FM_USE_SAFE_WRITE=0)\n");
 #endif /* FM_USE_SAFE_WRITE */
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_8 — Data Logger (CSV)                                           */
+/* FileDemo_DataLogger — Data Logger (CSV)                                           */
 /* ------------------------------------------------------------------ */
-static void ex_8_file_Data_Logger(void)
+static void FileDemo_DataLogger(void)
 {
 #if FM_USE_DATA_LOGGER
     FM_Logger lg;
@@ -485,7 +485,7 @@ static void ex_8_file_Data_Logger(void)
     FM_LoggerInfo info;
     float values[3];
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     Directory_Create("/logs");
@@ -495,7 +495,7 @@ static void ex_8_file_Data_Logger(void)
     cfg.max_files     = 3;
     cfg.flush_records = 5;
 
-    ex_file_step("Logger_Init",
+    file_demo_step("Logger_Init",
                  Logger_Init(&lg, "/logs", "sensor", FM_LOG_FORMAT_CSV, &cfg));
     Logger_Start(&lg);
 
@@ -549,16 +549,16 @@ static void ex_8_file_Data_Logger(void)
         Directory_Close(d);
     }
 
-    ex_file_end();
+    file_demo_end();
 #else
-    printf("ex_8 data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
+    printf("FileDemo_DataLogger data logger: skipped (FM_USE_DATA_LOGGER=0)\n");
 #endif /* FM_USE_DATA_LOGGER */
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_9 — CRC & Checksum                                              */
+/* FileDemo_CrcChecksum — CRC & Checksum                                              */
 /* ------------------------------------------------------------------ */
-static void ex_9_file_crc_cheaksum(void)
+static void FileDemo_CrcChecksum(void)
 {
 #if FM_USE_CRC
     const char *data = "123456789";
@@ -574,7 +574,7 @@ static void ex_9_file_crc_cheaksum(void)
     printf("Checksum32   = 0x%08lX\n",
            (unsigned long)CRC_Checksum32(data, len));
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     {
@@ -587,20 +587,20 @@ static void ex_9_file_crc_cheaksum(void)
                (unsigned long)CRC_Calculate32(text, rd), (unsigned long)rd);
     }
 
-    ex_file_end();
+    file_demo_end();
 #else
-    printf("ex_9 CRC / checksum: skipped (FM_USE_CRC=0)\n");
+    printf("FileDemo_CrcChecksum CRC / checksum: skipped (FM_USE_CRC=0)\n");
 #endif /* FM_USE_CRC */
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_10 — BMP Image + Scale + Convert                                 */
+/* FileDemo_BmpScaleConvert — BMP Image + Scale + Convert                                 */
 /* ------------------------------------------------------------------ */
-static void ex_10_file_BMP_Image_Scale_Convert(void)
+static void FileDemo_BmpScaleConvert(void)
 {
     FM_ImageInfo info;
 
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     {
@@ -628,7 +628,7 @@ static void ex_10_file_BMP_Image_Scale_Convert(void)
             }
         }
 
-        ex_file_step("Image_Save", Image_Save("/test.bmp", &img));
+        file_demo_step("Image_Save", Image_Save("/test.bmp", &img));
         printf("Saved 4x4 BMP to /test.bmp\n");
     }
 
@@ -665,23 +665,23 @@ static void ex_10_file_BMP_Image_Scale_Convert(void)
         dst.data = dst_px;
         dst.data_capacity = sizeof(dst_px);
 
-        ex_file_step("Image_Convert",
+        file_demo_step("Image_Convert",
                      Image_Convert(&src, &dst, FM_PIXEL_RGB565));
         printf("Converted RGB888 -> RGB565: %u bytes\n",
                (unsigned)dst.data_size);
     }
 
-    ex_file_step("Image_ResizeFile",
+    file_demo_step("Image_ResizeFile",
                  Image_ResizeFile("/test.bmp", "/small.bmp", 2, 2,
                                   FM_SCALE_NEAREST));
     Image_GetInfo("/small.bmp", &info);
     printf("Resized file: %ux%u\n", info.width, info.height);
 
-    ex_file_end();
+    file_demo_end();
 }
 
 /* ------------------------------------------------------------------ */
-/* ex_11 — کدک‌های جدید صدا: WAV(ADPCM/A-law/µ-law) + FLAC + Vorbis   */
+/* FileDemo_AudioCodecs — کدک‌های جدید صدا: WAV(ADPCM/A-law/µ-law) + FLAC + Vorbis   */
 /*         + Opus (دیکد واقعی پس از PR #25)                           */
 /* ------------------------------------------------------------------ */
 /*
@@ -704,7 +704,7 @@ static void ex_10_file_BMP_Image_Scale_Convert(void)
  * آهنگ‌های واقعی به SDRAM و سقف FM_OPUS_MAX_PCM_BYTES دقت کنید.
  */
 #if FM_USE_AUDIO
-static const char *ex_11_find(const char *name)
+static const char *file_demo_find_audio(const char *name)
 {
     static char path[80];
     FM_Bool exists = FM_FALSE;
@@ -718,9 +718,9 @@ static const char *ex_11_find(const char *name)
     return NULL;
 }
 
-static void ex_11_try(const char *name)
+static void file_demo_try_audio(const char *name)
 {
-    const char *path = ex_11_find(name);
+    const char *path = file_demo_find_audio(name);
     FM_Audio a;
     FM_AudioInfo info;
     FM_Result r;
@@ -769,35 +769,35 @@ static void ex_11_try(const char *name)
 }
 #endif /* FM_USE_AUDIO */
 
-static void ex_11_audio_codecs(void)
+static void FileDemo_AudioCodecs(void)
 {
 #if FM_USE_AUDIO
-    ex_file_begin();
+    file_demo_begin();
     if (!g_file_ready) return;
 
     printf("--- audio codecs (new decoders) ---\n");
-    ex_11_try("wav_adpcm_ima_22k.wav");
-    ex_11_try("wav_alaw_8k.wav");
-    ex_11_try("wav_mulaw_8k.wav");
+    file_demo_try_audio("wav_adpcm_ima_22k.wav");
+    file_demo_try_audio("wav_alaw_8k.wav");
+    file_demo_try_audio("wav_mulaw_8k.wav");
 #if FM_USE_FLAC
-    ex_11_try("test_flac.flac");
+    file_demo_try_audio("test_flac.flac");
 #else
     printf("  %-24s skip (FM_USE_FLAC=0)\n", "test_flac.flac");
 #endif
 #if FM_USE_VORBIS
-    ex_11_try("test_vorbis.ogg");
+    file_demo_try_audio("test_vorbis.ogg");
 #else
     printf("  %-24s skip (FM_USE_VORBIS=0)\n", "test_vorbis.ogg");
 #endif
 #if FM_USE_OPUS
-    ex_11_try("test_opus.ogg");
+    file_demo_try_audio("test_opus.ogg");
 #else
     printf("  %-24s skip (FM_USE_OPUS=0)\n", "test_opus.ogg");
 #endif
     printf("(peak>0 یعنی دیکد واقعی؛ silent یعنی fallback/سکوت)\n");
 
-    ex_file_end();
+    file_demo_end();
 #endif /* FM_USE_AUDIO */
 }
 
-#endif /* BOARD_EXAMPLES_FILE_H_ */
+#endif /* FM_TOPAPI_FILE_DEMOS_H */

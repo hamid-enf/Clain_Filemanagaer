@@ -6,7 +6,7 @@
  *
  *  طراحی (نسخهٔ بازنویسی‌شده):
  *
- *   UART DMA ISR  →  فقط جداکردن خط فرمان (Process_UART_Packet) و
+ *   UART DMA ISR  →  فقط جداکردن خط فرمان (cmd_process_uart_packet) و
  *                    کپی‌کردن آن در pending_cmd. هیچ printf/FM_Log،
  *                    هیچ کار فایل/SD/I2S اینجا انجام نمی‌شود — همهٔ
  *                    آن‌ها در ISR خطر هنگ دارند (FM_Log خودش UART است).
@@ -50,7 +50,7 @@ static volatile uint8_t pending_overflow;
 /*   2 REPEAT_ONE  : تمام شد → همین ترک دوباره                      */
 /*   3 REPEAT_ALL  : تمام شد → بعدی، آخر → اول (لوپ پوشه، قدیمی)    */
 /* ------------------------------------------------------------------ */
-static void set_play_mode(int mode)
+static void cmd_set_play_mode(int mode)
 {
     const char *n = (mode == FM_PLAY_MODE_STOP)       ? "STOP" :
                     (mode == FM_PLAY_MODE_NEXT)       ? "NEXT" :
@@ -64,10 +64,10 @@ static void set_play_mode(int mode)
 /* ------------------------------------------------------------------ */
 /* پوش‌های کوچک برای فرمان‌های پارامتری (جدول تابع بدون آرگومان می‌خواهد) */
 /* ------------------------------------------------------------------ */
-static void cmd_mode0(void) { set_play_mode((int)FM_PLAY_MODE_STOP); }
-static void cmd_mode1(void) { set_play_mode((int)FM_PLAY_MODE_NEXT); }
-static void cmd_mode2(void) { set_play_mode((int)FM_PLAY_MODE_REPEAT_ONE); }
-static void cmd_mode3(void) { set_play_mode((int)FM_PLAY_MODE_REPEAT_ALL); }
+static void cmd_mode0(void) { cmd_set_play_mode((int)FM_PLAY_MODE_STOP); }
+static void cmd_mode1(void) { cmd_set_play_mode((int)FM_PLAY_MODE_NEXT); }
+static void cmd_mode2(void) { cmd_set_play_mode((int)FM_PLAY_MODE_REPEAT_ONE); }
+static void cmd_mode3(void) { cmd_set_play_mode((int)FM_PLAY_MODE_REPEAT_ALL); }
 
 /* --- SimpleImage (اسلایدشو) --------------------------------------- */
 static void cmd_start(void) { printf("SimpleImage_Begin\n");    SimpleImage_Begin(); }
@@ -117,28 +117,28 @@ typedef struct
 static const CmdMusic_Entry cmd_table[] =
 {
     /* --- موزیک (SimpleAudio) --- */
-    { "next",   next   },
-    { "prev",   prev   },
-    { "np10",   np10   },
-    { "pn10",   pn10   },
-    { "stop",   stop   },
-    { "info",   info   },
-    { "start",  start  },
-    { "pause",  pause  },
-    { "pauset", pauset },
-    { "resume", resume },
-    { "vol50",  vol50  },
-    { "vol90",  vol90  },
+    { "next",   CmdMusic_Next },
+    { "prev",   CmdMusic_Prev },
+    { "np10",   CmdMusic_Forward10 },
+    { "pn10",   CmdMusic_Back10 },
+    { "stop",   CmdMusic_Stop },
+    { "info",   CmdMusic_Info },
+    { "start",  CmdMusic_Start },
+    { "pause",  CmdMusic_Pause },
+    { "pauset", CmdMusic_TogglePause },
+    { "resume", CmdMusic_Resume },
+    { "vol50",  CmdMusic_Volume50 },
+    { "vol90",  CmdMusic_Volume90 },
     { "mode0",  cmd_mode0 },
     { "mode1",  cmd_mode1 },
     { "mode2",  cmd_mode2 },
     { "mode3",  cmd_mode3 },
 
-    /* --- خواندن PCM خام (Example 33) --- */
-    { "dtrd",   DataRead     },
-    { "dtrdm",  DataReadMono },
+    /* --- خواندن PCM خام (audio_record_with_tap.h) --- */
+    { "dtrd",   Music_DataRead     },
+    { "dtrdm",  Music_DataReadMono },
 
-    /* --- Example 33: قلاب‌ها/ضبط/کپی — همه اتوماتیک از همین‌جا ---
+    /* --- audio_record_with_tap.h: قلاب‌ها/ضبط/کپی — همه اتوماتیک از همین‌جا ---
      * (توابع در main.c، بخش «قلاب‌های PCM» — با توضیح فارسی قبل/بعد ولوم) */
     { "tap1",    Music_TapBoostOn  },   /* نرمالایزر بلندی (AGC) روشن */
     { "tap0",    Music_TapBoostOff },   /* نرمالایزر خاموش */
@@ -195,7 +195,7 @@ static const CmdMusic_Entry cmd_table[] =
 /* ------------------------------------------------------------------ */
 /* دیسپچ — فقط از حلقهٔ اصلی صدا زده می‌شود.                          */
 /* ------------------------------------------------------------------ */
-static void p_data_dispatch(const uint8_t *data, uint32_t len)
+static void cmd_dispatch(const uint8_t *data, uint32_t len)
 {
     char cmd[CMD_BUF_SIZE];
     uint32_t i;
@@ -233,7 +233,7 @@ static void p_data_dispatch(const uint8_t *data, uint32_t len)
 /* ------------------------------------------------------------------ */
 /* ISR-safe front end: فقط بافر می‌کند — نه printf، نه فایل، نه I2S. */
 /* ------------------------------------------------------------------ */
-static void p_data(uint32_t len)
+static void cmd_take_line(uint32_t len)
 {
     if (len == 0u)
     {
@@ -284,13 +284,13 @@ void CmdMusic_ProcessPending(void)
     }
 
     cmd[len] = '\0';
-    p_data_dispatch(cmd, len);
+    cmd_dispatch(cmd, len);
 }
 
 /* ------------------------------------------------------------------ */
 /* جداکنندهٔ خط فرمان از بایت‌های DMA — بدون printf (در ISR اجرا می‌شود) */
 /* ------------------------------------------------------------------ */
-static void Process_UART_Packet(const uint8_t *data, uint32_t len)
+static void cmd_process_uart_packet(const uint8_t *data, uint32_t len)
 {
     uint32_t i;
 
@@ -304,7 +304,7 @@ static void Process_UART_Packet(const uint8_t *data, uint32_t len)
             {
                 len_p--;
             }
-            p_data(len_p);
+            cmd_take_line(len_p);
             len_p = 0u;
         }
         else
@@ -346,7 +346,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         chunk = current_pos - old_pos;
         SCB_InvalidateDCache_by_Addr(
             (uint32_t *)&uart_rx_dma_buffer[old_pos], chunk);
-        Process_UART_Packet(&uart_rx_dma_buffer[old_pos], chunk);
+        cmd_process_uart_packet(&uart_rx_dma_buffer[old_pos], chunk);
     }
     else
     {
@@ -354,14 +354,14 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         chunk = UART_RX_BUF_SIZE - old_pos;
         SCB_InvalidateDCache_by_Addr(
             (uint32_t *)&uart_rx_dma_buffer[old_pos], chunk);
-        Process_UART_Packet(&uart_rx_dma_buffer[old_pos], chunk);
+        cmd_process_uart_packet(&uart_rx_dma_buffer[old_pos], chunk);
 
         if (current_pos > 0u)
         {
             chunk = current_pos;
             SCB_InvalidateDCache_by_Addr(
                 (uint32_t *)&uart_rx_dma_buffer[0], chunk);
-            Process_UART_Packet(&uart_rx_dma_buffer[0], chunk);
+            cmd_process_uart_packet(&uart_rx_dma_buffer[0], chunk);
         }
     }
 

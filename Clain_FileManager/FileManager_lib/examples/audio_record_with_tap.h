@@ -1,5 +1,5 @@
 /*
- * Example 33 — Audio Record with Pre-I2S Tap (MyPCM) + Video Audio Access
+ * audio_record_with_tap.h — Audio Record with Pre-I2S Tap (MyPCM) + Video Audio Access
  *
  *   SimpleAudio:  Pre/Post PCM taps before I2S, DSP, and recording
  *   SimpleVideo:  Frame+Audio access, global audio enable flag
@@ -27,8 +27,8 @@
  *      tap or mic, then SimpleAudio_RecStop().
  */
 
-#ifndef FM_EXAMPLE_33_H
-#define FM_EXAMPLE_33_H
+#ifndef FM_TOPAPI_AUDIO_RECORD_WITH_TAP_H
+#define FM_TOPAPI_AUDIO_RECORD_WITH_TAP_H
 
 #include "simple_audio.h"
 #include "simple_video.h"
@@ -43,7 +43,7 @@ static uint8_t do_record = 0;
 
 /* Pre-gain tap: raw decoded PCM, editable. Here we apply a simple
  * 6 dB boost as DSP example and also copy to recording ring. */
-static void my_pre_dsp(void *ctx, int16_t *pcm, size_t samples,
+static void audio_record_pre_dsp(void *ctx, int16_t *pcm, size_t samples,
                        uint32_t rate, uint16_t ch)
 {
     (void)ctx; (void)rate; (void)ch;
@@ -63,7 +63,7 @@ static void my_pre_dsp(void *ctx, int16_t *pcm, size_t samples,
 
 /* Post-gain tap: exactly what will be sent to I2S/DMA, after volume.
  * Useful for VU meter, FFT, or logging. Read-only is recommended. */
-static void my_post_tap(void *ctx, int16_t *pcm, size_t samples,
+static void audio_record_post_tap(void *ctx, int16_t *pcm, size_t samples,
                         uint32_t rate, uint16_t ch)
 {
     (void)ctx; (void)pcm; (void)samples; (void)rate; (void)ch;
@@ -72,7 +72,7 @@ static void my_post_tap(void *ctx, int16_t *pcm, size_t samples,
 
 /* Track lifecycle callbacks: the DSP learns which track is being processed.
  * start = path + codec/rate/channels; end = same path when it finishes. */
-static void my_audio_track_start(void *ctx, const char *path,
+static void audio_record_track_start(void *ctx, const char *path,
                                  const FM_AudioInfo *info)
 {
     (void)ctx;
@@ -80,7 +80,7 @@ static void my_audio_track_start(void *ctx, const char *path,
     /* e.g. log "processing <path>", switch a DSP preset by codec, etc. */
     (void)info; // info->codec / sample_rate / channels
 }
-static void my_audio_track_end(void *ctx, const char *path,
+static void audio_record_track_end(void *ctx, const char *path,
                                const FM_AudioInfo *info)
 {
     (void)ctx; (void)info;
@@ -88,25 +88,25 @@ static void my_audio_track_end(void *ctx, const char *path,
     (void)path;
 }
 
-static void ex33_audio_tap_setup(void)
+static void audio_record_tap_setup(void)
 {
-    SimpleAudio_SetPrePcmTap(my_pre_dsp, NULL);
-    SimpleAudio_SetPostPcmTap(my_post_tap, NULL);
-    /* Legacy alias still works: SimpleAudio_SetPcmTap(my_post_tap, NULL) */
+    SimpleAudio_SetPrePcmTap(audio_record_pre_dsp, NULL);
+    SimpleAudio_SetPostPcmTap(audio_record_post_tap, NULL);
+    /* Legacy alias still works: SimpleAudio_SetPcmTap(audio_record_post_tap, NULL) */
     /* Tell the DSP which music is playing / finished (after Begin). */
-    SimpleAudio_SetTrackStart(my_audio_track_start, NULL);
-    SimpleAudio_SetTrackEnd(my_audio_track_end, NULL);
+    SimpleAudio_SetTrackStart(audio_record_track_start, NULL);
+    SimpleAudio_SetTrackEnd(audio_record_track_end, NULL);
 }
 
 /* Recording flow: start, pump via tap, stop.
  * Call this from main loop, not inside tap. */
-static FM_Result ex33_record_demo(void)
+static FM_Result audio_record_demo(void)
 {
     FM_Result r;
     r = SimpleAudio_RecStart("/sd/rec", 16000, 1);
     if (r != FM_OK) return r;
     do_record = 1;
-    /* While music plays, my_pre_dsp will fill rec_ring.
+    /* While music plays, audio_record_pre_dsp will fill rec_ring.
      * In main loop, drain it: */
     // if (rec_ring_len) {
     //     SimpleAudio_RecWrite(rec_ring, rec_ring_len / 1u); // mono
@@ -120,14 +120,14 @@ static FM_Result ex33_record_demo(void)
 
 /* ---------- 2. Video Frame + Audio Access, Global Audio Flag ---------- */
 
-static void my_video_pre_tap(void *ctx, int16_t *pcm, size_t samples,
+static void audio_record_video_pre_tap(void *ctx, int16_t *pcm, size_t samples,
                              uint32_t rate, uint16_t ch)
 {
     (void)ctx; (void)rate; (void)ch;
     /* Video audio DSP before I2S — e.g., ducking, echo, or muting */
     for (size_t i = 0; i < samples; i++) pcm[i] = (int16_t)(pcm[i] * 0.5);
 }
-static void my_video_post_tap(void *ctx, int16_t *pcm, size_t samples,
+static void audio_record_video_post_tap(void *ctx, int16_t *pcm, size_t samples,
                               uint32_t rate, uint16_t ch)
 {
     (void)ctx; (void)pcm; (void)samples; (void)rate; (void)ch;
@@ -135,20 +135,20 @@ static void my_video_post_tap(void *ctx, int16_t *pcm, size_t samples,
 
 /* Video track + frame callbacks: know which video started/ended, and get
  * each decoded frame even when there is no display (data-only). */
-static void my_video_track_start(void *ctx, const char *path,
+static void audio_record_video_track_start(void *ctx, const char *path,
                                  uint32_t w, uint32_t h, uint32_t fps)
 {
     (void)ctx; (void)w; (void)h; (void)fps;
     /* e.g. log "processing <path>", reset a per-video feature extractor */
     (void)path;
 }
-static void my_video_track_end(void *ctx, const char *path)
+static void audio_record_video_track_end(void *ctx, const char *path)
 {
     (void)ctx;
     /* e.g. finalize/store a whole-video result now that <path> ended */
     (void)path;
 }
-static void my_video_frame(void *ctx, const void *px, uint16_t w,
+static void audio_record_video_frame(void *ctx, const void *px, uint16_t w,
                            uint16_t h, FM_PixelFormat fmt, size_t bytes)
 {
     (void)ctx; (void)w; (void)h; (void)fmt; (void)bytes;
@@ -156,20 +156,20 @@ static void my_video_frame(void *ctx, const void *px, uint16_t w,
      * double-buffers, so copy out if you keep it past this call. */
 }
 
-static void ex33_video_setup(void)
+static void audio_record_video_setup(void)
 {
     /* If you only need pictures (image processing), disable video audio
      * to save SD bandwidth and decoder CPU. Music is not affected. */
     // SimpleVideo_EnableAudio(0); // pictures only
     SimpleVideo_EnableAudio(1); // audio + pictures
 
-    SimpleVideo_SetPrePcmTap(my_video_pre_tap, NULL);
-    SimpleVideo_SetPostPcmTap(my_video_post_tap, NULL);
+    SimpleVideo_SetPrePcmTap(audio_record_video_pre_tap, NULL);
+    SimpleVideo_SetPostPcmTap(audio_record_video_post_tap, NULL);
 
     /* Which video started/ended + per-frame data (data-only aware). */
-    SimpleVideo_SetTrackStartCallback(my_video_track_start, NULL);
-    SimpleVideo_SetTrackEndCallback(my_video_track_end, NULL);
-    SimpleVideo_SetFrameCallback(my_video_frame, NULL);
+    SimpleVideo_SetTrackStartCallback(audio_record_video_track_start, NULL);
+    SimpleVideo_SetTrackEndCallback(audio_record_video_track_end, NULL);
+    SimpleVideo_SetFrameCallback(audio_record_video_frame, NULL);
 
     /* If you want to advance to the NEXT video by hand (not auto):
      *   SimpleVideo_SetPlayMode(FM_PLAY_MODE_STOP);  // stop at EOF
@@ -199,7 +199,7 @@ static void ex33_video_setup(void)
  * most one open directory handle, so it works across QSPI <-> SD.
  * Pass NULL/NULL for the documented board demo; explicit paths make
  * the helper reusable (and testable on the host POSIX backend). */
-static FM_Result ex33_folder_copy_demo(const char *src, const char *dst)
+static FM_Result audio_record_folder_copy(const char *src, const char *dst)
 {
     FM_Result r;
     if (src == NULL) src = "/qspi/myProject";
@@ -213,10 +213,10 @@ static FM_Result ex33_folder_copy_demo(const char *src, const char *dst)
 }
 
 /* ---------- 4. Entry point ---------- */
-static inline FM_Result Example33_Run(void)
+static inline FM_Result AudioRecordDemo_Run(void)
 {
-    ex33_audio_tap_setup();
-    ex33_video_setup();
+    audio_record_tap_setup();
+    audio_record_video_setup();
     /* Start players as usual */
     // SimpleAudio_Begin();
     // SimpleVideo_Begin();

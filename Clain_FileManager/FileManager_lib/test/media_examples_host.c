@@ -29,23 +29,23 @@ static int test_media_data_io(void)
     static uint8_t image_loaded[2 * 2 * 3];
     static uint8_t image_gray_work[2 * 2];
     static uint8_t image_scaled[4 * 4 * 3];
-    Ex14_AudioReader audio;
-    Ex14_VideoReader video;
+    MediaIO_AudioReader audio;
+    MediaIO_VideoReader video;
     FM_VideoWriter video_writer;
     FM_Image image;
     size_t count = 0;
     FM_Result r;
 
-    r = Ex14_AudioOpen(&audio, "/tone.wav");
-    if (r == FM_OK) r = Ex14_AudioReadMono(&audio, mono, 32, &count);
-    if (r == FM_OK && count == 32) r = Ex14_AudioSeek(&audio, 0.0);
-    if (r == FM_OK) r = Ex14_AudioReadStereo(&audio, stereo, 32, &count);
+    r = MediaIO_AudioOpen(&audio, "/tone.wav");
+    if (r == FM_OK) r = MediaIO_AudioReadMono(&audio, mono, 32, &count);
+    if (r == FM_OK && count == 32) r = MediaIO_AudioSeek(&audio, 0.0);
+    if (r == FM_OK) r = MediaIO_AudioReadStereo(&audio, stereo, 32, &count);
     if (r == FM_OK && (count != 32 || stereo[0] != stereo[1]))
         r = FM_ERR_CORRUPTED;
     if (r == FM_OK)
-        r = Ex14_AudioSavePCM16("/processed.wav", stereo, count,
+        r = MediaIO_AudioSavePCM16("/processed.wav", stereo, count,
                                 audio.info.sample_rate, 2);
-    if (audio.opened) (void)Ex14_AudioClose(&audio);
+    if (audio.opened) (void)MediaIO_AudioClose(&audio);
     if (r != FM_OK)
     {
         printf("media data audio FAILED: %s (%d)\n",
@@ -53,22 +53,22 @@ static int test_media_data_io(void)
         return 1;
     }
 
-    r = Ex14_VideoOpen(&video, "/clip.fmrv");
-    if (r == FM_OK) r = Ex14_VideoReadRGB888(&video, frame, sizeof(frame));
+    r = MediaIO_VideoOpen(&video, "/clip.fmrv");
+    if (r == FM_OK) r = MediaIO_VideoReadRGB888(&video, frame, sizeof(frame));
     if (r == FM_OK) r = Video_Seek(&video.handle, 0);
     if (r == FM_OK)
-        r = Ex14_VideoReadAs(&video, FM_PIXEL_BGR565,
+        r = MediaIO_VideoReadAs(&video, FM_PIXEL_BGR565,
                              frame_bgr565, sizeof(frame_bgr565),
                              frame_rgb_work, sizeof(frame_rgb_work));
-    if (video.opened) (void)Ex14_VideoClose(&video);
+    if (video.opened) (void)MediaIO_VideoClose(&video);
     if (r == FM_OK && frame_bgr565[2] == 0 && frame_bgr565[3] == 0)
         r = FM_ERR_CORRUPTED;
     if (r == FM_OK)
-        r = Ex14_VideoWriterBeginRGB888(&video_writer, "/processed.fmrv",
+        r = MediaIO_VideoWriterBeginRGB888(&video_writer, "/processed.fmrv",
                                         16, 16, 10, 1);
     if (r == FM_OK)
-        r = Ex14_VideoWriterWriteRGB888(&video_writer, frame, sizeof(frame));
-    if (r == FM_OK) r = Ex14_VideoWriterEnd(&video_writer);
+        r = MediaIO_VideoWriterWriteRGB888(&video_writer, frame, sizeof(frame));
+    if (r == FM_OK) r = MediaIO_VideoWriterEnd(&video_writer);
     if (r != FM_OK)
     {
         printf("media data video FAILED: %s (%d)\n",
@@ -76,19 +76,19 @@ static int test_media_data_io(void)
         return 1;
     }
 
-    r = Ex14_ImageSaveRGB888("/image_input.bmp", image_rgb, 2, 2);
+    r = MediaIO_ImageSaveRGB888("/image_input.bmp", image_rgb, 2, 2);
     if (r == FM_OK)
-        r = Ex14_ImageLoadRGB888("/image_input.bmp", &image,
+        r = MediaIO_ImageLoadRGB888("/image_input.bmp", &image,
                                  image_gray_work, sizeof(image_gray_work),
                                  image_loaded, sizeof(image_loaded));
     if (r == FM_OK)
         r = Image_ApplyEffect(&image, FM_IMAGE_EFFECT_SEPIA, 0);
     if (r == FM_OK)
-        r = Ex14_ImageResizeRGB888(image.data, image.width, image.height,
+        r = MediaIO_ImageResizeRGB888(image.data, image.width, image.height,
                                    image_scaled, sizeof(image_scaled),
                                    4, 4, FM_SCALE_NEAREST);
     if (r == FM_OK)
-        r = Ex14_ImageSaveRGB888("/image_processed.bmp", image_scaled, 4, 4);
+        r = MediaIO_ImageSaveRGB888("/image_processed.bmp", image_scaled, 4, 4);
     if (r != FM_OK)
     {
         printf("media data image FAILED: %s (%d)\n",
@@ -128,26 +128,26 @@ int main(void)
      * failed included -- went nowhere and this runner could not fail. */
     FM_Log_UseStdout();
 
-    if (SD_examples_begin() != FM_OK)
+    if (SdCard_Begin() != FM_OK)
     {
-        printf("SD_examples_begin FAILED\n");
+        printf("SdCard_Begin FAILED\n");
         return 1;
     }
 
     make_fake_media();
 
-    exM_1_audio_wav();
-    exM_2_video_fmrv();
-    exM_3_copy_song();
-    exM_4_copy_video();
-    exM_5_media_detect();
+    SdMediaDemo_AudioWav();
+    SdMediaDemo_VideoFmrv();
+    SdMediaDemo_CopySong();
+    SdMediaDemo_CopyVideo();
+    SdMediaDemo_MediaDetect();
     if (test_media_data_io() != 0)
     {
-        SD_examples_end();
+        SdCard_End();
         return 1;
     }
 
-    SD_examples_end();
+    SdCard_End();
     printf("\n===== ALL MEDIA EXAMPLES DONE OK =====\n");
     return 0;
 }

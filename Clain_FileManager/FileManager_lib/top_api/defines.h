@@ -68,8 +68,8 @@
 #include "eeprom_simple.h"
 #include "i2c_eeprom_dma.h"
 
-#define EX16_USB_DEFINE_CONTEXT
-#define EX35_CUBE_USB
+#define USB_MSC_DEFINE_CONTEXT
+#define USB_SD_CUBE_USB
 #include "usb_msc.h"
 #include "usb_sd_presenter.h"
 

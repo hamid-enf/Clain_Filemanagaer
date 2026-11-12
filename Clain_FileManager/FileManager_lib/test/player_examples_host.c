@@ -57,10 +57,10 @@ static void fake_audio_clean(void *context, const void *address, size_t bytes)
 
 static int test_audio_dma_bridge(void)
 {
-    static Ex13_AudioDma audio;
+    static AudioDma audio;
     static int16_t dma_buffer[2 * 128]
         __attribute__((aligned(32)));
-    static const Ex13_AudioDmaPort port = {
+    static const AudioDma_Port port = {
         fake_audio_start, fake_audio_stop, fake_audio_clean
     };
     FakeAudioDma fake;
@@ -68,13 +68,13 @@ static int test_audio_dma_bridge(void)
     uint32_t ticks;
 
     memset(&fake, 0, sizeof(fake));
-    r = Ex13_AudioDmaStart(&audio, "/music", &port, &fake,
+    r = AudioDma_Start(&audio, "/music", &port, &fake,
                            dma_buffer, 128);
     if (r != FM_OK || fake.starts != 1 || fake.sample_rate != 8000 ||
-        fake.channels != 1 || !Ex13_AudioDmaIsRunning(&audio))
+        fake.channels != 1 || !AudioDma_IsRunning(&audio))
     {
         printf("audio DMA bridge start FAILED (%d)\n", (int)r);
-        (void)Ex13_AudioDmaStop(&audio);
+        (void)AudioDma_Stop(&audio);
         return 1;
     }
 
@@ -86,24 +86,24 @@ static int test_audio_dma_bridge(void)
 
         fake.next_half ^= 1u;
         if (half == 0)
-            Ex13_AudioDmaHalfCallback(&audio);
+            AudioDma_HalfCallback(&audio);
         else
-            Ex13_AudioDmaFullCallback(&audio);
+            AudioDma_FullCallback(&audio);
 
-        r = Ex13_AudioDmaPoll(&audio);
+        r = AudioDma_Poll(&audio);
         if (r != FM_OK) break;
     }
 
     if (r != FM_OK || fake.starts < 2 || fake.stops < 1 ||
-        fake.cache_cleans == 0 || !Ex13_AudioDmaIsRunning(&audio))
+        fake.cache_cleans == 0 || !AudioDma_IsRunning(&audio))
     {
         printf("audio DMA bridge refill/next FAILED (%d)\n", (int)r);
-        (void)Ex13_AudioDmaStop(&audio);
+        (void)AudioDma_Stop(&audio);
         return 1;
     }
 
-    r = Ex13_AudioDmaStop(&audio);
-    if (r != FM_OK || fake.stops < 2 || Ex13_AudioDmaIsRunning(&audio))
+    r = AudioDma_Stop(&audio);
+    if (r != FM_OK || fake.stops < 2 || AudioDma_IsRunning(&audio))
     {
         printf("audio DMA bridge stop FAILED (%d)\n", (int)r);
         return 1;
@@ -149,24 +149,24 @@ int main(void)
      * failed included -- went nowhere and this runner could not fail. */
     FM_Log_UseStdout();
 
-    if (SD_examples_begin() != FM_OK)
+    if (SdCard_Begin() != FM_OK)
     {
-        printf("SD_examples_begin FAILED\n");
+        printf("SdCard_Begin FAILED\n");
         return 1;
     }
 
     make_two_wavs();
 
-    exP_1_music_controls();
-    exP_2_video_controls();
-    exP_3_remote_buttons();
+    SdPlayerDemo_MusicControls();
+    SdPlayerDemo_VideoControls();
+    SdPlayerDemo_RemoteButtons();
     if (test_audio_dma_bridge() != 0)
     {
-        SD_examples_end();
+        SdCard_End();
         return 1;
     }
 
-    SD_examples_end();
+    SdCard_End();
     printf("\n===== ALL PLAYER EXAMPLES DONE OK =====\n");
     return 0;
 }

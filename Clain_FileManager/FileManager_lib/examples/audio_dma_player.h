@@ -1,18 +1,18 @@
 /*
- * Example 13 — STM32H7 bare-metal audio player with circular DMA
+ * audio_dma_player.h — STM32H7 bare-metal audio player with circular DMA
  *
  * این bridge خروجی PCM لایه‌ی Player را به یک DMA دو‌نیمه وصل می‌کند، بدون
  * اینکه به مدل codec صوتی یا peripheral خاصی وابسته باشد. کاربرد معمول:
  *
  *   SD/FatFS -> Player_ReadAudio -> [half 0 | half 1] -> SAI/I2S/DAC DMA
  *
- * قانون مهم: callback وقفه فقط Ex13_AudioDmaHalfCallback یا
- * Ex13_AudioDmaFullCallback را صدا می‌زند. خواندن SD، decode و cache clean
- * همگی در Ex13_AudioDmaPoll داخل super-loop انجام می‌شوند.
+ * قانون مهم: callback وقفه فقط AudioDma_HalfCallback یا
+ * AudioDma_FullCallback را صدا می‌زند. خواندن SD، decode و cache clean
+ * همگی در AudioDma_Poll داخل super-loop انجام می‌شوند.
  *
  * نمونه‌ی اتصال در main.c:
  *
- *   static Ex13_AudioDma audio;
+ *   static AudioDma audio;
  *
  *   // بافر DMA نباید در DTCM باشد. سکشن را مطابق linker script خودتان
  *   // در AXI SRAM یا SRAM1/2 قرار دهید. با D-Cache، alignment و اندازه‌ی
@@ -43,26 +43,26 @@
  *       // SCB_CleanDCache_by_Addr((uint32_t *)p, (int32_t)bytes);
  *   }
  *
- *   static const Ex13_AudioDmaPort port = {
+ *   static const AudioDma_Port port = {
  *       board_start, board_stop, board_clean_cache
  *   };
  *
- *   // بعد از SD_examples_begin():
- *   Ex13_AudioDmaStart(&audio, "/music", &port, NULL,
+ *   // بعد از SdCard_Begin():
+ *   AudioDma_Start(&audio, "/music", &port, NULL,
  *                      audio_buf, AUDIO_HALF_SAMPLES);
  *
  *   while (1) {
- *       FM_Result r = Ex13_AudioDmaPoll(&audio);
+ *       FM_Result r = AudioDma_Poll(&audio);
  *       if (r != FM_OK) { ... }
  *   }
  *
  *   void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
  *   {
- *       Ex13_AudioDmaHalfCallback(&audio);
+ *       AudioDma_HalfCallback(&audio);
  *   }
  *   void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
  *   {
- *       Ex13_AudioDmaFullCallback(&audio);
+ *       AudioDma_FullCallback(&audio);
  *   }
  *
  * ویژگی‌ها:
@@ -89,19 +89,19 @@
 /* Optional step-by-step debug logging. Off by default (zero cost). An
  * application that needs to see exactly where a track switch dies can
  * define it before including this header, e.g. the SimpleAudio header:
- *   #define EX13_DEBUG_LOG(...) FM_Log("ex13: " __VA_ARGS__)
+ *   #define AUDIO_DMA_DEBUG_LOG(...) FM_Log("AudioDma: " __VA_ARGS__)
  * All call sites pass a string literal first argument. */
-#ifndef EX13_DEBUG_LOG
-#define EX13_DEBUG_LOG(...) ((void)0)
+#ifndef AUDIO_DMA_DEBUG_LOG
+#define AUDIO_DMA_DEBUG_LOG(...) ((void)0)
 #endif
 
-typedef FM_Result (*Ex13_AudioDmaStartFn)(void *context,
+typedef FM_Result (*AudioDma_StartFn)(void *context,
                                           int16_t *samples,
                                           size_t sample_count,
                                           uint32_t sample_rate,
                                           uint16_t channels);
-typedef FM_Result (*Ex13_AudioDmaStopFn)(void *context);
-typedef void (*Ex13_AudioDmaCacheCleanFn)(void *context,
+typedef FM_Result (*AudioDma_StopFn)(void *context);
+typedef void (*AudioDma_CacheCleanFn)(void *context,
                                           const void *address,
                                           size_t bytes);
 
@@ -109,10 +109,10 @@ typedef struct
 {
     /* Configure the sink and start the complete two-half buffer in
      * circular DMA mode. sample_count counts int16_t channel samples. */
-    Ex13_AudioDmaStartFn      start;
-    Ex13_AudioDmaStopFn       stop;
-    Ex13_AudioDmaCacheCleanFn clean_cache; /* optional if D-Cache is off */
-} Ex13_AudioDmaPort;
+    AudioDma_StartFn      start;
+    AudioDma_StopFn       stop;
+    AudioDma_CacheCleanFn clean_cache; /* optional if D-Cache is off */
+} AudioDma_Port;
 
 /* Live tap on the PCM that is about to be played.
  *
@@ -126,11 +126,11 @@ typedef struct
  * Treat it like an ISR: copy into your own ring buffer and return.
  * File I/O here will starve the DMA and click the audio.
  *
- * Deliberately NOT a field of Ex13_AudioDmaOptions: existing callers
+ * Deliberately NOT a field of AudioDma_Options: existing callers
  * declare that struct on the stack and assign only the fields they know
  * about, so a new member there would be read as garbage and called as a
- * function pointer.  Install it with Ex13_AudioDmaSetPcmTap() instead. */
-typedef void (*Ex13_AudioDmaPcmTapFn)(void *context, int16_t *pcm,
+ * function pointer.  Install it with AudioDma_SetPcmTap() instead. */
+typedef void (*AudioDma_PcmTapFn)(void *context, int16_t *pcm,
                                       size_t samples, uint32_t sample_rate,
                                       uint16_t channels);
 
@@ -140,9 +140,9 @@ typedef void (*Ex13_AudioDmaPcmTapFn)(void *context, int16_t *pcm,
  * info so the application knows exactly which music/audio the DSP is (or
  * was) processing. The end callback is called from the super-loop, NOT an
  * ISR, so light work (marking/flag) is fine. Install via
- * Ex13_AudioDmaSetTrackStart/SetTrackEnd; keep them out of the Options
+ * AudioDma_SetTrackStart/SetTrackEnd; keep them out of the Options
  * struct for the same reason as the PCM taps. */
-typedef void (*Ex13_AudioDmaTrackFn)(void *context, const char *path,
+typedef void (*AudioDma_TrackFn)(void *context, const char *path,
                                      const FM_AudioInfo *info);
 
 typedef struct
@@ -152,13 +152,13 @@ typedef struct
     FM_Bool force_stereo;
     /* Initial gain, 0..32767 (32767 = 100% / unchanged). */
     int16_t volume;
-} Ex13_AudioDmaOptions;
+} AudioDma_Options;
 
 typedef struct
 {
     FM_Player player;
 
-    const Ex13_AudioDmaPort *port;
+    const AudioDma_Port *port;
     void *port_context;
     int16_t *buffer;
     size_t half_samples;
@@ -166,24 +166,24 @@ typedef struct
     uint32_t sample_rate;
     uint16_t channels;
 
-    /* Options (see Ex13_AudioDmaOptions): when force_stereo is set the
+    /* Options (see AudioDma_Options): when force_stereo is set the
      * sink always receives interleaved stereo (mono sources are upmixed);
      * volume is a 0..32767 gain applied to every sample during refill
      * (32767 = unchanged). Both are applied on the next fill. */
     FM_Bool force_stereo;
     int16_t volume;
-    Ex13_AudioDmaPcmTapFn pcm_tap;
+    AudioDma_PcmTapFn pcm_tap;
     void *pcm_tap_context;
     /* Pre-gain tap: raw decoded PCM before volume, editable. Post (pcm_tap) is after volume. */
-    Ex13_AudioDmaPcmTapFn pcm_tap_pre;
+    AudioDma_PcmTapFn pcm_tap_pre;
     void *pcm_tap_pre_context;
 
     /* Track lifecycle callbacks (start = a track begins; end = it finishes).
-     * See Ex13_AudioDmaSetTrackStart/SetTrackEnd. The end callback reports
+     * See AudioDma_SetTrackStart/SetTrackEnd. The end callback reports
      * the SAME path/info that the start callback reported. */
-    Ex13_AudioDmaTrackFn on_track_start;
+    AudioDma_TrackFn on_track_start;
     void *track_start_context;
-    Ex13_AudioDmaTrackFn on_track_end;
+    AudioDma_TrackFn on_track_end;
     void *track_end_context;
     /* Snapshot of the current (playing) track, kept for the end callback. */
     char track_path[FM_PATH_MAX];
@@ -202,41 +202,41 @@ typedef struct
     FM_Bool player_initialized;
     uint64_t queued_samples;
     FM_PlayMode play_mode; /* STOP/NEXT/REPEAT_ONE/REPEAT_ALL (default REPEAT_ALL) */
-} Ex13_AudioDma;
+} AudioDma;
 
-static inline int16_t *ex13_audio_half(Ex13_AudioDma *state,
+static inline int16_t *audio_dma_half(AudioDma *state,
                                        uint8_t half)
 {
     return state->buffer + (size_t)half * state->half_samples;
 }
 
-static inline void ex13_audio_clean_half(Ex13_AudioDma *state,
+static inline void audio_dma_clean_half(AudioDma *state,
                                          uint8_t half)
 {
     if (state->port->clean_cache != NULL)
     {
         state->port->clean_cache(state->port_context,
-                                 ex13_audio_half(state, half),
+                                 audio_dma_half(state, half),
                                  state->half_samples * sizeof(int16_t));
     }
 }
 
-static inline void ex13_audio_silence_half(Ex13_AudioDma *state,
+static inline void audio_dma_silence_half(AudioDma *state,
                                            uint8_t half)
 {
-    memset(ex13_audio_half(state, half), 0,
+    memset(audio_dma_half(state, half), 0,
            state->half_samples * sizeof(int16_t));
-    ex13_audio_clean_half(state, half);
+    audio_dma_clean_half(state, half);
 }
 
 /* Fill one free DMA half from the currently opened Player item.
  * FM_ERR_EOF is returned only when the current item has no audio at all.
  * Otherwise draining/eof_half records the exact DMA boundary at which the
  * next track may safely be opened and the sink reconfigured. */
-static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
+static inline FM_Result audio_dma_fill_half(AudioDma *state,
                                              uint8_t half)
 {
-    int16_t *dst = ex13_audio_half(state, half);
+    int16_t *dst = audio_dma_half(state, half);
     size_t filled = 0;
 
     /*
@@ -267,12 +267,12 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
                  * the half. */
                 dst[filled] = 0;
                 filled++;
-                ex13_audio_clean_half(state, half);
+                audio_dma_clean_half(state, half);
                 return FM_OK;
             }
             r = Audio_ReadStereo(&state->player.audio, dst + filled,
                                  frames, &got);
-            EX13_DEBUG_LOG("fill half %u: read r=%d got=%lu frames "
+            AUDIO_DMA_DEBUG_LOG("fill half %u: read r=%d got=%lu frames "
                            "filled=%lu\n",
                            (unsigned)half, (int)r, (unsigned long)got,
                            (unsigned long)filled);
@@ -298,12 +298,12 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
                 {
                     dst[filled++] = 0;
                 }
-                ex13_audio_clean_half(state, half);
+                audio_dma_clean_half(state, half);
                 return FM_OK;
             }
             r = Player_ReadAudio(&state->player, dst + filled,
                                  room - (room % ch), &got);
-            EX13_DEBUG_LOG("fill half %u: read r=%d got=%lu "
+            AUDIO_DMA_DEBUG_LOG("fill half %u: read r=%d got=%lu "
                            "filled=%lu\n",
                            (unsigned)half, (int)r, (unsigned long)got,
                            (unsigned long)filled);
@@ -391,7 +391,7 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
         }
 
         /* Live tap: exactly what the speaker will get.  After the gain so
-         * it matches what is heard, and before ex13_audio_clean_half()
+         * it matches what is heard, and before audio_dma_clean_half()
          * so a tap that edits the samples still reaches the DMA. */
         if (state->pcm_tap != NULL && filled > prev)
         {
@@ -405,7 +405,7 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
         {
             if (got == 0)
             {
-                EX13_DEBUG_LOG("fill half %u: read error (0 samples, "
+                AUDIO_DMA_DEBUG_LOG("fill half %u: read error (0 samples, "
                                "%lu filled)\n", (unsigned)half,
                                (unsigned long)filled);
                 return FM_ERR_IO;
@@ -414,7 +414,7 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
         }
         if (r != FM_ERR_EOF)
         {
-            EX13_DEBUG_LOG("fill half %u: read error %d (%lu filled)\n",
+            AUDIO_DMA_DEBUG_LOG("fill half %u: read error %d (%lu filled)\n",
                            (unsigned)half, (int)r, (unsigned long)filled);
             return r;
         }
@@ -447,14 +447,14 @@ static inline FM_Result ex13_audio_fill_half(Ex13_AudioDma *state,
                (state->half_samples - filled) * sizeof(int16_t));
     }
 
-    ex13_audio_clean_half(state, half);
+    audio_dma_clean_half(state, half);
     return FM_OK;
 }
 
-static inline void ex13_audio_notify_track_start(Ex13_AudioDma *state);
-static inline void ex13_audio_notify_track_end(Ex13_AudioDma *state);
+static inline void audio_dma_notify_track_start(AudioDma *state);
+static inline void audio_dma_notify_track_end(AudioDma *state);
 
-static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
+static inline FM_Result audio_dma_start_current(AudioDma *state)
 {
     FM_AudioInfo info;
     FM_Result r;
@@ -462,17 +462,17 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
     r = Audio_GetInfo(&state->player.audio, &info);
     if (r != FM_OK)
     {
-        EX13_DEBUG_LOG("start_current: get info failed %d\n", (int)r);
+        AUDIO_DMA_DEBUG_LOG("start_current: get info failed %d\n", (int)r);
         return r;
     }
     if (info.sample_rate == 0 || info.channels == 0 || info.channels > 2)
     {
-        EX13_DEBUG_LOG("start_current: unsupported %lu Hz %u ch\n",
+        AUDIO_DMA_DEBUG_LOG("start_current: unsupported %lu Hz %u ch\n",
                        (unsigned long)info.sample_rate,
                        (unsigned)info.channels);
         return FM_ERR_UNSUPPORTED;
     }
-    EX13_DEBUG_LOG("start_current: %s %lu Hz %uch -> %uch\n",
+    AUDIO_DMA_DEBUG_LOG("start_current: %s %lu Hz %uch -> %uch\n",
                    info.codec, (unsigned long)info.sample_rate,
                    (unsigned)info.channels,
                    (unsigned)(state->force_stereo ? 2u : info.channels));
@@ -486,8 +486,8 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
     state->refilling[0] = state->refilling[1] = 0;
     state->underrun = 0;
 
-    EX13_DEBUG_LOG("start_current: fill half 0\n");
-    r = ex13_audio_fill_half(state, 0);
+    AUDIO_DMA_DEBUG_LOG("start_current: fill half 0\n");
+    r = audio_dma_fill_half(state, 0);
     if (r != FM_OK)
     {
         return r;
@@ -495,8 +495,8 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
 
     if (!state->draining)
     {
-        EX13_DEBUG_LOG("start_current: fill half 1\n");
-        r = ex13_audio_fill_half(state, 1);
+        AUDIO_DMA_DEBUG_LOG("start_current: fill half 1\n");
+        r = audio_dma_fill_half(state, 1);
         if (r != FM_OK)
         {
             return r;
@@ -504,7 +504,7 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
     }
     else
     {
-        ex13_audio_silence_half(state, 1);
+        audio_dma_silence_half(state, 1);
     }
 
     /* Honest per-track loudness ground truth: scan EVERY sample of both
@@ -531,11 +531,11 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
                 pk = v;
             }
         }
-        EX13_DEBUG_LOG("start_current: track peak=%ld (%ld%% fs)\n",
+        AUDIO_DMA_DEBUG_LOG("start_current: track peak=%ld (%ld%% fs)\n",
                        (long)pk, (long)((pk * 100) / 32767));
     }
 
-    EX13_DEBUG_LOG("start_current: port start\n");
+    AUDIO_DMA_DEBUG_LOG("start_current: port start\n");
     state->running = FM_TRUE;
     r = state->port->start(state->port_context, state->buffer,
                            state->half_samples * 2u,
@@ -543,14 +543,14 @@ static inline FM_Result ex13_audio_start_current(Ex13_AudioDma *state)
     if (r != FM_OK)
     {
         state->running = FM_FALSE;
-        EX13_DEBUG_LOG("start_current: port start failed %d\n", (int)r);
+        AUDIO_DMA_DEBUG_LOG("start_current: port start failed %d\n", (int)r);
     }
     return r;
 }
 
 /* Try each playlist item once, starting at index. Unsupported or empty items
  * are skipped so one bad file does not make the complete player unusable. */
-static inline FM_Result ex13_audio_play_from(Ex13_AudioDma *state,
+static inline FM_Result audio_dma_play_from(AudioDma *state,
                                              uint32_t index)
 {
     uint32_t count = Player_Count(&state->player);
@@ -563,27 +563,27 @@ static inline FM_Result ex13_audio_play_from(Ex13_AudioDma *state,
     }
     /* Replacing a playing track (manual Next/Prev/Play from the app, or an
      * EOF-driven advance): report the interrupted track's end once.  EOF
-     * already reported it in ex13_audio_handle_eof, so track_active is 0. */
-    ex13_audio_notify_track_end(state);
+     * already reported it in audio_dma_handle_eof, so track_active is 0. */
+    audio_dma_notify_track_end(state);
 
     for (tried = 0; tried < count; tried++)
     {
         uint32_t item = (index + tried) % count;
         FM_Result r;
 
-        EX13_DEBUG_LOG("play_from: try %s\n",
+        AUDIO_DMA_DEBUG_LOG("play_from: try %s\n",
                        Player_ItemPath(&state->player, item));
         r = Player_Play(&state->player, item);
-        EX13_DEBUG_LOG("play_from: open -> %d\n", (int)r);
+        AUDIO_DMA_DEBUG_LOG("play_from: open -> %d\n", (int)r);
         if (r != FM_OK)
         {
             last = r;
             continue;
         }
-        r = ex13_audio_start_current(state);
+        r = audio_dma_start_current(state);
         if (r == FM_OK)
         {
-            ex13_audio_notify_track_start(state);
+            audio_dma_notify_track_start(state);
             return FM_OK;
         }
         last = r;
@@ -593,7 +593,7 @@ static inline FM_Result ex13_audio_play_from(Ex13_AudioDma *state,
 
 /* Stop the consumed track, select the following item (with wraparound), and
  * start a newly configured DMA stream. Called only from the super-loop. */
-static inline FM_Result ex13_audio_start_next(Ex13_AudioDma *state)
+static inline FM_Result audio_dma_start_next(AudioDma *state)
 {
     uint32_t count = Player_Count(&state->player);
     uint32_t first;
@@ -603,7 +603,7 @@ static inline FM_Result ex13_audio_start_next(Ex13_AudioDma *state)
         return FM_ERR_NOT_FOUND;
     }
     first = (Player_Current(&state->player) + 1u) % count;
-    return ex13_audio_play_from(state, first);
+    return audio_dma_play_from(state, first);
 }
 
 /* Build the playlist, open the first playable item, prefill both DMA halves,
@@ -612,13 +612,13 @@ static inline FM_Result ex13_audio_start_next(Ex13_AudioDma *state)
  * `options` may be NULL (native channels, full volume) or carry
  * force_stereo / initial volume. The state is reset, so set options here —
  * not on a previously used state. */
-static inline FM_Result Ex13_AudioDmaStartEx(Ex13_AudioDma *state,
+static inline FM_Result AudioDma_StartEx(AudioDma *state,
                                              const char *folder,
-                                             const Ex13_AudioDmaPort *port,
+                                             const AudioDma_Port *port,
                                              void *port_context,
                                              int16_t *dma_buffer,
                                              size_t half_samples,
-                                             const Ex13_AudioDmaOptions *options)
+                                             const AudioDma_Options *options)
 {
     FM_Result r;
 
@@ -665,7 +665,7 @@ static inline FM_Result Ex13_AudioDmaStartEx(Ex13_AudioDma *state,
     }
     if (r == FM_OK)
     {
-        r = ex13_audio_play_from(state, 0);
+        r = audio_dma_play_from(state, 0);
     }
     if (r != FM_OK)
     {
@@ -675,21 +675,21 @@ static inline FM_Result Ex13_AudioDmaStartEx(Ex13_AudioDma *state,
     return r;
 }
 
-static inline FM_Result Ex13_AudioDmaStart(Ex13_AudioDma *state,
+static inline FM_Result AudioDma_Start(AudioDma *state,
                                            const char *folder,
-                                           const Ex13_AudioDmaPort *port,
+                                           const AudioDma_Port *port,
                                            void *port_context,
                                            int16_t *dma_buffer,
                                            size_t half_samples)
 {
-    return Ex13_AudioDmaStartEx(state, folder, port, port_context,
+    return AudioDma_StartEx(state, folder, port, port_context,
                                 dma_buffer, half_samples, NULL);
 }
 
 /* Install (or remove, with NULL) the live PCM tap.  Safe to call before
  * or during playback; takes effect on the next refill. */
-static inline void Ex13_AudioDmaSetPcmTap(Ex13_AudioDma *state,
-                                          Ex13_AudioDmaPcmTapFn fn,
+static inline void AudioDma_SetPcmTap(AudioDma *state,
+                                          AudioDma_PcmTapFn fn,
                                           void *context)
 {
     if (state == NULL)
@@ -700,8 +700,8 @@ static inline void Ex13_AudioDmaSetPcmTap(Ex13_AudioDma *state,
     state->pcm_tap = fn;      /* last, so context is valid when it fires */
 }
 
-static inline void Ex13_AudioDmaSetPrePcmTap(Ex13_AudioDma *state,
-                                             Ex13_AudioDmaPcmTapFn fn,
+static inline void AudioDma_SetPrePcmTap(AudioDma *state,
+                                             AudioDma_PcmTapFn fn,
                                              void *context)
 {
     if (state == NULL) return;
@@ -709,15 +709,15 @@ static inline void Ex13_AudioDmaSetPrePcmTap(Ex13_AudioDma *state,
     state->pcm_tap_pre = fn;
 }
 
-static inline void Ex13_AudioDmaSetPostPcmTap(Ex13_AudioDma *state,
-                                              Ex13_AudioDmaPcmTapFn fn,
+static inline void AudioDma_SetPostPcmTap(AudioDma *state,
+                                              AudioDma_PcmTapFn fn,
                                               void *context)
 {
-    Ex13_AudioDmaSetPcmTap(state, fn, context);
+    AudioDma_SetPcmTap(state, fn, context);
 }
 
 /* Snapshot the current track (path + info) and fire the start callback. */
-static inline void ex13_audio_notify_track_start(Ex13_AudioDma *state)
+static inline void audio_dma_notify_track_start(AudioDma *state)
 {
     const char *path;
 
@@ -744,7 +744,7 @@ static inline void ex13_audio_notify_track_start(Ex13_AudioDma *state)
 
 /* Fire the end callback for the track that just finished (fired once per
  * track lifecycle). */
-static inline void ex13_audio_notify_track_end(Ex13_AudioDma *state)
+static inline void audio_dma_notify_track_end(AudioDma *state)
 {
     if (state == NULL || !state->track_active)
     {
@@ -762,8 +762,8 @@ static inline void ex13_audio_notify_track_end(Ex13_AudioDma *state)
  * (on the super-loop). If a track is ALREADY playing when the hook is
  * installed (e.g. after SimpleAudio_Begin, which resets the player), the
  * current track is reported immediately so the DSP never misses it. */
-static inline void Ex13_AudioDmaSetTrackStart(Ex13_AudioDma *state,
-                                              Ex13_AudioDmaTrackFn fn,
+static inline void AudioDma_SetTrackStart(AudioDma *state,
+                                              AudioDma_TrackFn fn,
                                               void *context)
 {
     if (state == NULL)
@@ -774,14 +774,14 @@ static inline void Ex13_AudioDmaSetTrackStart(Ex13_AudioDma *state,
     state->track_start_context = context;
     if (state->running)
     {
-        ex13_audio_notify_track_start(state);
+        audio_dma_notify_track_start(state);
     }
 }
 
 /* Install the track-end callback (fired when the current track has finished
  * playing, on the super-loop). `context` is passed to the callback. */
-static inline void Ex13_AudioDmaSetTrackEnd(Ex13_AudioDma *state,
-                                            Ex13_AudioDmaTrackFn fn,
+static inline void AudioDma_SetTrackEnd(AudioDma *state,
+                                            AudioDma_TrackFn fn,
                                             void *context)
 {
     if (state == NULL)
@@ -794,7 +794,7 @@ static inline void Ex13_AudioDmaSetTrackEnd(Ex13_AudioDma *state,
 
 /* Change the software gain while running; takes effect on the next fill
  * (at most one half-buffer later). gain: 0..32767 (32767 = 100%). */
-static inline void Ex13_AudioDmaSetVolume(Ex13_AudioDma *state, int16_t gain)
+static inline void AudioDma_SetVolume(AudioDma *state, int16_t gain)
 {
     if (state == NULL)
     {
@@ -808,32 +808,32 @@ static inline void Ex13_AudioDmaSetVolume(Ex13_AudioDma *state, int16_t gain)
 }
 
 /* Playback persistence: what happens at track end. */
-static inline void Ex13_AudioDmaSetPlayMode(Ex13_AudioDma *state, FM_PlayMode mode)
+static inline void AudioDma_SetPlayMode(AudioDma *state, FM_PlayMode mode)
 {
     if (state == NULL) return;
     if ((int)mode < FM_PLAY_MODE_STOP || (int)mode > FM_PLAY_MODE_REPEAT_ALL) return;
     state->play_mode = mode;
 }
-static inline FM_PlayMode Ex13_AudioDmaGetPlayMode(const Ex13_AudioDma *state)
+static inline FM_PlayMode AudioDma_GetPlayMode(const AudioDma *state)
 {
     return (state == NULL) ? FM_PLAY_MODE_STOP : state->play_mode;
 }
 /* Helper: decide next action at EOF based on mode */
-static inline FM_Result ex13_audio_handle_eof(Ex13_AudioDma *state)
+static inline FM_Result audio_dma_handle_eof(AudioDma *state)
 {
     FM_PlayMode m = state->play_mode;
     uint32_t count = Player_Count(&state->player);
     uint32_t cur = Player_Current(&state->player);
     if (count == 0u) return FM_ERR_NOT_FOUND;
     /* The current track has played to the end: notify before switching. */
-    ex13_audio_notify_track_end(state);
+    audio_dma_notify_track_end(state);
     if (m == FM_PLAY_MODE_STOP) {
         state->running = FM_FALSE;
         (void)state->port->stop(state->port_context);
         return FM_OK; /* stopped — app may call Next/Play */
     }
     if (m == FM_PLAY_MODE_REPEAT_ONE) {
-        return ex13_audio_play_from(state, cur); /* همین ترک دوباره */
+        return audio_dma_play_from(state, cur); /* همین ترک دوباره */
     }
     if (m == FM_PLAY_MODE_NEXT) {
         if (cur + 1u >= count) {
@@ -841,15 +841,15 @@ static inline FM_Result ex13_audio_handle_eof(Ex13_AudioDma *state)
             (void)state->port->stop(state->port_context);
             return FM_OK; /* آخر لیست → توقف */
         }
-        return ex13_audio_play_from(state, cur + 1u);
+        return audio_dma_play_from(state, cur + 1u);
     }
     /* REPEAT_ALL (default): بعدی با wrap */
-    return ex13_audio_start_next(state);
+    return audio_dma_start_next(state);
 }
 
 /* IRQ hooks: no filesystem, decode, logging or cache operation is allowed
  * here. The volatile byte stores are atomic on Cortex-M. */
-static inline void Ex13_AudioDmaHalfCallback(Ex13_AudioDma *state)
+static inline void AudioDma_HalfCallback(AudioDma *state)
 {
     if (state == NULL || !state->running)
     {
@@ -862,7 +862,7 @@ static inline void Ex13_AudioDmaHalfCallback(Ex13_AudioDma *state)
     state->refill[0] = 1;
 }
 
-static inline void Ex13_AudioDmaFullCallback(Ex13_AudioDma *state)
+static inline void AudioDma_FullCallback(AudioDma *state)
 {
     if (state == NULL || !state->running)
     {
@@ -877,7 +877,7 @@ static inline void Ex13_AudioDmaFullCallback(Ex13_AudioDma *state)
 
 /* Call frequently from the bare-metal super-loop. It refills free halves and
  * performs stop/reconfigure/start at track boundaries. */
-static inline FM_Result Ex13_AudioDmaPoll(Ex13_AudioDma *state)
+static inline FM_Result AudioDma_Poll(AudioDma *state)
 {
     uint8_t half;
 
@@ -912,18 +912,18 @@ static inline FM_Result Ex13_AudioDmaPoll(Ex13_AudioDma *state)
             {
                 return r;
             }
-            return ex13_audio_handle_eof(state);
+            return audio_dma_handle_eof(state);
         }
 
         state->refilling[half] = 1;
         if (state->draining)
         {
-            ex13_audio_silence_half(state, half);
+            audio_dma_silence_half(state, half);
             r = FM_OK;
         }
         else
         {
-            r = ex13_audio_fill_half(state, half);
+            r = audio_dma_fill_half(state, half);
         }
         state->refilling[half] = 0;
 
@@ -937,7 +937,7 @@ static inline FM_Result Ex13_AudioDmaPoll(Ex13_AudioDma *state)
     return FM_OK;
 }
 
-static inline FM_Result Ex13_AudioDmaStop(Ex13_AudioDma *state)
+static inline FM_Result AudioDma_Stop(AudioDma *state)
 {
     FM_Result r = FM_OK;
 
@@ -949,7 +949,7 @@ static inline FM_Result Ex13_AudioDmaStop(Ex13_AudioDma *state)
     {
         state->running = FM_FALSE;
         /* The current track is being interrupted: report its end. */
-        ex13_audio_notify_track_end(state);
+        audio_dma_notify_track_end(state);
         r = state->port->stop(state->port_context);
     }
     if (state->player_initialized)
@@ -962,7 +962,7 @@ static inline FM_Result Ex13_AudioDmaStop(Ex13_AudioDma *state)
     return r;
 }
 
-static inline FM_Bool Ex13_AudioDmaIsRunning(const Ex13_AudioDma *state)
+static inline FM_Bool AudioDma_IsRunning(const AudioDma *state)
 {
     return (state != NULL && state->running) ? FM_TRUE : FM_FALSE;
 }

@@ -1,5 +1,5 @@
 /*
- * Example 16 — نمایش SD / RAM / QSPI به PC با STM32Cube USB Device MSC
+ * usb_msc.h — نمایش SD / RAM / QSPI به PC با STM32Cube USB Device MSC
  *
  * نکتهٔ اصلی:
  *   USB MSC «فایل» صادر نمی‌کند؛ sectorهای خام یک دیسک را صادر می‌کند.
@@ -22,7 +22,7 @@
  * این header در main.c و usbd_storage_if.c استفاده می‌شود. context باید فقط
  * در یک translation unit ساخته شود؛ در main.c قبل از include بنویسید:
  *
- *   #define EX16_USB_DEFINE_CONTEXT
+ *   #define USB_MSC_DEFINE_CONTEXT
  *   #include "usb_msc.h"
  *
  * و در usbd_storage_if.c همان header را بدون define بالا include کنید.
@@ -30,45 +30,45 @@
  * اتصال به usbd_storage_if.c تولیدشده توسط CubeMX:
  *
  *   int8_t STORAGE_Init_FS(uint8_t lun)
- *   { return Ex16_STM32_Init(lun); }
+ *   { return UsbMsc_StorageInit(lun); }
  *
  *   int8_t STORAGE_GetCapacity_FS(uint8_t lun, uint32_t *n, uint16_t *s)
- *   { return Ex16_STM32_GetCapacity(lun, n, s); }
+ *   { return UsbMsc_StorageGetCapacity(lun, n, s); }
  *
  *   int8_t STORAGE_IsReady_FS(uint8_t lun)
- *   { return Ex16_STM32_IsReady(lun); }
+ *   { return UsbMsc_StorageIsReady(lun); }
  *
  *   int8_t STORAGE_IsWriteProtected_FS(uint8_t lun)
- *   { return Ex16_STM32_IsWriteProtected(lun); }
+ *   { return UsbMsc_StorageIsWriteProtected(lun); }
  *
  *   int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf,
  *                          uint32_t lba, uint16_t count)
- *   { return Ex16_STM32_Read(lun, buf, lba, count); }
+ *   { return UsbMsc_StorageRead(lun, buf, lba, count); }
  *
  *   int8_t STORAGE_Write_FS(uint8_t lun, uint8_t *buf,
  *                           uint32_t lba, uint16_t count)
- *   { return Ex16_STM32_Write(lun, buf, lba, count); }
+ *   { return UsbMsc_StorageWrite(lun, buf, lba, count); }
  *
  *   int8_t STORAGE_GetMaxLun_FS(void)
- *   { return Ex16_STM32_GetMaxLun(); }
+ *   { return UsbMsc_StorageGetMaxLun(); }
  *
  * ترتیب روشن/خاموش:
  *
- *   // QSPI Example 15:
- *   Ex15_QSPI_Begin();
+ *   // QSPI qspi_w25q.h:
+ *   QspiW25q_Begin();
  *   ... File_* ...
- *   Ex16_USB_Begin(Ex15_QSPI_GetStorage(),
- *                  ex16_release_qspi, ex16_acquire_qspi, NULL);
+ *   UsbMsc_Begin(QspiW25q_GetStorage(),
+ *                  usb_msc_release_qspi, usb_msc_acquire_qspi, NULL);
  *   MX_USB_DEVICE_Init();             // حالا PC دیسک را می‌بیند
  *
  *   // بعد از Eject توسط کاربر:
  *   USBD_Stop(&hUsbDeviceFS);
- *   Ex16_USB_End();                   // FileManager دوباره mount می‌شود
+ *   UsbMsc_End();                   // FileManager دوباره mount می‌شود
  *
- *   // SD polling از Example 12:
- *   Ex16_USB_Begin(ex_12_sd_get_storage(),
- *                  ex_12_sd_release_for_usb,
- *                  ex_12_sd_return_from_usb, NULL);
+ *   // SD polling از sdcard_fm_diskio.c:
+ *   UsbMsc_Begin(SdDiskio_GetStorage(),
+ *                  SdDiskio_ReleaseForUsb,
+ *                  SdDiskio_ReturnFromUsb, NULL);
  *
  * release/acquire آمادهٔ QSPI پایین همین فایل قرار دارد و RAM-FAT نیز در
  * انتهای فایل نمونه دارد. خود bridge به نوع حافظه وابسته نیست.
@@ -85,40 +85,40 @@
 #include "fm_usb_msc.h"
 #include "fm_fatfs.h"
 
-#define EX16_USB_OK        ((int8_t)0)
-#define EX16_USB_TRUE      ((int8_t)1)
-#define EX16_USB_FAIL      ((int8_t)-1)
+#define USB_MSC_OK        ((int8_t)0)
+#define USB_MSC_TRUE      ((int8_t)1)
+#define USB_MSC_FAIL      ((int8_t)-1)
 
-typedef FM_Result (*Ex16_OwnerSwitchFn)(void *context);
+typedef FM_Result (*UsbMsc_OwnerSwitchFn)(void *context);
 
 typedef struct
 {
     FM_USB_MSC msc;
-    Ex16_OwnerSwitchFn release_from_mcu;
-    Ex16_OwnerSwitchFn return_to_mcu;
+    UsbMsc_OwnerSwitchFn release_from_mcu;
+    UsbMsc_OwnerSwitchFn return_to_mcu;
     void *owner_context;
     FM_Bool pc_owns_media;
-} Ex16_USBContext;
+} UsbMsc_Context;
 
-/* Define EX16_USB_DEFINE_CONTEXT in exactly one .c file (normally main.c).
+/* Define USB_MSC_DEFINE_CONTEXT in exactly one .c file (normally main.c).
  * Other users such as usbd_storage_if.c see the same external instance. */
-#if defined(EX16_USB_DEFINE_CONTEXT)
-Ex16_USBContext g_ex16_usb;
+#if defined(USB_MSC_DEFINE_CONTEXT)
+UsbMsc_Context g_usb_msc_ctx;
 #else
-extern Ex16_USBContext g_ex16_usb;
+extern UsbMsc_Context g_usb_msc_ctx;
 #endif
 
 /* شمارهٔ ساخت - برای اطمینان از تازگی هدرها روی برد. لاگ باید این را
  * داشته باشد؛ اگر نداشت یعنی پروژه، هدرِ کهنه را بیلد کرده است. */
-#ifndef EX16_BUILD_ID
-#define EX16_BUILD_ID "r13-gaptelem"
+#ifndef USB_MSC_BUILD_ID
+#define USB_MSC_BUILD_ID "r13-gaptelem"
 #endif
 
 /* آمار ترافیک MSC - برای تشخیص زنده از لاگ */
-static volatile uint32_t g_ex16_rd, g_ex16_wr, g_ex16_fail;
+static volatile uint32_t g_usb_msc_rd, g_usb_msc_wr, g_usb_msc_fail;
 /* فاصلهٔ بین دو READ10 پشت‌سرهم (دور ۱۳): خودِ خواندن روی برد t=0ms است؛
  * اگر ویندوزِ بین درخواست‌ها مکث کند اینجا لو می‌رود که کِی و چقدر. */
-static uint32_t g_ex16_prev_tick = 0xFFFFFFFFu;
+static uint32_t g_usb_msc_prev_tick = 0xFFFFFFFFu;
 
 /* ------------------------------------------------------------------ */
 /* بافر واسط خودمان - مسیر MSC مستقل از وضعیت D-Cache                  */
@@ -132,23 +132,23 @@ static uint32_t g_ex16_prev_tick = 0xFFFFFFFFu;
  *      از RAM واقعی می‌خواند. هیچ فرضی به MPU/کش/تراز بافر کیوب نیست.
  * لازم شد بافر را در ناحیهٔ DMA-پسند بگذار (مثلاً SDRAM)، قبل از
  * include یعنی 16 این را تعریف کن:
- *   #define EX16_BOUNCE_SECTION __attribute__((section(".sdram_buffers")))
+ *   #define USB_MSC_BOUNCE_SECTION __attribute__((section(".sdram_buffers")))
  */
-#ifndef EX16_BOUNCE_SECTORS
-#define EX16_BOUNCE_SECTORS 8      /* 4KB - پنجرهٔ هر انتقال */
+#ifndef USB_MSC_BOUNCE_SECTORS
+#define USB_MSC_BOUNCE_SECTORS 8      /* 4KB - پنجرهٔ هر انتقال */
 #endif
-#ifndef EX16_BOUNCE_SECTION
-#define EX16_BOUNCE_SECTION
+#ifndef USB_MSC_BOUNCE_SECTION
+#define USB_MSC_BOUNCE_SECTION
 #endif
-static uint8_t g_ex16_bounce[EX16_BOUNCE_SECTORS * 512u]
-    __attribute__((aligned(32))) EX16_BOUNCE_SECTION;
+static uint8_t g_usb_msc_bounce[USB_MSC_BOUNCE_SECTORS * 512u]
+    __attribute__((aligned(32))) USB_MSC_BOUNCE_SECTION;
 
 /* `storage` must represent a FAT-formatted logical block volume. Begin first
  * asks the application to close/unmount its local filesystem, then enables
  * sector callbacks. Start the Cube USB device only after this returns FM_OK. */
-static inline FM_Result Ex16_USB_Begin(FM_Storage *storage,
-                                       Ex16_OwnerSwitchFn release_from_mcu,
-                                       Ex16_OwnerSwitchFn return_to_mcu,
+static inline FM_Result UsbMsc_Begin(FM_Storage *storage,
+                                       UsbMsc_OwnerSwitchFn release_from_mcu,
+                                       UsbMsc_OwnerSwitchFn return_to_mcu,
                                        void *owner_context)
 {
     FM_Result r;
@@ -157,7 +157,7 @@ static inline FM_Result Ex16_USB_Begin(FM_Storage *storage,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (g_ex16_usb.pc_owns_media)
+    if (g_usb_msc_ctx.pc_owns_media)
     {
         return FM_ERR_BUSY;
     }
@@ -172,63 +172,63 @@ static inline FM_Result Ex16_USB_Begin(FM_Storage *storage,
             return r;
         }
     }
-    memset(&g_ex16_usb, 0, sizeof(g_ex16_usb));
-    r = USB_MSC_Init(&g_ex16_usb.msc, storage, 512);
+    memset(&g_usb_msc_ctx, 0, sizeof(g_usb_msc_ctx));
+    r = USB_MSC_Init(&g_usb_msc_ctx.msc, storage, 512);
     if (r != FM_OK)
     {
         if (return_to_mcu != NULL) (void)return_to_mcu(owner_context);
         return r;
     }
-    g_ex16_usb.release_from_mcu = release_from_mcu;
-    g_ex16_usb.return_to_mcu = return_to_mcu;
-    g_ex16_usb.owner_context = owner_context;
-    g_ex16_usb.pc_owns_media = FM_TRUE;
+    g_usb_msc_ctx.release_from_mcu = release_from_mcu;
+    g_usb_msc_ctx.return_to_mcu = return_to_mcu;
+    g_usb_msc_ctx.owner_context = owner_context;
+    g_usb_msc_ctx.pc_owns_media = FM_TRUE;
     return FM_OK;
 }
 
 /* Call only after the USB device has stopped and the host has ejected the
  * volume. It syncs host writes before remounting for FileManager. */
-static inline FM_Result Ex16_USB_End(void)
+static inline FM_Result UsbMsc_End(void)
 {
     FM_Result r;
     FM_Result remount = FM_OK;
 
-    if (!g_ex16_usb.pc_owns_media)
+    if (!g_usb_msc_ctx.pc_owns_media)
     {
         return FM_ERR_NOT_READY;
     }
-    r = USB_MSC_Sync(&g_ex16_usb.msc);
-    g_ex16_usb.pc_owns_media = FM_FALSE;
-    if (g_ex16_usb.return_to_mcu != NULL)
+    r = USB_MSC_Sync(&g_usb_msc_ctx.msc);
+    g_usb_msc_ctx.pc_owns_media = FM_FALSE;
+    if (g_usb_msc_ctx.return_to_mcu != NULL)
     {
-        remount = g_ex16_usb.return_to_mcu(g_ex16_usb.owner_context);
+        remount = g_usb_msc_ctx.return_to_mcu(g_usb_msc_ctx.owner_context);
     }
-    memset(&g_ex16_usb, 0, sizeof(g_ex16_usb));
+    memset(&g_usb_msc_ctx, 0, sizeof(g_usb_msc_ctx));
     return (r != FM_OK) ? r : remount;
 }
 
 /* آمار ترافیک PC - هرجا خواستی وضعیت زنده را لاگ کن */
-static inline void Ex16_USB_GetStats(uint32_t *rd, uint32_t *wr,
+static inline void UsbMsc_GetStats(uint32_t *rd, uint32_t *wr,
                                      uint32_t *fail)
 {
-    if (rd)   *rd   = g_ex16_rd;
-    if (wr)   *wr   = g_ex16_wr;
-    if (fail) *fail = g_ex16_fail;
+    if (rd)   *rd   = g_usb_msc_rd;
+    if (wr)   *wr   = g_usb_msc_wr;
+    if (fail) *fail = g_usb_msc_fail;
 }
 
-static inline FM_Bool Ex16_USB_PCIsOwner(void)
+static inline FM_Bool UsbMsc_PcIsOwner(void)
 {
-    return g_ex16_usb.pc_owns_media;
+    return g_usb_msc_ctx.pc_owns_media;
 }
 
 /* ---- Adapters called from CubeMX usbd_storage_if.c --------------------- */
-static inline int8_t Ex16_STM32_Init(uint8_t lun)
+static inline int8_t UsbMsc_StorageInit(uint8_t lun)
 {
     (void)lun;
-    return g_ex16_usb.pc_owns_media ? EX16_USB_OK : EX16_USB_FAIL;
+    return g_usb_msc_ctx.pc_owns_media ? USB_MSC_OK : USB_MSC_FAIL;
 }
 
-static inline int8_t Ex16_STM32_GetCapacity(uint8_t lun,
+static inline int8_t UsbMsc_StorageGetCapacity(uint8_t lun,
                                             uint32_t *block_count,
                                             uint16_t *block_size)
 {
@@ -237,72 +237,72 @@ static inline int8_t Ex16_STM32_GetCapacity(uint8_t lun,
     FM_Result r;
 
     (void)lun;
-    if (!g_ex16_usb.pc_owns_media || block_count == NULL || block_size == NULL)
+    if (!g_usb_msc_ctx.pc_owns_media || block_count == NULL || block_size == NULL)
     {
-        return EX16_USB_FAIL;
+        return USB_MSC_FAIL;
     }
-    r = USB_MSC_GetCapacity(&g_ex16_usb.msc, &count, &size);
+    r = USB_MSC_GetCapacity(&g_usb_msc_ctx.msc, &count, &size);
     if (r != FM_OK || count > UINT32_MAX || size > UINT16_MAX)
     {
-        return EX16_USB_FAIL;
+        return USB_MSC_FAIL;
     }
     *block_count = (uint32_t)count;
     *block_size = (uint16_t)size;
-    return EX16_USB_OK;
+    return USB_MSC_OK;
 }
 
-static inline int8_t Ex16_STM32_IsReady(uint8_t lun)
+static inline int8_t UsbMsc_StorageIsReady(uint8_t lun)
 {
     (void)lun;
-    return (g_ex16_usb.pc_owns_media &&
-            g_ex16_usb.msc.storage != NULL &&
-            g_ex16_usb.msc.storage->present)
-               ? EX16_USB_OK : EX16_USB_FAIL;
+    return (g_usb_msc_ctx.pc_owns_media &&
+            g_usb_msc_ctx.msc.storage != NULL &&
+            g_usb_msc_ctx.msc.storage->present)
+               ? USB_MSC_OK : USB_MSC_FAIL;
 }
 
 /*
- * گزینهٔ امن: EX16_USB_FORCE_READONLY=1 بده تا PC درایو را فقط-خواندنی
+ * گزینهٔ امن: USB_MSC_FORCE_READONLY=1 بده تا PC درایو را فقط-خواندنی
  * ببیند (Write-Protected). در این حالت ویندوز نمی‌تواند FAT را تغییر
  * دهد — بهترین حالت وقتی است که نمی‌خواهی مالکیت را عوض کنی و فقط
  * می‌خواهی PC فایل‌ها را بخواند. همچنان قانون مالکیت را رعایت کن:
  * PC فقط بخواند و MCU هم روی همان volume فقط بخواند.
  */
-#ifndef EX16_USB_FORCE_READONLY
-#define EX16_USB_FORCE_READONLY 0
+#ifndef USB_MSC_FORCE_READONLY
+#define USB_MSC_FORCE_READONLY 0
 #endif
 
-static inline int8_t Ex16_STM32_IsWriteProtected(uint8_t lun)
+static inline int8_t UsbMsc_StorageIsWriteProtected(uint8_t lun)
 {
     (void)lun;
-#if EX16_USB_FORCE_READONLY
-    return EX16_USB_TRUE;
+#if USB_MSC_FORCE_READONLY
+    return USB_MSC_TRUE;
 #else
-    return (g_ex16_usb.msc.storage != NULL &&
-            g_ex16_usb.msc.storage->read_only)
-               ? EX16_USB_TRUE : EX16_USB_OK;
+    return (g_usb_msc_ctx.msc.storage != NULL &&
+            g_usb_msc_ctx.msc.storage->read_only)
+               ? USB_MSC_TRUE : USB_MSC_OK;
 #endif
 }
 
-static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
+static inline int8_t UsbMsc_StorageRead(uint8_t lun, uint8_t *buffer,
                                      uint32_t lba, uint16_t block_count)
 {
     (void)lun;
-    if (!g_ex16_usb.pc_owns_media)
+    if (!g_usb_msc_ctx.pc_owns_media)
     {
-        return EX16_USB_FAIL;
+        return USB_MSC_FAIL;
     }
     {
         uint32_t done = 0;
         uint32_t t0 = HAL_GetTick();
 
-        if (g_ex16_prev_tick != 0xFFFFFFFFu &&
-            (t0 - g_ex16_prev_tick) > 250u)
+        if (g_usb_msc_prev_tick != 0xFFFFFFFFu &&
+            (t0 - g_usb_msc_prev_tick) > 250u)
         {
-            FM_Log("ex16: gap %lums bein-e READ10-ha (ghabl-e lba=%lu)\n",
-                   (unsigned long)(t0 - g_ex16_prev_tick),
+            FM_Log("UsbMsc: gap %lums bein-e READ10-ha (ghabl-e lba=%lu)\n",
+                   (unsigned long)(t0 - g_usb_msc_prev_tick),
                    (unsigned long)lba);
         }
-        g_ex16_prev_tick = t0;
+        g_usb_msc_prev_tick = t0;
 
         while (done < (uint32_t)block_count)
         {
@@ -310,9 +310,9 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
             size_t bytes;
             FM_Result r;
 
-            if (n > (uint32_t)EX16_BOUNCE_SECTORS)
+            if (n > (uint32_t)USB_MSC_BOUNCE_SECTORS)
             {
-                n = (uint32_t)EX16_BOUNCE_SECTORS;
+                n = (uint32_t)USB_MSC_BOUNCE_SECTORS;
             }
             bytes = (size_t)n * 512u;
 
@@ -320,28 +320,28 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
              * خودمان (نه تکیه بر درایور): Clean قبل از کیک (خطوط کثیفِ
              * احتمالی بیرون بریزد) -> DMA درایور -> Clean+Invalidate
              * بعد از آن => memcpy تضمینی از RAM واقعی می‌خواند. */
-            FM_Cache_CleanForDma(g_ex16_bounce, bytes);
-            r = USB_MSC_ReadBlocks(&g_ex16_usb.msc, lba + done, n,
-                                   g_ex16_bounce);
+            FM_Cache_CleanForDma(g_usb_msc_bounce, bytes);
+            r = USB_MSC_ReadBlocks(&g_usb_msc_ctx.msc, lba + done, n,
+                                   g_usb_msc_bounce);
             if (r != FM_OK)
             {
-                g_ex16_fail++;
-                FM_Log("ex16: !! READ fail lba=%lu n=%u (fail=%lu)\n",
+                g_usb_msc_fail++;
+                FM_Log("UsbMsc: !! READ fail lba=%lu n=%u (fail=%lu)\n",
                        (unsigned long)(lba + done), (unsigned)n,
-                       (unsigned long)g_ex16_fail);
-                return EX16_USB_FAIL;
+                       (unsigned long)g_usb_msc_fail);
+                return USB_MSC_FAIL;
             }
-            FM_Cache_CleanForDma(g_ex16_bounce, bytes);
-            FM_Cache_InvalidateAfterDma(g_ex16_bounce, bytes);
+            FM_Cache_CleanForDma(g_usb_msc_bounce, bytes);
+            FM_Cache_InvalidateAfterDma(g_usb_msc_bounce, bytes);
 
-            if (lba + done == 0u && g_ex16_rd < 9u)
+            if (lba + done == 0u && g_usb_msc_rd < 9u)
             {
-                uint8_t s1a = g_ex16_bounce[510], s1b = g_ex16_bounce[511];
+                uint8_t s1a = g_usb_msc_bounce[510], s1b = g_usb_msc_bounce[511];
 
                 if (s1a == 0x55u && s1b == 0xAAu)
                 {
-                    FM_Log("ex16: lba0 OK (sig 55 AA, rd=%lu)\n",
-                           (unsigned long)g_ex16_rd);
+                    FM_Log("UsbMsc: lba0 OK (sig 55 AA, rd=%lu)\n",
+                           (unsigned long)g_usb_msc_rd);
                 }
                 else
                 {
@@ -350,13 +350,13 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
                      * اگر باز صفر بود یعنی DMA درایور واقعا ننوشته
                      * (مسیر ISR/SDMMC) - لاگ را بفرست تا سراغش برویم. */
                     SCB_InvalidateDCache_by_Addr(
-                        (uint32_t *)(uintptr_t)g_ex16_bounce,
+                        (uint32_t *)(uintptr_t)g_usb_msc_bounce,
                         (int32_t)bytes);
                     __DSB();
-                    if (g_ex16_bounce[510] == 0x55u &&
-                        g_ex16_bounce[511] == 0xAAu)
+                    if (g_usb_msc_bounce[510] == 0x55u &&
+                        g_usb_msc_bounce[511] == 0xAAu)
                     {
-                        FM_Log("%s\n", "ex16: lba0 ba invalide doomm salam "
+                        FM_Log("%s\n", "UsbMsc: lba0 ba invalide doomm salam "
                                "shod (cache line - protocol fixed it)");
                     }
                     else
@@ -371,7 +371,7 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
 
                         /* پروب ۱: همان مسیر، بافر تازه */
                         memset(probe, 0x5Au, sizeof(probe));
-                        r1 = USB_MSC_ReadBlocks(&g_ex16_usb.msc, 0u, 1u,
+                        r1 = USB_MSC_ReadBlocks(&g_usb_msc_ctx.msc, 0u, 1u,
                                                 probe);
                         FM_Cache_CleanForDma(probe, sizeof(probe));
                         FM_Cache_InvalidateAfterDma(probe, sizeof(probe));
@@ -382,15 +382,15 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
                         FM_Cache_CleanForDma(via_fm, sizeof(via_fm));
                         FM_Cache_InvalidateAfterDma(via_fm,
                                                     sizeof(via_fm));
-                        FM_Log("ex16: lba0 ZERO! r1=%d r2=%d\n",
+                        FM_Log("UsbMsc: lba0 ZERO! r1=%d r2=%d\n",
                                (int)r1, (int)r2);
-                        FM_Log("ex16: usb16:");
+                        FM_Log("UsbMsc: usb16:");
                         for (i = 0; i < 16; i++)
                         {
                             FM_Log(" %02X", probe[i]);
                         }
                         FM_Log("%s\n", "");
-                        FM_Log("ex16: sd--16:");
+                        FM_Log("UsbMsc: sd--16:");
                         for (i = 0; i < 16; i++)
                         {
                             FM_Log(" %02X", via_fm[i]);
@@ -402,16 +402,16 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
 
             /* مرحله ۲: کپی CPU به بافر کیوب + Clean => هستهٔ USB با DMA
              * از RAM واقعی می‌خواند. مستقل از کش/MPU/تراز کیوب. */
-            memcpy(buffer + (size_t)done * 512u, g_ex16_bounce, bytes);
+            memcpy(buffer + (size_t)done * 512u, g_usb_msc_bounce, bytes);
             FM_Cache_CleanForDma(buffer + (size_t)done * 512u, bytes);
 
             done += n;
-            g_ex16_rd += n;
-            if ((g_ex16_rd % 128u) < (uint32_t)n)
+            g_usb_msc_rd += n;
+            if ((g_usb_msc_rd % 128u) < (uint32_t)n)
             {
-                FM_Log("ex16: rd=%lu fail=%lu (lba=%lu) t=%lums\n",
-                       (unsigned long)g_ex16_rd,
-                       (unsigned long)g_ex16_fail,
+                FM_Log("UsbMsc: rd=%lu fail=%lu (lba=%lu) t=%lums\n",
+                       (unsigned long)g_usb_msc_rd,
+                       (unsigned long)g_usb_msc_fail,
                        (unsigned long)(lba + done),
                        (unsigned long)(HAL_GetTick() - t0));
             }
@@ -420,23 +420,23 @@ static inline int8_t Ex16_STM32_Read(uint8_t lun, uint8_t *buffer,
         {
             /* یک درخواست خواندن که بیش از ۲ ثانیه کشید = کارت مکث/گیر
              * کرده؛ دقیقاً همین لحظه‌هاست که اکسپلورر قفل می‌زند. */
-            FM_Log("ex16: !! RD SLOW n=%u lba=%lu ms=%lu\n",
+            FM_Log("UsbMsc: !! RD SLOW n=%u lba=%lu ms=%lu\n",
                    (unsigned)block_count, (unsigned long)lba,
                    (unsigned long)(HAL_GetTick() - t0));
         }
     }
-    return EX16_USB_OK;
+    return USB_MSC_OK;
 }
 
-static inline int8_t Ex16_STM32_Write(uint8_t lun, const uint8_t *buffer,
+static inline int8_t UsbMsc_StorageWrite(uint8_t lun, const uint8_t *buffer,
                                       uint32_t lba, uint16_t block_count)
 {
     FM_Result r;
 
     (void)lun;
-    if (!g_ex16_usb.pc_owns_media)
+    if (!g_usb_msc_ctx.pc_owns_media)
     {
-        return EX16_USB_FAIL;
+        return USB_MSC_FAIL;
     }
     {
         uint32_t done = 0;
@@ -454,25 +454,25 @@ static inline int8_t Ex16_STM32_Write(uint8_t lun, const uint8_t *buffer,
             FM_Cache_CleanForDma(buffer + (size_t)done * 512u, bytes);
             FM_Cache_InvalidateAfterDma((void *)(uintptr_t)(buffer +
                                         (size_t)done * 512u), bytes);
-            memcpy(g_ex16_bounce, buffer + (size_t)done * 512u, bytes);
-            FM_Cache_CleanForDma(g_ex16_bounce, bytes);
+            memcpy(g_usb_msc_bounce, buffer + (size_t)done * 512u, bytes);
+            FM_Cache_CleanForDma(g_usb_msc_bounce, bytes);
 
-            r = USB_MSC_WriteBlocks(&g_ex16_usb.msc, lba + done, n,
-                                    g_ex16_bounce);
-            g_ex16_wr += n;
+            r = USB_MSC_WriteBlocks(&g_usb_msc_ctx.msc, lba + done, n,
+                                    g_usb_msc_bounce);
+            g_usb_msc_wr += n;
             if (r != FM_OK)
             {
-                g_ex16_fail++;
-                FM_Log("ex16: !! WRITE fail lba=%lu n=%u (fail=%lu)\n",
+                g_usb_msc_fail++;
+                FM_Log("UsbMsc: !! WRITE fail lba=%lu n=%u (fail=%lu)\n",
                        (unsigned long)(lba + done), (unsigned)n,
-                       (unsigned long)g_ex16_fail);
-                return EX16_USB_FAIL;
+                       (unsigned long)g_usb_msc_fail);
+                return USB_MSC_FAIL;
             }
-            if ((g_ex16_wr % 32u) < (uint32_t)n)
+            if ((g_usb_msc_wr % 32u) < (uint32_t)n)
             {
-                FM_Log("ex16: wr=%lu fail=%lu (lba=%lu) t=%lums\n",
-                       (unsigned long)g_ex16_wr,
-                       (unsigned long)g_ex16_fail,
+                FM_Log("UsbMsc: wr=%lu fail=%lu (lba=%lu) t=%lums\n",
+                       (unsigned long)g_usb_msc_wr,
+                       (unsigned long)g_usb_msc_fail,
                        (unsigned long)(lba + done),
                        (unsigned long)(HAL_GetTick() - t0));
             }
@@ -480,32 +480,32 @@ static inline int8_t Ex16_STM32_Write(uint8_t lun, const uint8_t *buffer,
         }
         if ((HAL_GetTick() - t0) > 2000u)
         {
-            FM_Log("ex16: !! WR SLOW n=%u lba=%lu ms=%lu\n",
+            FM_Log("UsbMsc: !! WR SLOW n=%u lba=%lu ms=%lu\n",
                    (unsigned)block_count, (unsigned long)lba,
                    (unsigned long)(HAL_GetTick() - t0));
         }
     }
-    return EX16_USB_OK;
+    return USB_MSC_OK;
 }
 
-static inline int8_t Ex16_STM32_GetMaxLun(void)
+static inline int8_t UsbMsc_StorageGetMaxLun(void)
 {
     return 0; /* one logical unit */
 }
 
-/* Ready-made ownership callbacks for Example 15 QSPI. Define
+/* Ready-made ownership callbacks for qspi_w25q.h QSPI. Define
  * EXAMPLES_15... first (normally by including its header) before using these. */
 #if defined(QSPI_W25Q_H_)
-static inline FM_Result Ex16_ReleaseQSPI(void *context)
+static inline FM_Result UsbMsc_ReleaseQspi(void *context)
 {
     (void)context;
-    return Ex15_QSPI_UnmountFSForUSB();
+    return QspiW25q_UnmountForUsb();
 }
 
-static inline FM_Result Ex16_ReturnQSPI(void *context)
+static inline FM_Result UsbMsc_ReturnQspi(void *context)
 {
     (void)context;
-    return Ex15_QSPI_RemountFSAfterUSB();
+    return QspiW25q_RemountAfterUsb();
 }
 #endif
 
@@ -522,11 +522,11 @@ typedef struct
     uint8_t drive;
     FM_Bool registered;
     FM_Bool mounted;
-} Ex16_RAMFAT;
+} UsbMsc_RamFat;
 
 /* The RAM buffer must stay alive and its size must be a multiple of 512.
- * A blank buffer must be formatted once with Ex16_RAMFAT_Format(). */
-static inline FM_Result Ex16_RAMFAT_Begin(Ex16_RAMFAT *disk,
+ * A blank buffer must be formatted once with UsbMsc_RamFatFormat(). */
+static inline FM_Result UsbMsc_RamFatBegin(UsbMsc_RamFat *disk,
                                           void *buffer, size_t size,
                                           uint8_t fatfs_drive,
                                           const char *mount_path)
@@ -559,9 +559,9 @@ static inline FM_Result Ex16_RAMFAT_Begin(Ex16_RAMFAT *disk,
 }
 
 /* Explicitly format a blank/corrupt RAM buffer, then mount it. This remains
- * callable when Ex16_RAMFAT_Begin completed initialization but its first
+ * callable when UsbMsc_RamFatBegin completed initialization but its first
  * FS_Mount failed because the buffer did not contain a FAT volume yet. */
-static inline FM_Result Ex16_RAMFAT_Format(Ex16_RAMFAT *disk)
+static inline FM_Result UsbMsc_RamFatFormat(UsbMsc_RamFat *disk)
 {
     FM_Result r;
 
@@ -581,9 +581,9 @@ static inline FM_Result Ex16_RAMFAT_Format(Ex16_RAMFAT *disk)
     return r;
 }
 
-static inline FM_Result Ex16_ReleaseRAM(void *context)
+static inline FM_Result UsbMsc_ReleaseRam(void *context)
 {
-    Ex16_RAMFAT *disk = (Ex16_RAMFAT *)context;
+    UsbMsc_RamFat *disk = (UsbMsc_RamFat *)context;
     FM_Result r;
 
     if (disk == NULL || !disk->mounted) return FM_ERR_NOT_MOUNTED;
@@ -592,9 +592,9 @@ static inline FM_Result Ex16_ReleaseRAM(void *context)
     return r;
 }
 
-static inline FM_Result Ex16_ReturnRAM(void *context)
+static inline FM_Result UsbMsc_ReturnRam(void *context)
 {
-    Ex16_RAMFAT *disk = (Ex16_RAMFAT *)context;
+    UsbMsc_RamFat *disk = (UsbMsc_RamFat *)context;
     FM_Result r;
 
     if (disk == NULL) return FM_ERR_INVALID_ARGUMENT;
@@ -608,7 +608,7 @@ static inline FM_Result Ex16_ReturnRAM(void *context)
     return r;
 }
 
-static inline void Ex16_RAMFAT_End(Ex16_RAMFAT *disk)
+static inline void UsbMsc_RamFatEnd(UsbMsc_RamFat *disk)
 {
     if (disk == NULL) return;
     if (disk->mounted)

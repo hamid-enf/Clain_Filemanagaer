@@ -9,8 +9,8 @@
  * Included from 17 / 19; do not add this file to the CubeMX sources list.
  */
 
-#ifndef EXAMPLES_SIMPLE_IDLE_MUX_H_
-#define EXAMPLES_SIMPLE_IDLE_MUX_H_
+#ifndef FM_TOPAPI_SIMPLE_IDLE_MUX_H
+#define FM_TOPAPI_SIMPLE_IDLE_MUX_H
 
 #include "file_manager.h"
 
@@ -75,4 +75,4 @@ static void SimpleIdle_Remove(void (*fn)(void))
     }
 }
 
-#endif /* EXAMPLES_SIMPLE_IDLE_MUX_H_ */
+#endif /* FM_TOPAPI_SIMPLE_IDLE_MUX_H */

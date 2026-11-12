@@ -1,5 +1,5 @@
 /*
- * Example 21 — STM32H7 SPI TFT DMA (generic, not an ILI9341 / LVGL driver)
+ * spi_tft_dma.h — STM32H7 SPI TFT DMA (generic, not an ILI9341 / LVGL driver)
  *
  * FileManager فقط پیکسل می‌دهد. پنجره/DC/CS و GUI مال برد است.
  *
@@ -13,7 +13,7 @@
  *
  *   LcdSpiDma_Bind(&hspi2, LCD_CS_GPIO_Port, LCD_CS_Pin);
  *
- *   void my_lcd_blit(const void *px, uint16_t w, uint16_t h,
+ *   void App_LcdBlit(const void *px, uint16_t w, uint16_t h,
  *                    FM_PixelFormat fmt, size_t bytes)
  *   {
  *       (void)fmt;
@@ -42,8 +42,8 @@
  * ویدیو: LcdSpiDma_Wait(); LcdSpiDma_Begin(); در while LcdSpiDma_Poll().
  */
 
-#ifndef FM_EXAMPLE_21_SPI_TFT_DMA_H
-#define FM_EXAMPLE_21_SPI_TFT_DMA_H
+#ifndef FM_TOPAPI_SPI_TFT_DMA_H
+#define FM_TOPAPI_SPI_TFT_DMA_H
 
 
 #ifndef SPI_TFT_DMA_H_
@@ -692,4 +692,4 @@ uint8_t LcdSpiDma_Busy(void)
 
 #endif /* SPI_TFT_DMA_H_ */
 
-#endif /* FM_EXAMPLE_21_SPI_TFT_DMA_H */
+#endif /* FM_TOPAPI_SPI_TFT_DMA_H */

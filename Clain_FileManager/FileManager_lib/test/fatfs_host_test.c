@@ -1,7 +1,7 @@
 /*
  * Host test: drives the FileManager FatFS adapter (backends/fm_fatfs.c)
  * against the ff_mock simulator, replaying the exact sequence of the
- * on-target example ex_1_SdCard_file_basic() plus mount/unmount cycles,
+ * on-target example SdCard_FileBasic() plus mount/unmount cycles,
  * advanced handle ops, directory ops and info queries.
  *
  * Build & run:  see test/build_fatfs_host.sh  (ASan + UBSan)
@@ -44,8 +44,8 @@ static FM_Storage g_ram_storage;
 static FM_FS      g_ram_fs;
 static uint8_t    g_ram_buf[32 * 1024];
 
-/* exact replica of the on-target ex_1_SdCard_file_basic() body */
-static void ex_1_sdcard_file_basic(FM_Result *init_r, FM_Result *mount_r)
+/* exact replica of the on-target SdCard_FileBasic() body */
+static void sdcard_file_basic(FM_Result *init_r, FM_Result *mount_r)
 {
     char buf[128];
     FM_Bool exists;
@@ -97,11 +97,11 @@ int main(void)
     printf("== FatFS adapter host test ==\n");
 
     /* ---------------------------------------------------------- */
-    printf("[1] ex_1_SdCard_file_basic replica\n");
+    printf("[1] SdCard_FileBasic replica\n");
     {
         FM_Result ir = FM_OK, mr = FM_OK;
         TEST("FatFS_Init + FS_Mount(/)");
-        ex_1_sdcard_file_basic(&ir, &mr);
+        sdcard_file_basic(&ir, &mr);
         CHECK(ir, "FatFS_Init");
         CHECK(mr, "FS_Mount");
     }
@@ -166,7 +166,7 @@ int main(void)
     }
 
     /* ---------------------------------------------------------- */
-    printf("[3] advanced handle API (ex_3 equivalent)\n");
+    printf("[3] advanced handle API (FileDemo_Advanced equivalent)\n");
     {
         FM_Result r;
         FM_File *f;
@@ -259,7 +259,7 @@ int main(void)
     }
 
     /* ---------------------------------------------------------- */
-    printf("[4] directory API (ex_4 equivalent, '.'/'..' skip)\n");
+    printf("[4] directory API (FileDemo_Directory equivalent, '.'/'..' skip)\n");
     {
         FM_Result r;
         FM_Dir *d;

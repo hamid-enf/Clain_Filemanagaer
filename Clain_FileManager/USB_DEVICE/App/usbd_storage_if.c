@@ -181,7 +181,7 @@ int8_t STORAGE_Init_FS(uint8_t lun)
  UNUSED(lun);
 
 //  return (USBD_OK);
-  return Ex16_STM32_Init(lun);
+  return UsbMsc_StorageInit(lun);
   /* USER CODE END 2 */
 }
 
@@ -200,7 +200,7 @@ int8_t STORAGE_GetCapacity_FS(uint8_t lun, uint32_t *block_num, uint16_t *block_
   *block_num  = STORAGE_BLK_NBR;
   *block_size = STORAGE_BLK_SIZ;
 //  return (USBD_OK);
-  return Ex16_STM32_GetCapacity(lun, block_num, block_size);
+  return UsbMsc_StorageGetCapacity(lun, block_num, block_size);
   /* USER CODE END 3 */
 }
 
@@ -215,7 +215,7 @@ int8_t STORAGE_IsReady_FS(uint8_t lun)
   UNUSED(lun);
 
 //  return (USBD_OK);
-  return Ex16_STM32_IsReady(lun);
+  return UsbMsc_StorageIsReady(lun);
   /* USER CODE END 4 */
 }
 
@@ -230,7 +230,7 @@ int8_t STORAGE_IsWriteProtected_FS(uint8_t lun)
   UNUSED(lun);
 
 //  return (USBD_OK);
-  return Ex16_STM32_IsWriteProtected(lun);
+  return UsbMsc_StorageIsWriteProtected(lun);
   /* USER CODE END 5 */
 }
 
@@ -251,7 +251,7 @@ int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t bl
   UNUSED(blk_len);
 
 //  return (USBD_OK);
-  return Ex16_STM32_Read(lun, buf, blk_addr, blk_len);
+  return UsbMsc_StorageRead(lun, buf, blk_addr, blk_len);
   /* USER CODE END 6 */
 }
 
@@ -272,7 +272,7 @@ int8_t STORAGE_Write_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t b
   UNUSED(blk_len);
 
 //  return (USBD_OK);
-  return Ex16_STM32_Write(lun, buf, blk_addr, blk_len);
+  return UsbMsc_StorageWrite(lun, buf, blk_addr, blk_len);
   /* USER CODE END 7 */
 }
 
@@ -285,7 +285,7 @@ int8_t STORAGE_GetMaxLun_FS(void)
 {
   /* USER CODE BEGIN 8 */
 //  return (STORAGE_LUN_NBR - 1);
-  return Ex16_STM32_GetMaxLun();
+  return UsbMsc_StorageGetMaxLun();
   /* USER CODE END 8 */
 }
 

@@ -9,8 +9,8 @@
  * Included from 17 / 19; do not add this file to the CubeMX sources list.
  */
 
-#ifndef EXAMPLES_SIMPLE_I2S_MUX_H_
-#define EXAMPLES_SIMPLE_I2S_MUX_H_
+#ifndef FM_TOPAPI_SIMPLE_I2S_MUX_H
+#define FM_TOPAPI_SIMPLE_I2S_MUX_H
 
 #include "i2s.h"
 #include "fm_types.h"
@@ -48,7 +48,7 @@ typedef FM_Result (*SimpleI2S_StopFn)(void);
  * declaring two separate rings wasted 32 KB of the same DMA SRAM even
  * though the two players are mutually exclusive (SimpleI2S_Take stops the
  * other).  A single ring sized for the largest consumer is shared by both:
- * SimpleAudio passes the whole ring to Ex13_AudioDma, SimpleVideo uses only
+ * SimpleAudio passes the whole ring to AudioDma, SimpleVideo uses only
  * its smaller 32 KB prefix.  The HAL only hands the pointer/count to the
  * DMA engine, and the ring contents are never touched by both owners at the
  * same time, so this is safe.
@@ -278,4 +278,4 @@ void HAL_I2S_ErrorCallback(I2S_HandleTypeDef *hi2s)
 }
 #endif
 
-#endif /* EXAMPLES_SIMPLE_I2S_MUX_H_ */
+#endif /* FM_TOPAPI_SIMPLE_I2S_MUX_H */

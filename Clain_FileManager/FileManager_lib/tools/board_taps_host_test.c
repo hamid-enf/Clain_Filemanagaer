@@ -1,6 +1,6 @@
 /*
  * board_taps_host_test.c — host validation for the PCM-tap block of
- * board/app_audio_hooks.h (Example 33 wiring: pre-tap DSP, post-tap telemetry,
+ * board/app_audio_hooks.h (audio_record_with_tap.h wiring: pre-tap DSP, post-tap telemetry,
  * automatic 5-second recorder, folder-copy and video-info commands).
  *
  * The tap/pump code is not copied here: the Makefile rule extracts the
@@ -111,7 +111,7 @@ static FM_Result SimpleImage_Begin(void)
 { stub_img_begin_calls++; return stub_img_begin_ret; }
 static size_t SdramAlloc_FreeBytes(void) { return (size_t)8u * 1024u * 1024u; }
 /* the real one lives in board/app_display.h */
-void my_lcd_blit_video(const void *px, uint16_t w, uint16_t h,
+void App_LcdBlitVideo(const void *px, uint16_t w, uint16_t h,
                        FM_PixelFormat fmt, size_t bytes)
 { (void)px; (void)w; (void)h; (void)fmt; (void)bytes; }
 
@@ -131,7 +131,7 @@ int main(void)
     FM_FS fs;
     FM_Bool exists = FM_FALSE;
 
-    printf("board/app_audio_hooks.h PCM-tap block (Example 33) host test\n");
+    printf("board/app_audio_hooks.h PCM-tap block (audio_record_with_tap.h) host test\n");
     printf("==================================================\n");
 
     /* 1) install: pre = قبل از ولوم، post = بعد از ولوم */
@@ -148,7 +148,7 @@ int main(void)
         /* 2a) خاموش (پیش‌فرض): دست‌نخورده */
         Music_TapBoostOff();
         q[0] = 1234;
-        my_audio_pre_tap(NULL, q, 1, 48000, 2);
+        app_audio_pre_tap(NULL, q, 1, 48000, 2);
         ok("tap0: خاموش — نمونه دست‌نخورده", q[0] == 1234);
 
         /* 2b) تراک آرام (پیک ۱۰۰۰): پله‌های نرم +12.5٪ تا ×2
@@ -156,20 +156,20 @@ int main(void)
          * بدهیم AGC خروجیِ خودش را دنبال می‌کند و تست بی‌معنا می‌شود) */
         Music_TapBoostOn();
         q[0] = 1000; q[1] = -1000;
-        my_audio_pre_tap(NULL, q, 2, 48000, 2);          /* گام ۱: 1.125 */
+        app_audio_pre_tap(NULL, q, 2, 48000, 2);          /* گام ۱: 1.125 */
         ok("tap1 گام اول: 1000 → 1125 (گین 288/256)",
            q[0] == 1125 && q[1] == -1125);
         for (i = 0; i < 8; i++)                            /* ادامهٔ پله‌ها */
         {
             q[0] = 1000; q[1] = -1000;                     /* چانک تازه */
-            my_audio_pre_tap(NULL, q, 2, 48000, 2);
+            app_audio_pre_tap(NULL, q, 2, 48000, 2);
         }
         ok("tap1 بعد از ~۱۰ چانک: گین سقف ×2 (1000 → 2000)",
            q[0] == 2000 && q[1] == -2000);
 
         /* 2c) ورودی بلند ناگهانی (پیک ۳۰۰۰۰): بدون کلیپ، فوری پایین */
         q[0] = 30000; q[1] = -20000;
-        my_audio_pre_tap(NULL, q, 2, 48000, 2);
+        app_audio_pre_tap(NULL, q, 2, 48000, 2);
         ok("tap1 تراک بلند: 30000/−20000 دست‌نخورده (بدون کلیپ)",
            q[0] == 30000 && q[1] == -20000);
 
@@ -186,8 +186,8 @@ int main(void)
         ok("vnopres #1: نمایش خاموش (SetPresent(NULL))",
            stub_present_calls == 1 && stub_sv_present == NULL);
         Music_ToggleVideoPresent();
-        ok("vnopres #2: نمایش روشن (my_lcd_blit_video)",
-           stub_present_calls == 2 && stub_sv_present == my_lcd_blit_video);
+        ok("vnopres #2: نمایش روشن (App_LcdBlitVideo)",
+           stub_present_calls == 2 && stub_sv_present == App_LcdBlitVideo);
 
         Music_ToggleVideoAudio();
         Music_ToggleVideoAudio();
@@ -215,7 +215,7 @@ int main(void)
     {
         int16_t chunk[6] = {1000, -1000, 2000, -2000, 3000, -3000};
 
-        my_pcm_tap(NULL, chunk, 6, 48000, 2);      /* تله‌متری + تحویل cfg */
+        app_audio_pcm_tap(NULL, chunk, 6, 48000, 2);      /* تله‌متری + تحویل cfg */
         ok("قلاب: نرخ/کانال تحویل شد (48k/2)",
            rec_cfg_wait == 2u && rec_rate == 48000u && rec_ch == 2u);
         ok("قلاب: تله‌متری پیک", tap_calls == 1u && tap_peak == 3000);
@@ -226,7 +226,7 @@ int main(void)
            rec_start_calls == 1 && rec_start_rate == 48000u &&
            rec_start_ch == 2u && rec_active_demo == 1u);
 
-        my_pcm_tap(NULL, chunk, 6, 48000, 2);      /* کپی به رینگ */
+        app_audio_pcm_tap(NULL, chunk, 6, 48000, 2);      /* کپی به رینگ */
         ok("قلاب: رینگ ضبط پر شد (۶ نمونه)", rec_ring_len == 6u);
 
         fake_tick = 2000u;

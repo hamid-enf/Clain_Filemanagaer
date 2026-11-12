@@ -1,5 +1,5 @@
 /*
- * Example 22 — STM32H7 SDRAM allocator → FM_Alloc / h264bsd / codecs
+ * sdram_alloc.h — STM32H7 SDRAM allocator → FM_Alloc / h264bsd / codecs
  *
  * دیکودر H.264 (h264bsd) برای هر ویدیو چند صد کیلوبایت تا چند مگابایت
  * context و reference picture می‌خواهد و همه را از FM_Alloc می‌گیرد.
@@ -30,8 +30,8 @@
  * تکه‌تکه‌شدن قابل توجه است. 8-byte aligned.
  */
 
-#ifndef FM_EXAMPLE_22_SDRAM_ALLOC_H
-#define FM_EXAMPLE_22_SDRAM_ALLOC_H
+#ifndef FM_TOPAPI_SDRAM_ALLOC_H
+#define FM_TOPAPI_SDRAM_ALLOC_H
 
 
 #ifndef SDRAM_ALLOC_H_
@@ -308,4 +308,4 @@ static size_t SdramAlloc_FreeBytes(void)
 
 #endif /* SDRAM_ALLOC_H_ */
 
-#endif /* FM_EXAMPLE_22_SDRAM_ALLOC_H */
+#endif /* FM_TOPAPI_SDRAM_ALLOC_H */

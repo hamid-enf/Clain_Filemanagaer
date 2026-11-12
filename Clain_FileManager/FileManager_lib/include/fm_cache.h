@@ -322,7 +322,7 @@ static inline void FM_Cache_CleanForDma(const void *addr, size_t bytes)
  * معلق همسایه‌ها از بین نروند — DMA بعداً فقط بایت‌های خودش را
  * بازنویسی می‌کند و اینجا همهٔ خطوط پوشش‌دهنده Invalidate می‌شوند).
  *
- * ترتیب صحیح RX (رعایت‌شده در fm_xdma.h و مثال‌های ۳۲/۳۳):
+ * ترتیب صحیح RX (رعایت‌شده در fm_xdma.h و i2c_eeprom_dma.h / spi_flash_dma_port.h):
  *     FM_Cache_CleanForDma(buf, len);        ۱) قبل از کیک
  *     kick DMA; wait;                        ۲) انتقال
  *     FM_Cache_InvalidateAfterDma(buf, len); ۳) فقط Invalidate

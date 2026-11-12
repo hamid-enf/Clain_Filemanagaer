@@ -1,5 +1,5 @@
 /*
- * Example 10 — BMP Image + Scale + Convert
+ * image_bmp.c — BMP Image + Scale + Convert
  *
  * ساخت، ذخیره، بارگذاری، تغییر اندازه و تبدیل فرمت تصویر.
  *

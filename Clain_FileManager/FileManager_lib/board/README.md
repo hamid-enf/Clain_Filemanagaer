@@ -6,7 +6,7 @@
 
 | فایل | چه چیزی در آن است |
 |---|---|
-| `app_display.h` | `my_lcd_blit` و `my_lcd_blit_video` (تحویل تصویر به TFT)، callbackهای SPI |
+| `app_display.h` | `App_LcdBlit` و `App_LcdBlitVideo` (تحویل تصویر به TFT)، callbackهای SPI |
 | `app_audio_hooks.h` | قلاب‌های PCM قبل و بعد از ولوم، نرمالایزر بلندی (AGC)، ضبط خودکار، `Music_*` |
 | `app_video_hooks.h` | قلاب‌های شروع / پایان ویدیو و دادهٔ فریم |
 | `app_uart_commands.h` | بافرهای UART، دستورهای ساده، و شامل‌کردن `top_api/code_cmd.h` |
@@ -38,7 +38,7 @@ USER CODE WHILE  Poll پخش‌کننده‌ها + دستورهای UART، هر 
   می‌شدند. حالا `App_MpuUserRegions()` و `App_DmaPriorities()` در
   `app_flow.h` هستند.
 - **تنها خطِ دست‌خورده در کد ساخته‌شده** `//  MX_USB_DEVICE_Init();` است:
-  USB را `Ex35_Sd_ShowToPc()` راه می‌اندازد. Generate این خط را
+  USB را `UsbSd_ShowToPc()` راه می‌اندازد. Generate این خط را
   برمی‌گرداند؛ یا دوباره کامنتش کنید یا در CubeMX ← Project Manager ←
   Advanced Settings برای آن تیک «Do Not Generate Function Call» بزنید.
 - بلوک قلاب‌های PCM در `app_audio_hooks.h` (از `#define AGC_TARGET_PEAK`
@@ -104,7 +104,7 @@ cache: icache=1 dcache=1
    (~۳۶ms برای 320×240) قبلاً به زمان decode اضافه می‌شد و در ۱۵fps
    (بودجهٔ ۶۶ms) فریم‌ها می‌افتادند. حالا با decode فریم بعدی هم‌پوشانی دارد.
 
-4. **`SimpleImage_SetOutputSize` از داخل `my_lcd_blit` حذف شد** — هر بار
+4. **`SimpleImage_SetOutputSize` از داخل `App_LcdBlit` حذف شد** — هر بار
    یک RESIZE + blit دوم صف می‌کرد. `UseHwJpeg` هر ۲ ثانیه هم حذف شد؛
    مقدار برگشتی آن `FM_Result` است و `0` یعنی FM_OK (فعال)، نه غیرفعال.
 
@@ -125,9 +125,9 @@ cache: icache=1 dcache=1
 
 ## به‌روزرسانی — مثال‌های کدک‌های جدید + دستورهای حالت پخش (PR #25)
 
-### ex_11_audio_codecs (board/examples_file.h + board/main.c)
+### FileDemo_AudioCodecs (board/examples_file.h + board/main.c)
 
-مثال جدید بعد از `ex_10` اجرا می‌شود و هر ۶ دیکدری که اخیراً به
+مثال جدید بعد از `FileDemo_BmpScaleConvert` اجرا می‌شود و هر ۶ دیکدری که اخیراً به
 کتابخانه اضافه شده را روی فایل‌های واقعی SD تست می‌کند:
 
 | فایل نمونه (در `/media` یا ریشهٔ SD) | کدک |
@@ -167,7 +167,7 @@ cache: icache=1 dcache=1
 
 ### باگ ADPCM که این مثال پیدا کرد (و درست شد)
 
-`ex_11` در اولین اجرا فقط ۱۵۳۶ نمونه از فایل ۱۱KB ای ADPCM دیکد
+`FileDemo_AudioCodecs` در اولین اجرا فقط ۱۵۳۶ نمونه از فایل ۱۱KB ای ADPCM دیکد
 می‌کرد: مسیر `Audio_Read` برای IMA-ADPCM یک بلاک کامل می‌خواند ولی
 نمونه‌های بیش از ظرفیت caller را دور می‌ریخت — با `count` کوچک بیشتر
 فایل گم می‌شد. حالا دیکد ADPCM بلاک‌قاب‌فریم است: هر استریم یک
@@ -177,12 +177,12 @@ cache: icache=1 dcache=1
 `Audio_Seek` هم روی مرز بلاک فرود می‌آید و `block_align` از fmt چانک
 WAV در `FM_AudioInfo.block_align` نگه‌داری می‌شود.
 
-## نوبت بعدی: Example 33، دیسپچ تمیز UART، و عیب‌یابی بلندی صدا
+## نوبت بعدی: audio_record_with_tap.h، دیسپچ تمیز UART، و عیب‌یابی بلندی صدا
 
-### تست واقعی Example 33 روی هاست (`make ex33test`)
+### تست واقعی audio_record_with_tap.h روی هاست (`make audiorecordtest`)
 
-هدر `examples/33_audio_record_with_tap.h` دیگر فقط «چشمی» چک نمی‌شود؛
-`tools/ex33_host_test.c` همان هدر را با HAL شبیه‌سازی‌شده (`tools/halstub`)
+هدر `examples/audio_record_with_tap.h` دیگر فقط «چشمی» چک نمی‌شود؛
+`tools/audio_record_host_test.c` همان هدر را با HAL شبیه‌سازی‌شده (`tools/halstub`)
 کامپایل و **اجرا** می‌کند و در زنجیرهٔ `make check` هم هست:
 
 ```
@@ -194,8 +194,8 @@ WAV در `FM_AudioInfo.block_align` نگه‌داری می‌شود.
   Directory_Copy تودرتو + محتوای فایل‌ها     PASS
 ```
 
-`ex33_folder_copy_demo(src, dst)` حالا پارامتری شد؛ روی برد مثل قبل
-`ex33_folder_copy_demo(NULL, NULL)` = کپی `/qspi/myProject` →
+`audio_record_folder_copy(src, dst)` حالا پارامتری شد؛ روی برد مثل قبل
+`audio_record_folder_copy(NULL, NULL)` = کپی `/qspi/myProject` →
 `/sd/backup/myProject` با `Directory_Copy` (تا `FM_DIR_MAX_DEPTH`،
 برعکس `Directory_CopyTree` که برداشته شد).
 
@@ -218,7 +218,7 @@ WAV در `FM_AudioInfo.block_align` نگه‌داری می‌شود.
 tone vectors) پس سه تله‌متری صادقانه اضافه شد تا ریشه روی برد خودش
 را نشان دهد:
 
-1. `ex13: start_current: track peak=… (%… fs)` — پیک **هر ترک در شروع**
+1. `AudioDma: start_current: track peak=… (%… fs)` — پیک **هر ترک در شروع**
    با اسکن تمام نمونه‌ها (قبلاً `buf check` هر ۶۴مین نمونه را می‌دید
    و عدد 311 گمراه‌کننده بود).
 2. `SimpleAudio: buf check` حالا تمام نمونه‌ها را می‌شمارد.
@@ -231,7 +231,7 @@ tone vectors) پس سه تله‌متری صادقانه اضافه شد تا ر
 در لاگ قبلی همین‌جا مشخص می‌شود). `start` دوباره هم دیگر خطا نمی‌دهد:
 پخش تمیز stop و دوباره begin می‌شود.
 
-## Example 33 روی برد: قلاب‌ها + دستورهای اتوماتیک (299f201 → بعد از آن)
+## audio_record_with_tap.h روی برد: قلاب‌ها + دستورهای اتوماتیک (299f201 → بعد از آن)
 
 بخش «قلاب‌های PCM» در `board/main.c` بازسازی شد تا از روی برد هم مشخص
 باشد کدام تابع کِی اجرا می‌شود:
@@ -239,18 +239,18 @@ tone vectors) پس سه تله‌متری صادقانه اضافه شد تا ر
 ```
 فایل → دیکد
   ▼
-۱) my_audio_pre_tap   ← قبل از پردازش صدا (قبل از ولوم) — DSP/نرمالایزر
+۱) app_audio_pre_tap   ← قبل از پردازش صدا (قبل از ولوم) — DSP/نرمالایزر
   ▼
 ۲) ولوم نرم‌افزاری (vol50/vol90)
   ▼
-۳) my_pcm_tap         ← بعد از پردازش صدا (بعد از ولوم) — VU/تله‌متری/ضبط
+۳) app_audio_pcm_tap         ← بعد از پردازش صدا (بعد از ولوم) — VU/تله‌متری/ضبط
   ▼
 DMA → I2S → بلندگو
 ```
 
 نصب هر دو قلاب با `Music_InstallTaps()` بعد از «هر» `SimpleAudio_Begin()`
 انجام می‌شود (چون Begin حالت را پاک می‌کند). اسلات نرمالایزر بلندی هم
-دقیقاً داخل `my_audio_pre_tap` با کامنت فارسی مشخص است.
+دقیقاً داخل `app_audio_pre_tap` با کامنت فارسی مشخص است.
 
 ### قلاب‌های شروع/پایان (DSP می‌داند چه چیزی پردازش می‌شود)
 
@@ -258,7 +258,7 @@ DMA → I2S → بلندگو
 
 - **آهنگ:** `SimpleAudio_SetTrackStart` / `SetTrackEnd` — شروع: مسیر +
   کدک/نرخ/کانال؛ پایان: همان مسیر وقتی ترک تمام/قطع شود. در
-  `Music_InstallTaps()` نصب می‌شوند و با `my_audio_track_start/end` چاپ می‌شوند.
+  `Music_InstallTaps()` نصب می‌شوند و با `app_audio_track_start/end` چاپ می‌شوند.
 - **ویدیو:** `SimpleVideo_SetTrackStartCallback` / `SetTrackEndCallback` —
   شروع: مسیر + ابعاد + fps؛ پایان: مسیر + شمار فریم‌های دیده‌شده.
 - **فریم داده:** `SimpleVideo_SetFrameCallback` — هر فریم دیکدشده (تبدیل‌شده
@@ -367,4 +367,4 @@ H.264 سنگینِ نرم‌افزاری بهتر است — دقیقاً مشا
 ### تست هاست
 `make tapstest` دو تست جدید دارد: `File_PoolUsed()==2` بعد از دو بازکردن
 و `==0` بعد از Close (+ اجرای `File_PoolDump`). کل زنجیره سبز:
-212/212 + ex33test + tapstest + asan + 8 پورت.
+212/212 + audiorecordtest + tapstest + asan + 8 پورت.

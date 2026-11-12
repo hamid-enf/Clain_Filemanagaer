@@ -2,10 +2,10 @@
  * app_audio_hooks.h — قلاب‌های صدا، ضبط آزمایشی و دستورهای Music_*
  * ================================================================
  *
- *   DataRead / DataReadMono     خواندن PCM خام (دستورهای dtrd / dtrdm)
- *   my_audio_pre_tap            قبل از ولوم: نرمالایزر بلندی (tap1 / tap0)
- *   my_pcm_tap                  بعد از ولوم: پیک زنده + رینگ ضبط
- *   my_audio_track_start/end    شروع و پایان هر ترک
+ *   Music_DataRead / Music_DataReadMono     خواندن PCM خام (دستورهای dtrd / dtrdm)
+ *   app_audio_pre_tap            قبل از ولوم: نرمالایزر بلندی (tap1 / tap0)
+ *   app_audio_pcm_tap                  بعد از ولوم: پیک زنده + رینگ ضبط
+ *   app_audio_track_start/end    شروع و پایان هر ترک
  *   Music_InstallTaps()         نصب همهٔ این‌ها — بعد از هر SimpleAudio_Begin()
  *   Music_*                     دستورهای UART (جدول در top_api/code_cmd.h)
  *   Music_RecPump()             فایل ضبط rectest — در حلقهٔ اصلی
@@ -36,29 +36,29 @@
 #define AUDIO_TAP_FRAMES 256u
 static int16_t audio_buf[AUDIO_TAP_FRAMES * 2u];   /* استریو: L,R */
 
-void DataRead(void)
+void Music_DataRead(void)
 {
     size_t got = 0;
     FM_Result r = SimpleAudio_DataRead(audio_buf, AUDIO_TAP_FRAMES, &got);
 
-    printf("DataRead -> %d, %u frames\n", (int)r, (unsigned)got);
+    printf("Music_DataRead -> %d, %u frames\n", (int)r, (unsigned)got);
     if (r == FM_OK && got > 0u)
     {
         printf("  first L=%d R=%d\n", audio_buf[0], audio_buf[1]);
     }
 }
 
-void DataReadMono(void)
+void Music_DataReadMono(void)
 {
     size_t got = 0;
     FM_Result r = SimpleAudio_DataReadMono(audio_buf, AUDIO_TAP_FRAMES,
                                            &got);
 
-    printf("DataReadMono -> %d, %u samples\n", (int)r, (unsigned)got);
+    printf("Music_DataReadMono -> %d, %u samples\n", (int)r, (unsigned)got);
 }
 
 /* ========================================================================== */
-/* قلاب‌های PCM (Example 33) — کدام تابع، کِی اجرا می‌شود؟                     */
+/* قلاب‌های PCM (audio_record_with_tap.h) — کدام تابع، کِی اجرا می‌شود؟                     */
 /* ========================================================================== */
 /*
  *   مسیر صدا از فایل تا بلندگو (به این ترتیب اجرا می‌شود):
@@ -66,13 +66,13 @@ void DataReadMono(void)
  *      فایل (MP3/WAV/FLAC/...) → دیکد
  *        │
  *        ▼
- *      ۱) my_audio_pre_tap  ←◀ «قبل از پردازش صدا» (قبل از ولوم)
+ *      ۱) app_audio_pre_tap  ←◀ «قبل از پردازش صدا» (قبل از ولوم)
  *        │                      DSP / اکولایزر / نرمالایزر بلندی اینجا
  *        ▼
  *      ۲) ولوم نرم‌افزاری (دستورهای vol50 / vol90)
  *        │
  *        ▼
- *      ۳) my_pcm_tap        ←◀ «بعد از پردازش صدا» (بعد از ولوم)
+ *      ۳) app_audio_pcm_tap        ←◀ «بعد از پردازش صدا» (بعد از ولوم)
  *        │                      VU متر / تله‌متری / ضبط — دقیقاً صدای بلندگو
  *        ▼
  *      DMA → I2S → بلندگو
@@ -104,7 +104,7 @@ static uint8_t  agc_enabled;        /* tap1/tap0 */
 static uint32_t agc_peak_env;       /* دنبال‌کنندهٔ پیک (حمله فوری، رهاسازی آرام) */
 static uint32_t agc_gain_q8 = 256u; /* 1.0x */
 
-static void my_audio_pre_tap(void *ctx, int16_t *pcm, size_t samples,
+static void app_audio_pre_tap(void *ctx, int16_t *pcm, size_t samples,
                              uint32_t rate, uint16_t channels)
 {
     size_t i;
@@ -163,7 +163,7 @@ static void my_audio_pre_tap(void *ctx, int16_t *pcm, size_t samples,
 
 /* ---- ۲) بعد از پردازش صدا (بعد از ولوم، دقیقاً صدای بلندگو) --------------- */
 /*
- * DataRead بالا استریم را جلو می‌برد، پس برای «شنیدن همان چیزی که پخش
+ * Music_DataRead بالا استریم را جلو می‌برد، پس برای «شنیدن همان چیزی که پخش
  * می‌شود» مناسب نیست. این قلاب بعد از اعمال ولوم و درست قبل از DMA صدا
  * زده می‌شود.
  *
@@ -184,7 +184,7 @@ static volatile uint16_t rec_ch;
 static uint8_t  rec_active_demo;          /* ضبط در جریان است */
 static uint32_t rec_deadline;             /* زمان RecStop (wrap-safe) */
 
-static void my_pcm_tap(void *ctx, int16_t *pcm, size_t samples,
+static void app_audio_pcm_tap(void *ctx, int16_t *pcm, size_t samples,
                        uint32_t rate, uint16_t channels)
 {
     size_t k;
@@ -229,7 +229,7 @@ static void my_pcm_tap(void *ctx, int16_t *pcm, size_t samples,
 static uint32_t track_seq;                   /* شمارندهٔ ترک‌های پخش‌شده */
 static char     last_audio_track[FM_PATH_MAX]; /* برای نمایش «در حال پخش» */
 
-static void my_audio_track_start(void *ctx, const char *path,
+static void app_audio_track_start(void *ctx, const char *path,
                                  const FM_AudioInfo *info)
 {
     (void)ctx;
@@ -244,7 +244,7 @@ static void my_audio_track_start(void *ctx, const char *path,
            (unsigned)((info != NULL) ? info->channels : 0u));
 }
 
-static void my_audio_track_end(void *ctx, const char *path,
+static void app_audio_track_end(void *ctx, const char *path,
                                const FM_AudioInfo *info)
 {
     (void)ctx; (void)info;
@@ -256,10 +256,10 @@ static void Music_InstallTaps(void)
 {
     agc_peak_env = 0u;              /* تراک جدید: دنباله از صفر */
     agc_gain_q8 = 256u;
-    SimpleAudio_SetPrePcmTap(my_audio_pre_tap, NULL);   /* قبل از ولوم */
-    SimpleAudio_SetPcmTap(my_pcm_tap, NULL);            /* بعد از ولوم  */
-    SimpleAudio_SetTrackStart(my_audio_track_start, NULL);
-    SimpleAudio_SetTrackEnd(my_audio_track_end, NULL);
+    SimpleAudio_SetPrePcmTap(app_audio_pre_tap, NULL);   /* قبل از ولوم */
+    SimpleAudio_SetPcmTap(app_audio_pcm_tap, NULL);            /* بعد از ولوم  */
+    SimpleAudio_SetTrackStart(app_audio_track_start, NULL);
+    SimpleAudio_SetTrackEnd(app_audio_track_end, NULL);
 }
 
 /* ---- دستورهای UART جدید (از top_api/code_cmd.h صدا زده می‌شوند) ------------- */
@@ -355,7 +355,7 @@ static void Music_ToggleVideoPresent(void)
     static uint8_t vp = 1u;
 
     vp = (uint8_t)!vp;
-    SimpleVideo_SetPresent(vp ? my_lcd_blit_video : NULL);
+    SimpleVideo_SetPresent(vp ? App_LcdBlitVideo : NULL);
     printf("vnopres: نمایش LCD ویدیو %s\n", vp ? "روشن" : "خاموش");
 }
 

@@ -1,5 +1,5 @@
 /*
- * Example 02 — Copy, Move, Rename
+ * file_copy_move.c — Copy, Move, Rename
  *
  * کپی و جابه‌جایی فایل.
  *

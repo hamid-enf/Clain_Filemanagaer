@@ -1,7 +1,7 @@
 /*
- * board_ex11_host.c — host validation for board/examples_file.h
+ * board_file_demo_host.c — host validation for board/examples_file.h
  *
- * ex_11_audio_codecs() is written for the CubeIDE board project, but it
+ * FileDemo_AudioCodecs() is written for the CubeIDE board project, but it
  * deliberately uses only the portable core API (no HAL).  This harness
  * includes the very same header the board uses and runs the example
  * against real assets, so what ships in board/ is executed, not just
@@ -10,11 +10,11 @@
  *   mkdir -p /tmp/boardhost/media && cd /tmp/boardhost
  *   cp audio_test files and test/vectors files into media/
  *   gcc -Iinclude -Ibackends -Isrc -DFM_HOST_BUILD=1 \
- *       tools/board_ex11_host.c libfilemanager.a -lm -o ex11host
- *   ./ex11host | tee ex11.log
+ *       tools/board_file_demo_host.c libfilemanager.a -lm -o filedemohost
+ *   ./filedemohost | tee filedemo.log
  *
  * PosixFS is mounted at "/" (= the process CWD, /tmp/boardhost), so
- * ex_file_begin()'s '/' check passes and ex_11_find()'s "/media/<x>"
+ * file_demo_begin()'s '/' check passes and file_demo_find_audio()'s "/media/<x>"
  * probe resolves to ./media/<x> — the copied assets.  A
  * "skip (not on SD)" line means assets were not copied: harness setup
  * problem, not a library problem.
@@ -49,7 +49,7 @@ int main(void)
     }
 
     FM_Log_UseStdout();
-    ex_11_audio_codecs();
+    FileDemo_AudioCodecs();
     return 0;
 }
 

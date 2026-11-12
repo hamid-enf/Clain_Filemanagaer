@@ -11,7 +11,7 @@
  *     MX_SDMMC1_SD_Init();
  *     FileManager_Init();
  *     FM_SD_Hal_Attach(&hsd1);
- *     SD_examples_begin();   // FatFS_Init + FS_Mount
+ *     SdCard_Begin();   // FatFS_Init + FS_Mount
  */
 #ifndef FM_SD_HAL_H
 #define FM_SD_HAL_H

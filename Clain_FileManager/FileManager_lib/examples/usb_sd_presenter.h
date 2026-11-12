@@ -5,18 +5,18 @@
  * تصمیم معماری (از این به بعد):
  *   - PC فقط و فقط SD کارت را می‌بیند (درایو FAT32 واقعی، فایل دوطرفه).
  *   - QSPI و فلش SPI هرگز به PC ارائه نمی‌شوند؛ تبادلشان با MCU است
- *     (FM_Transfer_Copy یا exT_*).
+ *     (FM_Transfer_Copy یا TransferDemo_*).
  *   - سوییچ هوشمند مالکیت: هر وقت خواستی SD بده به PC، هر وقت خواستی
  *     برگردان به MCU — unmount/mount و sync خودکار انجام می‌شود.
  *
  * جریان کار هدف:
  *   ۱) MCU داده را از QSPI/فلش به SD می‌آورد (داخل چیپ، سریع):
- *         Ex35_Sd_CopyFromQspi("/qspi/video.avi", "/video.avi");
+ *         UsbSd_CopyFromQspi("/qspi/video.avi", "/video.avi");
  *   ۲) SD می‌رود روی PC:
- *         Ex35_Sd_ShowToPc();
+ *         UsbSd_ShowToPc();
  *      فایل را در ویندوز می‌بینی، کپی هم می‌توانی بکنی.
  *   ۳) در ویندوز Eject می‌کنی، بعد:
- *         Ex35_Sd_TakeBack();
+ *         UsbSd_TakeBack();
  *      SD دوباره مال MCU، مونت و آمادهٔ پخش.
  *
  * ---------------------------------------------------------------------
@@ -27,45 +27,45 @@
  *   - CubeMX: همان تنظیمات USB سابق (USB_OTG_FS Device_Only + کلاس MSC
  *     + دقیقاً 48MHz برای USB + NVIC). MX_USB_DEVICE_Init را از لیست
  *     پریفریل‌ها بردار — خود این ماژول مدیریتش می‌کند.
- *   - usbd_storage_if.c: همان ۷ خط پل (مثل مثال ۳۴/۱۶):
+ *   - usbd_storage_if.c: همان ۷ خط پل (مثل usb_present.h / usb_msc.h):
  *         #include "usb_msc.h"
- *         STORAGE_Init_FS            -> Ex16_STM32_Init(lun)
- *         STORAGE_GetCapacity_FS     -> Ex16_STM32_GetCapacity(...)
- *         STORAGE_IsReady_FS         -> Ex16_STM32_IsReady(lun)
- *         STORAGE_IsWriteProtected_FS-> Ex16_STM32_IsWriteProtected(lun)
- *         STORAGE_Read_FS            -> Ex16_STM32_Read(...)
- *         STORAGE_Write_FS           -> Ex16_STM32_Write(...)
- *         STORAGE_GetMaxLun_FS       -> Ex16_STM32_GetMaxLun()
+ *         STORAGE_Init_FS            -> UsbMsc_StorageInit(lun)
+ *         STORAGE_GetCapacity_FS     -> UsbMsc_StorageGetCapacity(...)
+ *         STORAGE_IsReady_FS         -> UsbMsc_StorageIsReady(lun)
+ *         STORAGE_IsWriteProtected_FS-> UsbMsc_StorageIsWriteProtected(lun)
+ *         STORAGE_Read_FS            -> UsbMsc_StorageRead(...)
+ *         STORAGE_Write_FS           -> UsbMsc_StorageWrite(...)
+ *         STORAGE_GetMaxLun_FS       -> UsbMsc_StorageGetMaxLun()
  *
  * ---------------------------------------------------------------------
  * سیم‌کشی در main.c (فقط یک TU — همان main)
  * ---------------------------------------------------------------------
  *     در USER CODE 0 (قبل از include ی defines.h):
- *     #define EX16_USB_DEFINE_CONTEXT      <- فقط همین فایل
- *     #define EX35_CUBE_USB                <- کنترل USB خودکار
+ *     #define USB_MSC_DEFINE_CONTEXT      <- فقط همین فایل
+ *     #define USB_SD_CUBE_USB                <- کنترل USB خودکار
  *     #include "usb_msc.h"
  *     #include "usb_sd_presenter.h"
  *
  * ترتیب بوت:
  *     FM_SD_Hal_Attach(&hsd1);
- *     Ex35_Sd_FatRoot();        <- ریشه = FAT32 کارت (برای دوطرفگی)
- *     ... ex_1..ex_10 / exS_* / exM_* ...   <- همه روی همان ریشه FAT
+ *     UsbSd_FatRoot();        <- ریشه = FAT32 کارت (برای دوطرفگی)
+ *     ... FileDemo_* / SdDemo_* / SdMediaDemo_* ...   <- همه روی همان ریشه FAT
  *     ...
  *     SimpleVideo_Stop();       <- پخش که SD را نگه می‌دارد، ببند
- *     Ex35_Sd_ShowToPc();       <- SD رفت روی PC
+ *     UsbSd_ShowToPc();       <- SD رفت روی PC
  *     (Eject در ویندوز)
- *     Ex35_Sd_TakeBack();       <- SD برگشت به MCU
+ *     UsbSd_TakeBack();       <- SD برگشت به MCU
  *
- * اختیاری: EX16_USB_FORCE_READONLY=1 قبل از include ی 16 یعنی PC فقط
+ * اختیاری: USB_MSC_FORCE_READONLY=1 قبل از include ی 16 یعنی PC فقط
  * می‌خواند؛ هیچ‌کس نمی‌نویسد، امن‌ترین حالت برای نمایش.
  *
- * نکته: بدون EX35_CUBE_USB هم می‌شود (کنترل دستی): آن‌وقت بعد از
+ * نکته: بدون USB_SD_CUBE_USB هم می‌شود (کنترل دستی): آن‌وقت بعد از
  * ShowToPc خودت MX_USB_DEVICE_Init() و قبل از TakeBack خودت
- * USBD_Stop(&hUsbDeviceFS) بزن. با EX35_CUBE_USB همه‌ش خودکار است.
+ * USBD_Stop(&hUsbDeviceFS) بزن. با USB_SD_CUBE_USB همه‌ش خودکار است.
  */
 
-#ifndef FM_EXAMPLE_35_USB_SD_PRESENTER_H
-#define FM_EXAMPLE_35_USB_SD_PRESENTER_H
+#ifndef FM_TOPAPI_USB_SD_PRESENTER_H
+#define FM_TOPAPI_USB_SD_PRESENTER_H
 
 #if !defined(FM_HOST_BUILD) || (FM_HOST_BUILD == 0)
 
@@ -81,7 +81,7 @@
 #include "usb_msc.h"
 
 /* کنترل مستقیم پشتهٔ USB کیوب - فقط روی برد */
-#if defined(EX35_CUBE_USB)
+#if defined(USB_SD_CUBE_USB)
 #include "stm32h7xx_hal.h"
 #include "usbd_core.h"      /* USBD_Start/USBD_Stop */
 extern USBD_HandleTypeDef hUsbDeviceFS;
@@ -93,27 +93,27 @@ extern void MX_USB_DEVICE_Init(void);
 /* ------------------------------------------------------------------ */
 /* لاگ برد (r8): خواندن SD از داخل context وقفهٔ USB با کش روشن، FM_OK
  * با محتوای صفر برمی‌گرداند؛ همان خواندن در thread اصلی سالم است (تمام
- * exS_* سبز). پس کل پردازش USB را به حلقهٔ اصلی می‌آوریم:
+ * SdDemo_* سبز). پس کل پردازش USB را به حلقهٔ اصلی می‌آوریم:
  *   ۱) ShowToPc خودش وقفهٔ OTG_FS را خاموش می‌کند
- *   ۲) تو Ex35_UsbPoll() را در while(1) (و هر حلقهٔ منتظر) صدا بزن:
- *          while(1){ ...; Ex35_UsbPoll(); }
+ *   ۲) تو UsbSd_Poll() را در while(1) (و هر حلقهٔ منتظر) صدا بزن:
+ *          while(1){ ...; UsbSd_Poll(); }
  *   و اگر حلقهٔ انتظار داری:
- *          while(sd_pc_mcu==1){ Ex35_UsbPoll(); HAL_Delay(1); }
+ *          while(sd_pc_mcu==1){ UsbSd_Poll(); HAL_Delay(1); }
  *      (HAL_Delay(1000) داخل انتظار یعنی USB یک‌ثانیه‌ای گرسنه است!) */
 /* اسم CMSIS: OTG_FS_IRQn (روی هدر واقعی و استاب هر دو هست) */
-FM_Result Ex35_Usb_ThreadMode(void)
+FM_Result UsbSd_ThreadMode(void)
 {
     HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
-    FM_Log("%s\n", ("ex35: USB dar hal-ye asli - Ex35_UsbPoll() ra dar "
+    FM_Log("%s\n", ("UsbSd: USB dar hal-ye asli - UsbSd_Poll() ra dar "
                     "while(1) bezan"));
     return FM_OK;
 }
 
-static uint32_t ex35_hb_tick;
-static uint32_t ex35_hb_rd, ex35_hb_wr, ex35_hb_fail;
-static uint32_t ex35_hb_mark_rd = 0xFFFFFFFFu;
+static uint32_t usb_sd_hb_tick;
+static uint32_t usb_sd_hb_rd, usb_sd_hb_wr, usb_sd_hb_fail;
+static uint32_t usb_sd_hb_mark_rd = 0xFFFFFFFFu;
 
-void Ex35_UsbPoll(void)
+void UsbSd_Poll(void)
 {
     HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
 
@@ -124,36 +124,36 @@ void Ex35_UsbPoll(void)
     {
         uint32_t now = HAL_GetTick();
 
-        if ((uint32_t)(now - ex35_hb_tick) < 5000u)
+        if ((uint32_t)(now - usb_sd_hb_tick) < 5000u)
         {
             return;
         }
-        ex35_hb_tick = now;
-        if (g_ex16_rd != ex35_hb_rd || g_ex16_wr != ex35_hb_wr ||
-            g_ex16_fail != ex35_hb_fail)
+        usb_sd_hb_tick = now;
+        if (g_usb_msc_rd != usb_sd_hb_rd || g_usb_msc_wr != usb_sd_hb_wr ||
+            g_usb_msc_fail != usb_sd_hb_fail)
         {
-            FM_Log("ex35: usb active rd=%lu wr=%lu fail=%lu\n",
-                   (unsigned long)g_ex16_rd, (unsigned long)g_ex16_wr,
-                   (unsigned long)g_ex16_fail);
-            ex35_hb_rd = g_ex16_rd;
-            ex35_hb_wr = g_ex16_wr;
-            ex35_hb_fail = g_ex16_fail;
+            FM_Log("UsbSd: usb active rd=%lu wr=%lu fail=%lu\n",
+                   (unsigned long)g_usb_msc_rd, (unsigned long)g_usb_msc_wr,
+                   (unsigned long)g_usb_msc_fail);
+            usb_sd_hb_rd = g_usb_msc_rd;
+            usb_sd_hb_wr = g_usb_msc_wr;
+            usb_sd_hb_fail = g_usb_msc_fail;
         }
-        else if ((ex35_hb_rd != 0u || ex35_hb_wr != 0u) &&
-                 ex35_hb_mark_rd != ex35_hb_rd)
+        else if ((usb_sd_hb_rd != 0u || usb_sd_hb_wr != 0u) &&
+                 usb_sd_hb_mark_rd != usb_sd_hb_rd)
         {
-            FM_Log("ex35: usb activity stopped (rd=%lu wr=%lu fail=%lu)\n",
-                   (unsigned long)ex35_hb_rd, (unsigned long)ex35_hb_wr,
-                   (unsigned long)ex35_hb_fail);
-            ex35_hb_mark_rd = ex35_hb_rd;
+            FM_Log("UsbSd: usb activity stopped (rd=%lu wr=%lu fail=%lu)\n",
+                   (unsigned long)usb_sd_hb_rd, (unsigned long)usb_sd_hb_wr,
+                   (unsigned long)usb_sd_hb_fail);
+            usb_sd_hb_mark_rd = usb_sd_hb_rd;
         }
     }
 }
 #endif
 
-static FM_FS   g_ex35_sd_fs;
-static FM_Bool g_ex35_fat_root;   /* ریشه را خودم FAT کردم */
-static FM_Bool g_ex35_usb_up;     /* MX یک‌بار انجام شده */
+static FM_FS   g_usb_sd_sd_fs;
+static FM_Bool g_usb_sd_fat_root;   /* ریشه را خودم FAT کردم */
+static FM_Bool g_usb_sd_usb_up;     /* MX یک‌بار انجام شده */
 
 /* ------------------------------------------------------------------ */
 /* ریشه = FAT32 کارت - یک بار در ابتدای بوت                            */
@@ -161,7 +161,7 @@ static FM_Bool g_ex35_usb_up;     /* MX یک‌بار انجام شده */
 /* اگر ریشه از قبل مونت باشد (مثلاً FMFS خودکار)، اول بسته می‌شود تا
  * هیچ‌وقت دو فایل‌سیستم روی یک volume نداشته باشیم. از این به بعد
  * فایل‌های MCU همان فایل‌هایی هستند که ویندوز می‌بیند. */
-FM_Result Ex35_Sd_FatRoot(void)
+FM_Result UsbSd_FatRoot(void)
 {
     FM_Result r;
     FM_Bool mounted = FM_FALSE;
@@ -173,30 +173,30 @@ FM_Result Ex35_Sd_FatRoot(void)
         r = FS_Unmount("/");
         if (r != FM_OK)
         {
-            printf("ex35: FS_Unmount(/) failed (%d)\n", (int)r);
+            printf("UsbSd: FS_Unmount(/) failed (%d)\n", (int)r);
             return r;
         }
     }
 
-    r = FatFS_Init(&g_ex35_sd_fs, 0);      /* درایو 0 = SD */
+    r = FatFS_Init(&g_usb_sd_sd_fs, 0);      /* درایو 0 = SD */
     if (r != FM_OK)
     {
-        printf("ex35: FatFS_Init(0) failed (%d)\n", (int)r);
+        printf("UsbSd: FatFS_Init(0) failed (%d)\n", (int)r);
         return r;
     }
-    r = FS_Mount("/", &g_ex35_sd_fs);
+    r = FS_Mount("/", &g_usb_sd_sd_fs);
     if (r != FM_OK)
     {
-        printf("ex35: / mont nashod (%d) - kart ra dar PC FAT32 format "
+        printf("UsbSd: / mont nashod (%d) - kart ra dar PC FAT32 format "
                "kon\n", (int)r);
         return r;
     }
-    g_ex35_fat_root = FM_TRUE;
+    g_usb_sd_fat_root = FM_TRUE;
 
-    FM_Log("%s\n", ("ex35 build: " EX16_BUILD_ID));
+    FM_Log("%s\n", ("UsbSd build: " USB_MSC_BUILD_ID));
     if (FS_GetInfo("/", &info) == FM_OK)
     {
-        printf("ex35: root = %s, free %lu KB (PC-o MCU yek FAT mibinand)"
+        printf("UsbSd: root = %s, free %lu KB (PC-o MCU yek FAT mibinand)"
                "\n", info.type,
                (unsigned long)(info.free_space / 1024u));
     }
@@ -208,7 +208,7 @@ FM_Result Ex35_Sd_FatRoot(void)
 /* ------------------------------------------------------------------ */
 
 /* SD می‌رود دست PC: بستن مونت MCU + sync */
-static FM_Result ex35_release(void *ctx)
+static FM_Result usb_sd_release(void *ctx)
 {
     FM_Bool mounted = FM_FALSE;
 
@@ -222,15 +222,15 @@ static FM_Result ex35_release(void *ctx)
 }
 
 /* SD برمی‌گردد دست MCU: دوباره همان FAT را مونت کن */
-static FM_Result ex35_acquire(void *ctx)
+static FM_Result usb_sd_acquire(void *ctx)
 {
     (void)ctx;
-    if (g_ex35_fat_root)
+    if (g_usb_sd_fat_root)
     {
-        FM_Result r = FatFS_Init(&g_ex35_sd_fs, 0);
+        FM_Result r = FatFS_Init(&g_usb_sd_sd_fs, 0);
 
         if (r != FM_OK) return r;
-        return FS_Mount("/", &g_ex35_sd_fs);
+        return FS_Mount("/", &g_usb_sd_sd_fs);
     }
     {
         FM_FS fs;
@@ -241,19 +241,19 @@ static FM_Result ex35_acquire(void *ctx)
     }
 }
 
-/* SD -> PC (کاملاً خودکار با EX35_CUBE_USB) */
-FM_Result Ex35_Sd_ShowToPc(void)
+/* SD -> PC (کاملاً خودکار با USB_SD_CUBE_USB) */
+FM_Result UsbSd_ShowToPc(void)
 {
     FM_Storage *sd = NULL;
     FM_Result r;
 
-    if (Ex16_USB_PCIsOwner())
+    if (UsbMsc_PcIsOwner())
     {
-        FM_Log("%s\n", "ex35: SD alan dast PC ast - kari nakhastam");
+        FM_Log("%s\n", "UsbSd: SD alan dast PC ast - kari nakhastam");
         return FM_ERR_BUSY;
     }
     /* قبل از unmount، هر پخش‌کننده‌ای که فایل را روی SD باز دارد باید
-     * بسته شود؛ وگرنه Ex35_Sd_ShowToPc در میانهٔ پخش، mount را از زیر
+     * بسته شود؛ وگرنه UsbSd_ShowToPc در میانهٔ پخش، mount را از زیر
      * دست FileManager می‌کشد و اجرا گیر/کرش می‌کند. اگر هدر این
      * پخش‌کننده‌ها include نشده باشد، این بلوک بی‌اثر است. */
 #if defined(SIMPLE_VIDEO_H_)
@@ -268,72 +268,72 @@ FM_Result Ex35_Sd_ShowToPc(void)
     (void)Storage_Find("SD", &sd);
     if (sd == NULL)
     {
-        FM_Log("%s\n", "ex35: storage 'SD' nabood - FM_SD_Hal_Attach(&hsd1)?");
+        FM_Log("%s\n", "UsbSd: storage 'SD' nabood - FM_SD_Hal_Attach(&hsd1)?");
         return FM_ERR_NOT_FOUND;
     }
-    r = Ex16_USB_Begin(sd, ex35_release, ex35_acquire, NULL);
+    r = UsbMsc_Begin(sd, usb_sd_release, usb_sd_acquire, NULL);
     if (r != FM_OK)
     {
-        printf("ex35: USB begin failed (%d)\n", (int)r);
+        printf("UsbSd: USB begin failed (%d)\n", (int)r);
         return r;
     }
-#if defined(EX35_CUBE_USB)
-    if (!g_ex35_usb_up)
+#if defined(USB_SD_CUBE_USB)
+    if (!g_usb_sd_usb_up)
     {
         MX_USB_DEVICE_Init();          /* فقط بار اول */
-        g_ex35_usb_up = FM_TRUE;
+        g_usb_sd_usb_up = FM_TRUE;
     }
     else
     {
         (void)USBD_Start(&hUsbDeviceFS);
     }
-    (void)Ex35_Usb_ThreadMode();       /* وقفه خاموش - پول در while(1) */
-    FM_Log("%s\n", "ex35: SD raft ro PC - bad az Eject: Ex35_Sd_TakeBack()");
+    (void)UsbSd_ThreadMode();       /* وقفه خاموش - پول در while(1) */
+    FM_Log("%s\n", "UsbSd: SD raft ro PC - bad az Eject: UsbSd_TakeBack()");
 #else
-    FM_Log("%s\n", "ex35: bridge amade - hala MX_USB_DEVICE_Init() bezan");
+    FM_Log("%s\n", "UsbSd: bridge amade - hala MX_USB_DEVICE_Init() bezan");
 #endif
     return FM_OK;
 }
 
 /* PC -> MCU (بعد از Eject در ویندوز) */
-FM_Result Ex35_Sd_TakeBack(void)
+FM_Result UsbSd_TakeBack(void)
 {
     FM_Result r;
 
-    if (!Ex16_USB_PCIsOwner())
+    if (!UsbMsc_PcIsOwner())
     {
-        FM_Log("%s\n", "ex35: SD dast PC nist ke bargardonam");
+        FM_Log("%s\n", "UsbSd: SD dast PC nist ke bargardonam");
         return FM_ERR_NOT_READY;
     }
-#if defined(EX35_CUBE_USB)
+#if defined(USB_SD_CUBE_USB)
     (void)USBD_Stop(&hUsbDeviceFS);
 #else
-    FM_Log("%s\n", "ex35: aval USBD_Stop(&hUsbDeviceFS) bezan (ya EX35_CUBE_USB)");
+    FM_Log("%s\n", "UsbSd: aval USBD_Stop(&hUsbDeviceFS) bezan (ya USB_SD_CUBE_USB)");
 #endif
-    r = Ex16_USB_End();                /* sync + remount خودکار */
-    printf("ex35: SD bargasht be MCU (%d)\n", (int)r);
+    r = UsbMsc_End();                /* sync + remount خودکار */
+    printf("UsbSd: SD bargasht be MCU (%d)\n", (int)r);
     return r;
 }
 
 /* مالک کیست؟ 1 = PC ، 0 = MCU */
-FM_Bool Ex35_Sd_IsWithPc(void)
+FM_Bool UsbSd_IsWithPc(void)
 {
-    return Ex16_USB_PCIsOwner();
+    return UsbMsc_PcIsOwner();
 }
 
 /* ------------------------------------------------------------------ */
 /* آماده‌سازی داده برای PC - تبادل MCU-داخلی SD <-> QSPI                */
 /* ------------------------------------------------------------------ */
 /* قانون: این کار فقط وقتی مجاز است که SD دست MCU باشد. */
-FM_Result Ex35_Sd_CopyFromQspi(const char *src, const char *dst)
+FM_Result UsbSd_CopyFromQspi(const char *src, const char *dst)
 {
-    if (Ex16_USB_PCIsOwner())
+    if (UsbMsc_PcIsOwner())
     {
-        FM_Log("%s\n", "ex35: SD dast PC ast - aval Ex35_Sd_TakeBack()");
+        FM_Log("%s\n", "UsbSd: SD dast PC ast - aval UsbSd_TakeBack()");
         return FM_ERR_BUSY;
     }
     return FM_Transfer_Copy(src, dst, NULL);
 }
 
 #endif /* !FM_HOST_BUILD */
-#endif /* FM_EXAMPLE_35_USB_SD_PRESENTER_H */
+#endif /* FM_TOPAPI_USB_SD_PRESENTER_H */
