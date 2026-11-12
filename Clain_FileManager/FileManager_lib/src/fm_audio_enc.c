@@ -51,6 +51,17 @@
 #define FM_FLAC_ENC_BLOCK 4096u
 #endif
 
+/* Power-loss checkpoint.  Every time this many bytes have gone to the
+ * card, the lengths in the header are brought up to date (WAV, ADPCM) and
+ * the file is synced (File_Flush: the directory entry gets its size).  A
+ * recording that is never closed (reset, power loss, card pulled) then
+ * plays up to the last checkpoint instead of being an empty file.  The
+ * cost is one sync and, for WAV, two 4-byte writes in the first sector.
+ * 0 = never (the lengths are then written by Close only). */
+#ifndef FM_AUDIO_ENC_SYNC_BYTES
+#define FM_AUDIO_ENC_SYNC_BYTES 262144u
+#endif
+
 #if (FM_AUDIO_ENC_OUT_BYTES < 512u) || ((FM_AUDIO_ENC_OUT_BYTES % 512u) != 0u)
 #error "FM_AUDIO_ENC_OUT_BYTES must be a multiple of 512"
 #endif
@@ -105,6 +116,9 @@ typedef struct
     uint8_t *buf;      /* ENC_ALIGN-aligned start inside `raw`   */
     uint32_t cap;      /* a multiple of 512                      */
     uint32_t len;
+    uint64_t written;  /* bytes handed to the file so far        */
+    uint32_t unsynced; /* ... of those, since the last checkpoint */
+    FM_Bool  sync_due; /* a checkpoint is wanted (see enc_checkpoint_due) */
 } EncOut;
 
 static FM_Result encout_init(EncOut *o)
@@ -169,6 +183,15 @@ static FM_Result encout_put(EncOut *o, FM_File *f, const void *data,
                 return r;
             }
             o->len = 0u;
+            o->written += o->cap;
+#if FM_AUDIO_ENC_SYNC_BYTES > 0u
+            o->unsynced += o->cap;
+            if (o->unsynced >= (uint32_t)FM_AUDIO_ENC_SYNC_BYTES)
+            {
+                o->unsynced = 0u;
+                o->sync_due = FM_TRUE;
+            }
+#endif
         }
     }
     return FM_OK;
@@ -181,9 +204,38 @@ static FM_Result encout_flush(EncOut *o, FM_File *f)
     if (o->len > 0u)
     {
         r = enc_file_write(f, o->buf, o->len);
+        if (r == FM_OK)
+        {
+            o->written += o->len;
+        }
         o->len = 0u;
     }
     return r;
+}
+
+/* A checkpoint is due?  Asked by the encoders once per write call, after
+ * the samples are in: the answer is "yes" once for every
+ * FM_AUDIO_ENC_SYNC_BYTES that went to the card. */
+static FM_Bool enc_checkpoint_due(EncOut *o)
+{
+    FM_Bool due = o->sync_due;
+
+    o->sync_due = FM_FALSE;
+    return due;
+}
+
+/* How much of the file is really on the card.  Used after a failed write
+ * (card full, I/O error): the header is then made to describe exactly
+ * that much, so what was saved still opens and plays. */
+static uint64_t enc_bytes_on_card(FM_File *f, const EncOut *o)
+{
+    uint64_t size = 0u;
+
+    if (File_Size(f, &size) != FM_OK)
+    {
+        size = o->written;
+    }
+    return size;
 }
 
 /* Rewrite `size` bytes at `offset` (a header field, once the length is
@@ -262,6 +314,52 @@ static FM_Result pcm_init(void **ctx, const FM_AudioEncodeConfig *config)
     return FM_OK;
 }
 
+/* Write the two lengths of the header for a file of `file_bytes` bytes
+ * (only whole sample frames are counted), then go back to `file_bytes`
+ * so that writing can continue.  With `last` (the file is being closed
+ * after an error) what is beyond the last whole frame is cut off, so
+ * that the file is exactly as long as its header says. */
+static FM_Result pcm_lengths(const PcmEnc *e, FM_File *f, uint64_t file_bytes,
+                             FM_Bool last)
+{
+    uint8_t v[4];
+    uint32_t data;
+    FM_Result r;
+
+    if (file_bytes < (uint64_t)WAV_PCM_HEADER)
+    {
+        return FM_OK;                 /* not even the header is there */
+    }
+    file_bytes -= WAV_PCM_HEADER;
+    if (file_bytes > (uint64_t)WAV_MAX_DATA)
+    {
+        file_bytes = WAV_MAX_DATA;
+    }
+    data = (uint32_t)file_bytes;
+    data -= data % (e->ch * 2u);
+    enc_wr32(v, 36u + data);
+    r = enc_patch(f, 4u, v, 4u);
+    if (r == FM_OK)
+    {
+        enc_wr32(v, data);
+        r = enc_patch(f, 40u, v, 4u);
+    }
+    if (r == FM_OK && last)
+    {
+        if (data != file_bytes)
+        {
+            (void)File_Truncate(f, (uint64_t)WAV_PCM_HEADER + data);
+        }
+        return FM_OK;
+    }
+    if (r == FM_OK)
+    {
+        r = File_Seek(f, (int64_t)((uint64_t)WAV_PCM_HEADER + file_bytes),
+                      FM_SEEK_SET);
+    }
+    return r;
+}
+
 static FM_Result pcm_write(void *ctx, FM_File *f, const int16_t *pcm,
                            size_t frame_count, size_t *frames_consumed)
 {
@@ -309,6 +407,19 @@ static FM_Result pcm_write(void *ctx, FM_File *f, const int16_t *pcm,
         return e->err;
     }
     e->data_bytes += bytes;
+    if (enc_checkpoint_due(&e->out))
+    {
+        /* the header now describes what is on the card; then sync */
+        e->err = pcm_lengths(e, f, e->out.written, FM_FALSE);
+        if (e->err == FM_OK)
+        {
+            e->err = File_Flush(f);
+        }
+        if (e->err != FM_OK)
+        {
+            return e->err;
+        }
+    }
     if (frames_consumed != NULL)
     {
         *frames_consumed = frame_count;
@@ -319,10 +430,17 @@ static FM_Result pcm_write(void *ctx, FM_File *f, const int16_t *pcm,
 static FM_Result pcm_finish(void *ctx, FM_File *f)
 {
     PcmEnc *e = (PcmEnc *)ctx;
-    uint8_t v[4];
     FM_Result r = e->err;
 
-    if (r == FM_OK && !e->header_done)
+    if (r != FM_OK)
+    {
+        /* A write failed earlier (card full, I/O error).  The lengths are
+         * set to what did reach the card, so the part that was saved is a
+         * WAV file that opens; the error is still the answer. */
+        (void)pcm_lengths(e, f, enc_bytes_on_card(f, &e->out), FM_TRUE);
+        return r;
+    }
+    if (!e->header_done)
     {
         r = pcm_header(e, f);
     }
@@ -332,13 +450,12 @@ static FM_Result pcm_finish(void *ctx, FM_File *f)
     }
     if (r == FM_OK)
     {
-        enc_wr32(v, 36u + (uint32_t)e->data_bytes);
-        r = enc_patch(f, 4u, v, 4u);
+        r = pcm_lengths(e, f, (uint64_t)WAV_PCM_HEADER + e->data_bytes,
+                        FM_FALSE);
     }
-    if (r == FM_OK)
+    else
     {
-        enc_wr32(v, (uint32_t)e->data_bytes);
-        r = enc_patch(f, 40u, v, 4u);
+        (void)pcm_lengths(e, f, enc_bytes_on_card(f, &e->out), FM_TRUE);
     }
     return r;
 }
@@ -590,6 +707,65 @@ static FM_Result adpcm_init(void **ctx, const FM_AudioEncodeConfig *config)
     return FM_OK;
 }
 
+/* The three lengths of the header ("RIFF", "fact", "data") for a file of
+ * `file_bytes` bytes holding `frames` sample frames; `frames` is cut to
+ * what the whole blocks in the file can hold.  Then back to `file_bytes`
+ * so that writing can continue; with `last` (closing after an error) the
+ * part of a block at the end is cut off instead. */
+static FM_Result adpcm_lengths(const AdpcmEnc *e, FM_File *f,
+                               uint64_t file_bytes, uint64_t frames,
+                               FM_Bool last)
+{
+    uint8_t v[4];
+    uint64_t blocks;
+    uint64_t cap;
+    uint32_t data;
+    FM_Result r;
+
+    if (file_bytes < (uint64_t)WAV_ADPCM_HEADER)
+    {
+        return FM_OK;
+    }
+    file_bytes -= WAV_ADPCM_HEADER;
+    if (file_bytes > (uint64_t)WAV_MAX_DATA)
+    {
+        file_bytes = WAV_MAX_DATA;
+    }
+    blocks = file_bytes / e->block_align;
+    data = (uint32_t)(blocks * e->block_align);
+    cap = blocks * e->block_frames;
+    if (frames > cap)
+    {
+        frames = cap;
+    }
+    enc_wr32(v, (WAV_ADPCM_HEADER - 8u) + data);
+    r = enc_patch(f, 4u, v, 4u);
+    if (r == FM_OK)
+    {
+        enc_wr32(v, (frames > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)frames);
+        r = enc_patch(f, 48u, v, 4u);
+    }
+    if (r == FM_OK)
+    {
+        enc_wr32(v, data);
+        r = enc_patch(f, 56u, v, 4u);
+    }
+    if (r == FM_OK && last)
+    {
+        if (data != file_bytes)
+        {
+            (void)File_Truncate(f, (uint64_t)WAV_ADPCM_HEADER + data);
+        }
+        return FM_OK;
+    }
+    if (r == FM_OK)
+    {
+        r = File_Seek(f, (int64_t)((uint64_t)WAV_ADPCM_HEADER + file_bytes),
+                      FM_SEEK_SET);
+    }
+    return r;
+}
+
 static FM_Result adpcm_emit(AdpcmEnc *e, FM_File *f, uint32_t frames)
 {
     uint32_t bytes;
@@ -641,6 +817,18 @@ static FM_Result adpcm_write(void *ctx, FM_File *f, const int16_t *pcm,
         return e->err;
     }
     e->total += frame_count;
+    if (enc_checkpoint_due(&e->out))
+    {
+        e->err = adpcm_lengths(e, f, e->out.written, e->total, FM_FALSE);
+        if (e->err == FM_OK)
+        {
+            e->err = File_Flush(f);
+        }
+        if (e->err != FM_OK)
+        {
+            return e->err;
+        }
+    }
     if (frames_consumed != NULL)
     {
         *frames_consumed = frame_count;
@@ -651,10 +839,16 @@ static FM_Result adpcm_write(void *ctx, FM_File *f, const int16_t *pcm,
 static FM_Result adpcm_finish(void *ctx, FM_File *f)
 {
     AdpcmEnc *e = (AdpcmEnc *)ctx;
-    uint8_t v[4];
     FM_Result r = e->err;
 
-    if (r == FM_OK && !e->header_done)
+    if (r != FM_OK)
+    {
+        /* as in pcm_finish: describe what reached the card */
+        (void)adpcm_lengths(e, f, enc_bytes_on_card(f, &e->out), e->total,
+                            FM_TRUE);
+        return r;
+    }
+    if (!e->header_done)
     {
         r = adpcm_header(e, f);
     }
@@ -687,19 +881,13 @@ static FM_Result adpcm_finish(void *ctx, FM_File *f)
     }
     if (r == FM_OK)
     {
-        enc_wr32(v, (WAV_ADPCM_HEADER - 8u) + (uint32_t)e->data_bytes);
-        r = enc_patch(f, 4u, v, 4u);
+        r = adpcm_lengths(e, f, (uint64_t)WAV_ADPCM_HEADER + e->data_bytes,
+                          e->total, FM_FALSE);
     }
-    if (r == FM_OK)
+    else
     {
-        enc_wr32(v, (e->total > 0xFFFFFFFFu) ? 0xFFFFFFFFu
-                                             : (uint32_t)e->total);
-        r = enc_patch(f, 48u, v, 4u);
-    }
-    if (r == FM_OK)
-    {
-        enc_wr32(v, (uint32_t)e->data_bytes);
-        r = enc_patch(f, 56u, v, 4u);
+        (void)adpcm_lengths(e, f, enc_bytes_on_card(f, &e->out), e->total,
+                            FM_TRUE);
     }
     return r;
 }
@@ -1545,6 +1733,18 @@ static FM_Result flac_write(void *ctx, FM_File *f, const int16_t *pcm,
     {
         return e->err;
     }
+    if (enc_checkpoint_due(&e->out))
+    {
+        /* Nothing to patch: a FLAC stream is a row of frames that each
+         * carry their own length, and "total samples = 0" in the header
+         * means "not known".  The sync alone makes the file readable up
+         * to here (a reader stops at the frame that was cut). */
+        e->err = File_Flush(f);
+        if (e->err != FM_OK)
+        {
+            return e->err;
+        }
+    }
     if (frames_consumed != NULL)
     {
         *frames_consumed = frame_count;
@@ -1741,6 +1941,12 @@ FM_Bool Audio_CanEncode(FM_AudioFileFormat format)
 /* ------------------------------------------------------------------ */
 /* File writer: PCM16 in, a finished file out                          */
 /* ------------------------------------------------------------------ */
+/* FM_AudioFileWriter.guard of a writer that Open filled in.  A writer is
+ * usually a plain local variable, so before the first Open its fields
+ * hold whatever was in memory; `opened` alone cannot tell "open" from
+ * "never used". */
+#define AUDIO_WRITER_GUARD 0x41575231u       /* "AWR1" */
+
 static FM_Result writer_encode(FM_AudioFileWriter *writer,
                                const int16_t *pcm, size_t frames)
 {
@@ -1780,6 +1986,12 @@ FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
         config->bits_per_sample != 16)
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (writer->guard == AUDIO_WRITER_GUARD && writer->opened)
+    {
+        /* This writer already has a file open.  Opening over it would
+         * leave that file half-written and its memory lost. */
+        return FM_ERR_BUSY;
     }
     if (format == FM_AUDIO_FILE_AUTO)
     {
@@ -1824,6 +2036,7 @@ FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
     writer->encoder = ops;
     writer->encoder_ctx = ctx;
     writer->opened = FM_TRUE;
+    writer->guard = AUDIO_WRITER_GUARD;
     return FM_OK;
 }
 
@@ -1838,7 +2051,9 @@ FM_Result AudioFileWriter_WriteFrames(FM_AudioFileWriter *writer,
     {
         *frames_written = 0;
     }
-    if (writer == NULL || !writer->opened || pcm == NULL || frame_count == 0)
+    if (writer == NULL || !writer->opened ||
+        writer->guard != AUDIO_WRITER_GUARD || pcm == NULL ||
+        frame_count == 0)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -1904,18 +2119,32 @@ FM_Result AudioFileWriter_Close(FM_AudioFileWriter *writer)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (!writer->opened)
+    if (!writer->opened || writer->guard != AUDIO_WRITER_GUARD)
     {
         return FM_ERR_NOT_OPEN;
     }
     r = writer->error;
-    if (r == FM_OK && writer->encoder->finish != NULL)
+    if (writer->encoder->finish != NULL &&
+        (r == FM_OK ||
+         writer->encoder == audio_builtin_encoder(writer->format)))
     {
-        r = writer->encoder->finish(writer->encoder_ctx, &writer->file);
+        /* The built-in encoders are finished after an error too: they
+         * then set the lengths in the header to what reached the card, so
+         * the part that was saved still plays (as the AVI writer does).
+         * A registered encoder keeps the old contract: finish is called
+         * only for a file without an error. */
+        FM_Result rf = writer->encoder->finish(writer->encoder_ctx,
+                                               &writer->file);
+
+        if (r == FM_OK)
+        {
+            r = rf;
+        }
     }
+    c = File_Flush(&writer->file);
     if (r == FM_OK)
     {
-        r = File_Flush(&writer->file);
+        r = c;
     }
     c = File_Close(&writer->file);
     if (r == FM_OK)

@@ -224,6 +224,8 @@ typedef struct
     FM_Result error;                /* first failure; the writer then
                                      * refuses more data                 */
     FM_Bool opened;
+    uint32_t guard;                 /* set by Open; tells an open writer
+                                     * from one that was never used      */
 } FM_AudioFileWriter;
 
 /* Register an encoder for a format (not for WAV).  It replaces the
@@ -244,9 +246,22 @@ const char *Audio_FormatExtension(FM_AudioFileFormat format);
 /* Open: with AUTO the format comes from the extension.  A format with
  * no encoder gives FM_ERR_UNSUPPORTED and creates nothing (no WAV bytes
  * under an .mp3 name).  The folder must exist.
+ * Open on a writer that still has a file open is FM_ERR_BUSY (Close it
+ * first): nothing is opened, the first file stays as it is.
  * WriteFrames: `frame_count` frames in the layout given to Open.
  * Close: completes the header and closes the file; returns the first
- * error of the whole recording, and always releases the writer. */
+ * error of the whole recording, and always releases the writer.
+ *
+ * When a write failed (card full, I/O error) the file is not thrown
+ * away: Close sets the lengths in a WAV / ADPCM header to what reached
+ * the card, so that part opens and plays; the error is still what Close
+ * returns.  A FLAC file needs no fixing (a reader stops at the frame
+ * that was cut).
+ *
+ * A recording that is never closed (reset, power loss, card pulled):
+ * every FM_AUDIO_ENC_SYNC_BYTES (256 KB; 0 = off) the lengths are
+ * brought up to date and the file is synced, so it plays up to the last
+ * such point.  Less than that many bytes on the card = an empty file. */
 FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
                                FM_AudioFileFormat format,
                                const FM_AudioEncodeConfig *config);

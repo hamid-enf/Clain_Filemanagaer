@@ -695,6 +695,81 @@ int main(void)
         (void)Directory_DeleteRecursive("/saved");
     }
 
+    /* ---- 7b) folder mode: no file of another track is overwritten -- */
+    {
+        /* Two tracks with the same name in two subfolders (the scan is
+         * recursive), and a file of that name already in the target
+         * folder.  The old rule built "<folder>/<name>.wav" for all
+         * three: the second song silently replaced the first. */
+        static int16_t got[2 * 64000];
+        size_t n2 = 0u, n3 = 0u, n4 = 0u, n5 = 0u;
+        uint64_t old_size = 0u;
+        uint32_t rate;
+        uint16_t ch;
+
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_DeleteRecursive("/keep");
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER "/one");
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER "/two");
+        (void)Directory_Create("/keep");
+        r = save_make_track(SIMPLE_AUDIO_FOLDER "/one/song.wav", 16000, 1,
+                            8000, 440.0);
+        if (r == FM_OK)
+            r = save_make_track(SIMPLE_AUDIO_FOLDER "/two/song.wav", 16000,
+                                1, 12000, 880.0);
+        if (r == FM_OK)
+            r = File_WriteText("/keep/song.wav", "an older recording");
+        ok("two tracks named song.wav + an old /keep/song.wav", r == FM_OK);
+
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        (void)SimpleAudio_SetOutput(FM_AUDIO_OUT_SPEAKER);
+        r = SimpleAudio_RecPlaying("/keep");
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        (void)save_play_out(4000);
+        (void)File_SizeOf("/keep/song.wav", &old_size);
+        ok("the file that was there is not touched", r == FM_OK &&
+           old_size == 18u);
+        r = save_load("/keep/song_2.wav", got, 2 * 64000, &n2, &rate, &ch,
+                      NULL);
+        if (r == FM_OK)
+            r = save_load("/keep/song_3.wav", got, 2 * 64000, &n3, &rate,
+                          &ch, NULL);
+        ok("both songs are there, whole: song_2.wav and song_3.wav",
+           r == FM_OK && ch == 2u &&
+           ((n2 == 16000u && n3 == 24000u) ||
+            (n2 == 24000u && n3 == 16000u)));
+
+        /* the same playlist again in the same RecPlaying: each track
+         * goes back into its own file, the card does not fill up */
+        r = SimpleAudio_Begin();
+        (void)save_play_out(4000);
+        ok("played again in the same session: the same two files",
+           r == FM_OK && save_file_missing("/keep/song_4.wav"));
+        (void)SimpleAudio_RecStop();
+
+        /* a new RecPlaying knows nothing of the old one: new names */
+        r = SimpleAudio_RecPlaying("/keep");
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        (void)save_play_out(4000);
+        (void)SimpleAudio_RecStop();
+        if (r == FM_OK)
+            r = save_load("/keep/song_4.wav", got, 2 * 64000, &n4, &rate,
+                          &ch, NULL);
+        if (r == FM_OK)
+            r = save_load("/keep/song_5.wav", got, 2 * 64000, &n5, &rate,
+                          &ch, NULL);
+        (void)save_load("/keep/song_2.wav", got, 2 * 64000, &n2, &rate, &ch,
+                        NULL);
+        ok("a new session keeps the earlier files: song_4, song_5",
+           r == FM_OK && n4 + n5 == 40000u && n2 + n3 == 40000u &&
+           save_file_missing("/keep/song_6.wav"));
+
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_DeleteRecursive("/keep");
+    }
+
     /* ---- 8) saving video: MJPEG AVI ------------------------------- */
     {
         enum { VW = 64, VH = 48, VN = 10 };

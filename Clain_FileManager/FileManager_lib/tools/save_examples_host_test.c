@@ -339,6 +339,167 @@ static int play_and_save_video(const char *dest, uint32_t stop_after)
     return loops;
 }
 
+/* The same, with one SimpleVideo_SeekTo(to_sec) as soon as `at_frames`
+ * pictures are in the file. */
+static int play_seek_save(const char *dest, uint32_t at_frames, double to_sec)
+{
+    int loops = 0;
+    int sought = 0;
+    FM_Result r;
+
+    (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
+    SimpleVideo_SetAudioDataCallback(SaveDemo_VideoSoundCallback, NULL);
+    SimpleVideo_SetFrameCallback(SaveDemo_VideoFrameCallback, NULL);
+    r = SaveDemo_VideoRecStart(dest);
+    if (r == FM_OK) r = SimpleVideo_Begin();
+    if (r == FM_OK) r = SimpleVideo_Start();
+    if (r != FM_OK) return -1;
+    while (SaveDemo_VideoRecActive() && loops < 200000)
+    {
+        (void)SimpleVideo_Poll();
+        (void)SaveDemo_VideoRecPump();
+        if (!sought && SimpleVideo_RecFrames() >= at_frames)
+        {
+            (void)SimpleVideo_SeekTo(to_sec);
+            sought = 1;
+        }
+        loops++;
+    }
+    (void)SimpleVideo_Stop();
+    return loops;
+}
+
+/* What a saved file with a seek in it must be.  Every picture of the
+ * test video is one grey level and every sound sample of it is unique,
+ * so both tell where in the source they come from.
+ *   new_pics   slots that show another picture than the slot before
+ *   in_sync    of those, the slots whose sound (the SRC_SPF sound frames
+ *              at the slot's own time in the file) is the sound of that
+ *              very picture in the source, on both channels
+ *   silent     of those, the slots with no sound at all (silence, or the
+ *              sound track has ended)
+ *   wrong      of those, the slots with the sound of ANOTHER picture:
+ *              this is what "out of sync" means, and it must be 0
+ *   held       slots that repeat the picture before
+ *   cut_slot   the slot where the pictures stop being "the next one"
+ *   first_new  the picture in that slot
+ *   old_sound  sound frames at the start of the file that are the sound
+ *              of the source from its start (= the sound before the seek)
+ */
+typedef struct
+{
+    uint32_t new_pics;
+    uint32_t in_sync;
+    uint32_t silent;
+    uint32_t wrong;
+    uint32_t held;
+    int      cut_slot;
+    int      first_new;
+    int      jumps;             /* how often the picture number went back
+                                 * or skipped ahead */
+    int      known;             /* every slot is a picture of the source */
+    size_t   old_sound;
+} SeekCheck;
+
+/* Which picture of the source is this grey level?  The levels are 12
+ * apart and a saved one may be 6 off, so a level half-way is read as
+ * "the picture after `prev`" or as `prev` itself when that fits. */
+static int picture_of(int grey, int prev)
+{
+    int g;
+
+    if (prev + 1 < SRC_N &&
+        abs(grey - grey_of((uint32_t)(prev + 1))) <= GREY_TOL)
+        return prev + 1;
+    if (prev >= 0 && abs(grey - grey_of((uint32_t)prev)) <= GREY_TOL)
+        return prev;
+    g = (grey - 16 + 6) / 12;
+    if (g < 0 || g >= SRC_N ||
+        abs(grey - grey_of((uint32_t)g)) > GREY_TOL)
+        return -1;
+    return g;
+}
+
+static void seek_check(const SavedVideo *s, SeekCheck *c)
+{
+    uint32_t k;
+    int prev = -1;
+
+    memset(c, 0, sizeof(*c));
+    c->cut_slot = -1;
+    c->first_new = -1;
+    c->known = 1;
+    while (c->old_sound < s->snd_samples / 2u &&
+           c->old_sound < (size_t)(SRC_N * SRC_SPF) &&
+           g_out_snd[2u * c->old_sound] == g_src_snd[c->old_sound] &&
+           g_out_snd[2u * c->old_sound + 1u] == g_src_snd[c->old_sound])
+    {
+        c->old_sound++;
+    }
+    for (k = 0; k < s->pictures; k++)
+    {
+        int g = picture_of(s->grey[k], prev);
+        size_t at = (size_t)k * SRC_SPF;
+        size_t j;
+        int same = 1;
+        int quiet = 1;
+
+        if (g < 0)
+        {
+            c->known = 0;
+            continue;
+        }
+        if (g == prev)
+        {
+            c->held++;
+            continue;
+        }
+        if (prev >= 0 && g != prev + 1)
+        {
+            if (c->jumps == 0)
+            {
+                c->cut_slot = (int)k;
+                c->first_new = g;
+            }
+            c->jumps++;
+        }
+        prev = g;
+        c->new_pics++;
+        for (j = 0; j < (size_t)SRC_SPF; j++)
+        {
+            int16_t want = g_src_snd[(size_t)g * SRC_SPF + j];
+
+            if ((at + j) * 2u + 1u >= s->snd_samples)
+            {
+                same = 0;                   /* the sound track ends here */
+                break;
+            }
+            if (g_out_snd[2u * (at + j)] != want ||
+                g_out_snd[2u * (at + j) + 1u] != want)
+                same = 0;
+            if (g_out_snd[2u * (at + j)] != 0 ||
+                g_out_snd[2u * (at + j) + 1u] != 0)
+                quiet = 0;
+        }
+        if (same)       c->in_sync++;
+        else if (quiet) c->silent++;
+        else            c->wrong++;
+    }
+}
+
+static void seek_print(const SavedVideo *s, const SeekCheck *c)
+{
+    printf("      (%u slots: %u new pictures, %u held; slot %d shows "
+           "picture %d;\n       sound under its picture %u, none %u, "
+           "wrong %u; sound %lu frames,\n       the first %lu from the "
+           "start of the video)\n", (unsigned)s->pictures,
+           (unsigned)c->new_pics, (unsigned)c->held, c->cut_slot,
+           c->first_new, (unsigned)c->in_sync, (unsigned)c->silent,
+           (unsigned)c->wrong,
+           (unsigned long)(s->snd_samples / 2u),
+           (unsigned long)c->old_sound);
+}
+
 int main(int argc, char **argv)
 {
     static int16_t got[2 * 64000];
@@ -649,6 +810,86 @@ int main(int argc, char **argv)
         ok("output SPEAKER: all pictures, and no sound track in the file",
            r == FM_OK && s.pictures == SRC_N && s.snd_samples == 0u);
         (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
+    }
+
+    /* ---- 5b) a seek while the video is being saved ------------------ */
+    printf("\n[5b] SimpleVideo_SeekTo in the middle of a recording\n");
+    {
+        static SavedVideo s;
+        SeekCheck c;
+        int loops;
+        long snd_frames;
+        long gap;
+
+        /* forward: after 5 pictures jump to 1.2 s (picture 12) */
+        sim_video_clock(1u);
+        loops = play_seek_save("/save/fwd.avi", 5u, 1.2);
+        r = inspect_video("/save/fwd.avi", &s);
+        seek_check(&s, &c);
+        seek_print(&s, &c);
+        snd_frames = (long)(s.snd_samples / 2u);
+        /* the picture before the cut is held for the sound the player
+         * had already decoded, and for less than one picture more */
+        gap = (long)c.cut_slot * SRC_SPF - (long)c.old_sound;
+        ok("forward seek: one file, closed by itself at the end",
+           loops > 0 && loops < 200000 && r == FM_OK &&
+           save_demo_video.cuts == 1u && s.vi.frame_count == s.pictures);
+        ok("  it is a cut: picture 12 follows, then 13..19 in order",
+           c.known && c.jumps == 1 && c.first_new == 12 &&
+           abs(s.grey[s.pictures - 1u] - grey_of(SRC_N - 1)) <= GREY_TOL);
+        ok("  the picture is not frozen for the length of the jump",
+           c.cut_slot > 0 && gap >= 0 && gap < SRC_SPF);
+        ok("  every picture has its own sound under it, also after it",
+           c.new_pics == 13u && c.in_sync == c.new_pics && c.wrong == 0u);
+        ok("  picture track and sound track have the same length",
+           labs(snd_frames - (long)s.pictures * SRC_SPF) <= SRC_SPF);
+        ok("  no sound was dropped", save_demo_video.ring.dropped == 0u);
+
+        /* backward: after 12 pictures jump back to 0.3 s (picture 3) */
+        sim_video_clock(1u);
+        loops = play_seek_save("/save/back.avi", 12u, 0.3);
+        r = inspect_video("/save/back.avi", &s);
+        seek_check(&s, &c);
+        seek_print(&s, &c);
+        snd_frames = (long)(s.snd_samples / 2u);
+        gap = (long)c.cut_slot * SRC_SPF - (long)c.old_sound;
+        ok("backward seek: the file goes on (it used to end there)",
+           loops > 0 && r == FM_OK && save_demo_video.cuts == 1u &&
+           s.pictures > SRC_N && s.vi.frame_count == s.pictures);
+        ok("  picture 3 follows, then everything to the end, in order",
+           c.known && c.jumps == 1 && c.first_new == 3 &&
+           gap >= 0 && gap < SRC_SPF &&
+           abs(s.grey[s.pictures - 1u] - grey_of(SRC_N - 1)) <= GREY_TOL);
+        ok("  every picture has its own sound under it",
+           c.new_pics == 12u + 17u && c.in_sync == c.new_pics &&
+           c.wrong == 0u);
+        ok("  picture track and sound track have the same length",
+           labs(snd_frames - (long)s.pictures * SRC_SPF) <= SRC_SPF);
+
+        /* A player that is too slow, and a seek.  It drops pictures (so
+         * the picture number skips more than once), and after the seek
+         * its sound starts later in the video than its picture: by then
+         * its clock has run on for the time the picture took to decode.
+         * So the first picture after the seek has no sound of its own
+         * (the player never made it: silence), and the video is over
+         * before the player has decoded the last of the sound.  What
+         * must hold: no picture ever has the sound of another one. */
+        sim_video_clock(45u);
+        loops = play_seek_save("/save/slowseek.avi", 4u, 1.0);
+        r = inspect_video("/save/slowseek.avi", &s);
+        seek_check(&s, &c);
+        seek_print(&s, &c);
+        snd_frames = (long)(s.snd_samples / 2u);
+        ok("slow player + seek: one complete file",
+           loops > 0 && r == FM_OK && save_demo_video.cuts == 1u &&
+           c.known && s.vi.frame_count == s.pictures &&
+           abs(s.grey[s.pictures - 1u] - grey_of(SRC_N - 1)) <= GREY_TOL);
+        ok("  no picture has the sound of another picture",
+           c.wrong == 0u && c.in_sync >= 3u &&
+           c.in_sync + c.silent == c.new_pics);
+        ok("  the sound track is not longer than the picture track",
+           snd_frames > 0 &&
+           snd_frames <= (long)s.pictures * SRC_SPF + SRC_SPF);
     }
 
     printf("\n[6] SaveDemo_VideoFromCallback (all in one)\n");

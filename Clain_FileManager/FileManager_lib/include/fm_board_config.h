@@ -219,20 +219,21 @@
  *
  * برای اینکه تقسیم بر ۴ چیزی را صفر نکند، همه‌جا کف ۲۵۶ بایت داریم.
  * ------------------------------------------------------------------ */
-#if   FM_BUFFERS == SMALL
+/* FM_BUFFERS -> FM_BUFFERS_LEVEL (1..4). مقایسهٔ مستقیم با نام HUGE اینجا
+ * نیست: <math.h> هم HUGE دارد؛ توضیح در fm_buffers_level.h. */
+#include "fm_buffers_level.h"
+#if   FM_BUFFERS_LEVEL == 1
 #define FM_BUF_SCALE_NUM 1u
 #define FM_BUF_SCALE_DEN 4u
-#elif FM_BUFFERS == NORMAL
+#elif FM_BUFFERS_LEVEL == 2
 #define FM_BUF_SCALE_NUM 1u
 #define FM_BUF_SCALE_DEN 1u
-#elif FM_BUFFERS == LARGE
+#elif FM_BUFFERS_LEVEL == 3
 #define FM_BUF_SCALE_NUM 4u
 #define FM_BUF_SCALE_DEN 1u
-#elif FM_BUFFERS == HUGE
+#else
 #define FM_BUF_SCALE_NUM 8u
 #define FM_BUF_SCALE_DEN 1u
-#else
-#error "FM_BUFFERS باید یکی از SMALL / NORMAL / LARGE / HUGE باشد"
 #endif
 
 /* اندازهٔ مقیاس‌شده، با کف ۲۵۶ بایت و گرد شده به مضرب ۳۲ (تراز DMA). */

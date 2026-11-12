@@ -146,6 +146,225 @@ static void vsv_no_free(void *p, void *ctx)
     (void)ctx;
 }
 
+/* ---- the file read as a stranger would --------------------------------
+ * Nothing of the writer is used here, and nothing of the library's own
+ * AVI reader: the bytes are walked by the rules of the format.  The
+ * reader of this library does not need the index (it can read the chunks
+ * in order), so a writer bug in the index or in a length went unseen as
+ * long as "it plays back" was the only check. */
+typedef struct
+{
+    uint32_t frames;        /* "00dc" chunks in the movi list           */
+    uint32_t sound_bytes;   /* bytes in "01wb" chunks                   */
+    uint32_t entries;       /* index entries                            */
+    int      indexed;       /* the file has an "idx1" chunk             */
+    uint32_t file_size;
+} VsvRaw;
+
+static uint32_t vsv_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+/* 0 = the file is right; any other number names the rule that is broken
+ * (it is printed by the test). */
+static int vsv_raw_check(const char *path, VsvRaw *out)
+{
+    static uint32_t at[4096];           /* chunk offsets from "movi"   */
+    static uint32_t len[4096];
+    static uint8_t  kind[4096];         /* 0 picture, 1 sound          */
+    uint64_t size64 = 0u;
+    uint8_t *d;
+    uint32_t size;
+    uint32_t got = 0u;
+    uint32_t pos;
+    uint32_t hdrl_end;
+    uint32_t movi = 0u;                 /* position of the word "movi" */
+    uint32_t movi_end = 0u;
+    uint32_t idx = 0u;
+    uint32_t idx_len = 0u;
+    uint32_t flags;
+    uint32_t total_frames;
+    uint32_t streams;
+    uint32_t vid_len = 0u;
+    uint32_t aud_len = 0u;
+    uint32_t aud_block = 0u;
+    uint32_t chunks = 0u;
+    uint32_t i;
+    int rc = 0;
+    FM_File f;
+
+    memset(out, 0, sizeof(*out));
+    if (File_SizeOf(path, &size64) != FM_OK || size64 < 224u ||
+        size64 > 64u * 1024u * 1024u)
+    {
+        return 1;
+    }
+    size = (uint32_t)size64;
+    out->file_size = size;
+    d = (uint8_t *)malloc(size);
+    if (d == NULL)
+    {
+        return 2;
+    }
+    File_Init(&f);
+    if (File_OpenEx(&f, path, FM_OPEN_READ) != FM_OK ||
+        File_Read(&f, d, size, &got) != FM_OK || got != size)
+    {
+        (void)File_Close(&f);
+        free(d);
+        return 3;
+    }
+    (void)File_Close(&f);
+
+#define VSV_NEED(cond, code) do { if (!(cond)) { rc = (code); goto done; } } while (0)
+    VSV_NEED(memcmp(d, "RIFF", 4) == 0 && memcmp(d + 8, "AVI ", 4) == 0, 10);
+    VSV_NEED(vsv_rd32(d + 4) == size - 8u, 11);      /* RIFF length     */
+    VSV_NEED(memcmp(d + 12, "LIST", 4) == 0 &&
+             memcmp(d + 20, "hdrl", 4) == 0, 12);
+    hdrl_end = 20u + vsv_rd32(d + 16);
+    VSV_NEED(hdrl_end < size && memcmp(d + 24, "avih", 4) == 0 &&
+             vsv_rd32(d + 28) == 56u, 13);
+    flags = vsv_rd32(d + 32 + 12);
+    total_frames = vsv_rd32(d + 32 + 16);
+    streams = vsv_rd32(d + 32 + 24);
+    VSV_NEED(streams == 1u || streams == 2u, 14);
+    pos = 32u + 56u;
+    for (i = 0u; i < streams; i++)
+    {
+        uint32_t strl_end;
+
+        VSV_NEED(pos + 12u + 64u <= hdrl_end &&
+                 memcmp(d + pos, "LIST", 4) == 0 &&
+                 memcmp(d + pos + 8u, "strl", 4) == 0 &&
+                 memcmp(d + pos + 12u, "strh", 4) == 0, 15);
+        strl_end = pos + 8u + vsv_rd32(d + pos + 4u);
+        VSV_NEED(strl_end <= hdrl_end, 16);
+        if (memcmp(d + pos + 20u, "vids", 4) == 0)
+        {
+            VSV_NEED(memcmp(d + pos + 24u, "MJPG", 4) == 0, 17);
+            vid_len = vsv_rd32(d + pos + 20u + 32u);
+        }
+        else
+        {
+            VSV_NEED(memcmp(d + pos + 20u, "auds", 4) == 0, 18);
+            aud_len = vsv_rd32(d + pos + 20u + 32u);
+            aud_block = vsv_rd32(d + pos + 20u + 44u);
+            VSV_NEED(aud_block == 2u || aud_block == 4u, 19);
+        }
+        pos = strl_end;
+    }
+    VSV_NEED(pos == hdrl_end, 20);                   /* hdrl length     */
+    VSV_NEED(pos + 12u <= size && memcmp(d + pos, "LIST", 4) == 0 &&
+             memcmp(d + pos + 8u, "movi", 4) == 0, 21);
+    movi = pos + 8u;
+    movi_end = movi + vsv_rd32(d + pos + 4u);
+    VSV_NEED(movi_end <= size, 22);                  /* movi length     */
+
+    pos = movi + 4u;
+    while (pos < movi_end)
+    {
+        uint32_t n;
+
+        VSV_NEED(pos + 8u <= movi_end && chunks < 4096u, 30);
+        n = vsv_rd32(d + pos + 4u);
+        VSV_NEED(n != 0u && pos + 8u + n <= movi_end, 31);
+        if (memcmp(d + pos, "00dc", 4) == 0)
+        {
+            VSV_NEED(n >= 4u && d[pos + 8u] == 0xFFu &&
+                     d[pos + 9u] == 0xD8u, 32);       /* a JPEG starts   */
+            kind[chunks] = 0u;
+            out->frames++;
+        }
+        else
+        {
+            VSV_NEED(memcmp(d + pos, "01wb", 4) == 0 && streams == 2u, 33);
+            VSV_NEED((n % aud_block) == 0u, 34);
+            kind[chunks] = 1u;
+            out->sound_bytes += n;
+        }
+        at[chunks] = pos - movi;
+        len[chunks] = n;
+        chunks++;
+        pos += 8u + n + (n & 1u);                    /* pad to even     */
+    }
+    VSV_NEED(pos == movi_end, 35);       /* the list ends on a chunk end */
+
+    if (pos < size)
+    {
+        VSV_NEED(pos + 8u <= size && memcmp(d + pos, "idx1", 4) == 0, 40);
+        idx = pos + 8u;
+        idx_len = vsv_rd32(d + pos + 4u);
+        VSV_NEED(idx + idx_len == size, 41);         /* nothing after   */
+        VSV_NEED(idx_len == chunks * 16u, 42);
+        out->indexed = 1;
+        out->entries = idx_len / 16u;
+        for (i = 0u; i < chunks; i++)
+        {
+            const uint8_t *e = d + idx + 16u * i;
+
+            VSV_NEED(memcmp(e, kind[i] ? "01wb" : "00dc", 4) == 0, 43);
+            VSV_NEED(vsv_rd32(e + 8) == at[i], 44);  /* where the chunk is */
+            VSV_NEED(vsv_rd32(e + 12) == len[i], 45);
+            /* and the entry really lands on that chunk's header */
+            VSV_NEED(memcmp(d + movi + vsv_rd32(e + 8), e, 4) == 0 &&
+                     vsv_rd32(d + movi + vsv_rd32(e + 8) + 4u) ==
+                         vsv_rd32(e + 12), 46);
+        }
+    }
+    VSV_NEED(((flags & 0x10u) != 0u) == (out->indexed != 0), 50);
+    VSV_NEED(total_frames == out->frames, 51);
+    VSV_NEED(vid_len == out->frames, 52);
+    if (streams == 2u)
+    {
+        VSV_NEED(aud_len == out->sound_bytes / aud_block, 53);
+    }
+#undef VSV_NEED
+done:
+    free(d);
+    return rc;
+}
+
+/* What a reset or a pulled card leaves behind: the handles are dropped,
+ * nothing is finished, what was still in the writer's buffer is gone. */
+static void vsv_abandon(FM_VideoFileWriter *w)
+{
+    (void)File_Close(&w->file);
+    (void)File_Close(&w->index);
+    FM_Free(w->buf);
+    memset(w, 0, sizeof(*w));
+}
+
+/* `count` large stand-in "JPEG" pictures with 800 sound frames each. */
+static FM_Result vsv_write_big(FM_VideoFileWriter *w, uint32_t count)
+{
+    FM_Result r = FM_OK;
+    uint32_t n;
+
+    for (n = 0u; n < 2u; n++)
+    {
+        uint32_t i;
+
+        for (i = 0u; i < VSV_BIG; i++)
+        {
+            g_vsv_big[n][i] = (uint8_t)(i * 7u + n * 31u);
+        }
+        g_vsv_big[n][0] = 0xFFu;
+        g_vsv_big[n][1] = 0xD8u;
+    }
+    vsv_pcm(g_vsv_pcm, 0u, 800u);
+    for (n = 0u; r == FM_OK && n < count; n++)
+    {
+        r = VideoFileWriter_WriteJpeg(w, g_vsv_big[n & 1u], VSV_BIG);
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_WriteAudio(w, g_vsv_pcm, 800u);
+        }
+    }
+    return r;
+}
+
 static void test_video_save(void)
 {
     char msg[160];
@@ -925,6 +1144,354 @@ static void test_video_save(void)
             snprintf(msg, sizeof(msg), "%d %d %d exists %d %d %d src=%d",
                      (int)a, (int)b, (int)c, (int)e1, (int)e2, (int)e3,
                      (int)src);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: the file byte by byte: lengths, counts, every index entry");
+    {
+        /* /vsv/a.avi: pictures and sound; /vsv/j.avi: pictures only */
+        VsvRaw a;
+        VsvRaw j;
+        int ra = vsv_raw_check("/vsv/a.avi", &a);
+        int rj = vsv_raw_check("/vsv/j.avi", &j);
+
+        if (ra == 0 && rj == 0 && a.indexed && j.indexed &&
+            a.frames == VSV_FRAMES && a.sound_bytes == VSV_RATE * 2u &&
+            a.entries == 2u * VSV_FRAMES && j.frames == 2u &&
+            j.entries == 2u && j.sound_bytes == 0u)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg),
+                     "rule a=%d j=%d frames %u/%u sound %u entries %u/%u",
+                     ra, rj, (unsigned)a.frames, (unsigned)j.frames,
+                     (unsigned)a.sound_bytes, (unsigned)a.entries,
+                     (unsigned)j.entries);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: a second Open on an open writer is refused");
+    {
+        FM_VideoFileWriter w;
+        FM_VideoSaveConfig c;
+        VsvRaw raw;
+        FM_Result second = FM_OK;
+        FM_Result same = FM_OK;
+        FM_Bool other = FM_TRUE;
+        int rc = -1;
+
+        memset(&w, 0, sizeof(w));
+        memset(&c, 0, sizeof(c));
+        c.width = VSV_W;
+        c.height = VSV_H;
+        c.fps = 10u;
+        (void)File_Delete("/vsv/two.avi");
+        r = VideoFileWriter_Open(&w, "/vsv/one.avi", &c);
+        vsv_frame(g_vsv_rgb, 1u);
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_WriteFrame(&w, g_vsv_rgb, FM_PIXEL_RGB888);
+        }
+        if (r == FM_OK)
+        {
+            second = VideoFileWriter_Open(&w, "/vsv/two.avi", &c);
+            same = VideoFileWriter_Open(&w, "/vsv/one.avi", &c);
+            /* the first file goes on as if nothing had happened */
+            r = VideoFileWriter_WriteFrame(&w, g_vsv_rgb, FM_PIXEL_RGB888);
+        }
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_Close(&w);
+        }
+        (void)File_Exists("/vsv/two.avi", &other);
+        if (r == FM_OK)
+        {
+            rc = vsv_raw_check("/vsv/one.avi", &raw);
+            /* and after Close the same writer opens again */
+            r = VideoFileWriter_Open(&w, "/vsv/one.avi", &c);
+            if (r == FM_OK)
+            {
+                r = VideoFileWriter_Close(&w);
+            }
+        }
+        if (r == FM_OK && second == FM_ERR_BUSY && same == FM_ERR_BUSY &&
+            !other && rc == 0 && raw.frames == 2u)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "r=%d second=%d same=%d other=%d "
+                     "rule=%d frames=%u", (int)r, (int)second, (int)same,
+                     (int)other, rc, (unsigned)raw.frames);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: never closed -> a valid file up to the checkpoint");
+    {
+        /* 20 pictures of 70 KB: the 1 MB checkpoint falls after the 15th.
+         * Then the "power is lost". */
+        FM_VideoFileWriter w;
+        FM_VideoSaveConfig c;
+        FM_Video v;
+        FM_VideoInfo vi;
+        VsvRaw raw;
+        FM_Bool idx = FM_FALSE;
+        uint64_t size = 0u;
+        uint8_t head[64];
+        uint32_t got = 0u;
+        uint32_t riff = 0u;
+        uint32_t flags = 1u;
+        uint32_t counted = 0u;
+        uint32_t decoded = 0u;
+        FM_File f;
+
+        memset(&w, 0, sizeof(w));
+        memset(&c, 0, sizeof(c));
+        memset(&vi, 0, sizeof(vi));
+        memset(head, 0, sizeof(head));
+        c.width = VSV_W;
+        c.height = VSV_H;
+        c.fps = 10u;
+        c.audio_rate = VSV_RATE;
+        c.audio_channels = 1u;
+        r = VideoFileWriter_Open(&w, "/vsv/cut.avi", &c);
+        if (r == FM_OK)
+        {
+            r = vsv_write_big(&w, 20u);
+        }
+        vsv_abandon(&w);
+        (void)File_Exists("/vsv/cut.avi.idx", &idx);
+        (void)File_SizeOf("/vsv/cut.avi", &size);
+        File_Init(&f);
+        if (r == FM_OK && File_OpenEx(&f, "/vsv/cut.avi", FM_OPEN_READ) == FM_OK)
+        {
+            (void)File_Read(&f, head, sizeof(head), &got);
+            (void)File_Close(&f);
+            riff = vsv_rd32(head + 4);
+            flags = vsv_rd32(head + 32 + 12);
+            counted = vsv_rd32(head + 32 + 16);
+        }
+        /* the library's own reader takes the file as it is */
+        if (r == FM_OK)
+        {
+            r = Video_Open("/vsv/cut.avi", &v);
+            if (r == FM_OK)
+            {
+                size_t n = 0u;
+
+                (void)Video_GetInfo(&v, &vi);
+                while (Video_ReadFrame(&v, g_vsv_big[0], sizeof(g_vsv_big[0]),
+                                       &n) == FM_OK && n == VSV_BIG)
+                {
+                    decoded++;
+                }
+                (void)Video_Close(&v);
+            }
+        }
+        (void)raw;
+        if (r == FM_OK && idx && counted >= 14u && counted <= 20u &&
+            (flags & 0x10u) == 0u && riff >= 14u * VSV_BIG &&
+            (uint64_t)riff + 8u <= size && decoded >= counted)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "r=%d idx=%d counted=%u flags=%x "
+                     "riff=%u size=%lu info=%u read=%u", (int)r, (int)idx,
+                     (unsigned)counted, (unsigned)flags, (unsigned)riff,
+                     (unsigned long)size, (unsigned)vi.frame_count,
+                     (unsigned)decoded);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: VideoFile_Repair completes the file that was cut");
+    {
+        VsvRaw raw;
+        FM_Video v;
+        FM_VideoInfo vi;
+        uint32_t frames = 0u;
+        uint32_t none = 77u;
+        FM_Bool idx = FM_TRUE;
+        FM_Result again;
+        FM_Result missing;
+        int rc;
+
+        memset(&vi, 0, sizeof(vi));
+        r = VideoFile_Repair("/vsv/cut.avi", &frames);
+        rc = vsv_raw_check("/vsv/cut.avi", &raw);
+        (void)File_Exists("/vsv/cut.avi.idx", &idx);
+        again = VideoFile_Repair("/vsv/cut.avi", &none);
+        missing = VideoFile_Repair("/vsv/nothing.avi", NULL);
+        if (r == FM_OK)
+        {
+            r = Video_Open("/vsv/cut.avi", &v);
+            if (r == FM_OK)
+            {
+                (void)Video_GetInfo(&v, &vi);
+                (void)Video_Close(&v);
+            }
+        }
+        /* 20 x (70 KB + sound) were written through a 32 KB buffer: at
+         * most the last picture and its sound are lost */
+        if (r == FM_OK && rc == 0 && raw.indexed && frames >= 19u &&
+            frames <= 20u && raw.frames == frames &&
+            raw.sound_bytes >= (frames - 1u) * 1600u &&
+            vi.frame_count == frames && !idx &&
+            again == FM_ERR_NOT_FOUND && none == 0u &&
+            missing == FM_ERR_NOT_FOUND)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "r=%d rule=%d frames=%u raw=%u "
+                     "sound=%u info=%u idx=%d again=%d missing=%d", (int)r,
+                     rc, (unsigned)frames, (unsigned)raw.frames,
+                     (unsigned)raw.sound_bytes, (unsigned)vi.frame_count,
+                     (int)idx, (int)again, (int)missing);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: Repair of a short recording, and hands off other files");
+    {
+        /* Three small pictures: far below the checkpoint, so the header
+         * on the card still says "0 frames". */
+        FM_VideoFileWriter w;
+        FM_VideoSaveConfig c;
+        VsvRaw raw;
+        uint32_t frames = 0u;
+        uint32_t n;
+        uint64_t before = 0u;
+        uint64_t after = 0u;
+        FM_Bool idx = FM_FALSE;
+        FM_Result foreign;
+        int rc;
+
+        memset(&w, 0, sizeof(w));
+        memset(&c, 0, sizeof(c));
+        c.width = VSV_W;
+        c.height = VSV_H;
+        c.fps = 10u;
+        r = VideoFileWriter_Open(&w, "/vsv/short.avi", &c);
+        for (n = 0u; r == FM_OK && n < 3u; n++)
+        {
+            vsv_frame(g_vsv_rgb, n);
+            r = VideoFileWriter_WriteFrame(&w, g_vsv_rgb, FM_PIXEL_RGB888);
+        }
+        /* what a sync just before the reset would have put on the card */
+        if (r == FM_OK)
+        {
+            uint32_t wr = 0u;
+
+            r = File_Write(&w.file, w.buf, w.buf_len, &wr);
+        }
+        vsv_abandon(&w);
+        if (r == FM_OK)
+        {
+            r = VideoFile_Repair("/vsv/short.avi", &frames);
+        }
+        rc = vsv_raw_check("/vsv/short.avi", &raw);
+
+        /* a file that is not ours, with a stray ".idx" beside it */
+        (void)File_WriteAll("/vsv/other.avi", "not a video at all, just "
+                            "text that happens to have this name", 60u);
+        (void)File_WriteAll("/vsv/other.avi.idx", "x", 1u);
+        (void)File_SizeOf("/vsv/other.avi", &before);
+        foreign = VideoFile_Repair("/vsv/other.avi", NULL);
+        (void)File_SizeOf("/vsv/other.avi", &after);
+        (void)File_Exists("/vsv/other.avi.idx", &idx);
+        if (r == FM_OK && rc == 0 && frames == 3u && raw.frames == 3u &&
+            raw.indexed && foreign == FM_ERR_INVALID_FORMAT &&
+            before == 60u && after == 60u && idx)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "r=%d rule=%d frames=%u/%u "
+                     "foreign=%d size %lu->%lu idx=%d", (int)r, rc,
+                     (unsigned)frames, (unsigned)raw.frames, (int)foreign,
+                     (unsigned long)before, (unsigned long)after, (int)idx);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: card full at any point -> the error, and a file that is right");
+    {
+        /* The card has `budget` bytes free after Open.  Whatever the
+         * budget, Close must report the failure and leave a file that
+         * passes the byte-by-byte check with the pictures that are
+         * whole; no ".idx" stays behind. */
+        static const uint32_t budgets[] = { 400u, 40000u, 71000u, 150000u,
+                                            215000u, 290000u, 431000u };
+        uint32_t b;
+        int bad = 0;
+
+        msg[0] = '\0';
+        (void)FS_Unmount("/ram");
+        r = wfs_mount("/ram");
+        if (r != FM_OK)
+        {
+            bad = 1;
+            snprintf(msg, sizeof(msg), "wfs_mount failed: %d", (int)r);
+        }
+        for (b = 0u; !bad && b < sizeof(budgets) / sizeof(budgets[0]); b++)
+        {
+            FM_VideoFileWriter w;
+            FM_VideoSaveConfig c;
+            VsvRaw raw;
+            FM_Result wrote;
+            FM_Result closed;
+            FM_Bool idx = FM_TRUE;
+            int rc;
+
+            memset(&w, 0, sizeof(w));
+            memset(&c, 0, sizeof(c));
+            c.width = VSV_W;
+            c.height = VSV_H;
+            c.fps = 10u;
+            c.audio_rate = VSV_RATE;
+            c.audio_channels = 1u;
+            g_wfs_card_free = -1;
+            r = VideoFileWriter_Open(&w, "/ram/vsv/f.avi", &c);
+            g_wfs_card_free = (int64_t)budgets[b];
+            wrote = (r == FM_OK) ? vsv_write_big(&w, 8u) : r;
+            closed = VideoFileWriter_Close(&w);
+            g_wfs_card_free = -1;
+            rc = vsv_raw_check("/ram/vsv/f.avi", &raw);
+            (void)File_Exists("/ram/vsv/f.avi.idx", &idx);
+            /* each picture with its sound is 71.6 KB */
+            if (r != FM_OK || closed == FM_OK || rc != 0 || idx ||
+                raw.frames > budgets[b] / VSV_BIG ||
+                (budgets[b] > 75000u &&
+                 raw.frames + 1u < (budgets[b] - 33000u) / 71700u))
+            {
+                bad = 1;
+                snprintf(msg, sizeof(msg), "budget=%u open=%d wrote=%d "
+                         "close=%d rule=%d frames=%u indexed=%d idx=%d",
+                         (unsigned)budgets[b], (int)r, (int)wrote,
+                         (int)closed, rc, (unsigned)raw.frames, raw.indexed,
+                         (int)idx);
+            }
+            (void)File_Delete("/ram/vsv/f.avi");
+        }
+        wfs_unmount("/ram");
+        restore_posix_root();
+        if (!bad)
+        {
+            PASS();
+        }
+        else
+        {
             FAIL(msg);
         }
     }

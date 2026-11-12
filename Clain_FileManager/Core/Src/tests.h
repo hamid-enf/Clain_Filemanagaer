@@ -9,7 +9,7 @@
 #define SRC_TESTS_H_
 
 
-#include "Defines.h"
+#include "defines.h"
 #include "printf_redirect.h"
 
 

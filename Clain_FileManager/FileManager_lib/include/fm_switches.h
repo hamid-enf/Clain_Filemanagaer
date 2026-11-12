@@ -73,6 +73,11 @@
 #ifndef LARGE
 #define LARGE  3
 #endif
+/* HUGE را <math.h> بعضی کامپایلرها هم تعریف می‌کند (نسخه‌هایی از newlib روی
+ * ARM: یک عدد اعشاری). اگر آن زودتر آمده باشد دستش نمی‌زنیم؛ کتابخانه خودش هیچ‌جا با
+ * این نام مقایسه نمی‌کند، بلکه با FM_BUFFERS_LEVEL (fm_buffers_level.h) که
+ * مستقل از ترتیب include درست حساب می‌شود. «#define FM_BUFFERS HUGE» در هر
+ * دو حالت کار می‌کند. */
 #ifndef HUGE
 #define HUGE   4
 #endif

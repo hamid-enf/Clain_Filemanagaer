@@ -51,8 +51,24 @@
 #define FM_VIDEO_CONVERT_AUDIO_BYTES 16384u
 #endif
 
+/* Power-loss checkpoint.  Every time the file has grown by this many
+ * bytes the header is rewritten with the counts so far and the file is
+ * synced (File_Flush: the directory entry gets its size).  A recording
+ * that is never closed (reset, power loss, card pulled) is then a valid
+ * AVI up to the last checkpoint: it has no index yet, which players make
+ * up for by reading the pictures in order, and VideoFile_Repair gives it
+ * one.  The cost is one 0.3 KB write at the start of the file and one
+ * sync.  0 = never. */
+#ifndef FM_VIDEO_ENC_SYNC_BYTES
+#define FM_VIDEO_ENC_SYNC_BYTES 1048576u
+#endif
+
 #define VW_INDEX_BUF 512u
 #define VW_HDR_MAX   336u
+/* FM_VideoFileWriter.guard of a writer that Open filled in (a writer is
+ * usually a local variable: before the first Open `opened` is whatever
+ * was in memory). */
+#define VW_GUARD     0x56575231u                 /* "VWR1" */
 
 static void vw_wr32(uint8_t *p, uint32_t v)
 {
@@ -187,12 +203,31 @@ static void vw_index_flush(FM_VideoFileWriter *w)
     w->ibuf_len = 0u;
 }
 
+/* One entry of the index: the chunk at file position `at`, `size` bytes
+ * of data. */
+static void vw_index_add(FM_VideoFileWriter *w, uint64_t at,
+                         const char *fourcc, uint32_t size)
+{
+    uint8_t e[16];
+
+    memcpy(e, fourcc, 4);
+    vw_wr32(e + 4, 0x10u);                       /* AVIIF_KEYFRAME */
+    vw_wr32(e + 8, (uint32_t)(at - w->movi_pos));
+    vw_wr32(e + 12, size);
+    if (w->ibuf_len + 16u > VW_INDEX_BUF)
+    {
+        vw_index_flush(w);
+    }
+    memcpy(w->ibuf + w->ibuf_len, e, 16);
+    w->ibuf_len += 16u;
+    w->index_entries++;
+}
+
 /* End a chunk: length, pad byte, index entry.  Returns the length. */
 static uint32_t vw_chunk_end(FM_VideoFileWriter *w, uint64_t at,
                              const char *fourcc, uint32_t *largest)
 {
     uint32_t size = (uint32_t)(vw_pos(w) - (at + 8u));
-    uint8_t e[16];
 
     vw_patch32(w, at + 4u, size);
     if ((size & 1u) != 0u)
@@ -205,24 +240,17 @@ static uint32_t vw_chunk_end(FM_VideoFileWriter *w, uint64_t at,
     {
         *largest = size;
     }
-    memcpy(e, fourcc, 4);
-    vw_wr32(e + 4, 0x10u);                       /* AVIIF_KEYFRAME */
-    vw_wr32(e + 8, (uint32_t)(at - w->movi_pos));
-    vw_wr32(e + 12, size);
-    if (w->ibuf_len + 16u > VW_INDEX_BUF)
-    {
-        vw_index_flush(w);
-    }
-    memcpy(w->ibuf + w->ibuf_len, e, 16);
-    w->ibuf_len += 16u;
-    w->index_entries++;
+    vw_index_add(w, at, fourcc, size);
     return size;
 }
 
 /* The whole header, with the values known so far; written with zero
- * counts by Open and with the real ones by Close.  Returns its size. */
+ * counts by Open, with the counts so far by a checkpoint (`indexed`
+ * FM_FALSE: the file has no "idx1" yet) and with the final ones by
+ * Close.  Returns its size. */
 static uint32_t vw_build_header(const FM_VideoFileWriter *w, uint8_t *h,
-                                uint64_t file_size, uint64_t movi_end)
+                                uint64_t file_size, uint64_t movi_end,
+                                FM_Bool indexed)
 {
     const FM_VideoSaveConfig *c = &w->config;
     uint32_t fps = c->fps;
@@ -251,7 +279,8 @@ static uint32_t vw_build_header(const FM_VideoFileWriter *w, uint8_t *h,
                  ? (((movi_end - w->movi_pos) * fps) / ((uint64_t)w->frames * den))
                  : 0u;
     vw_wr32(p + 12, (rate64 > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)rate64);
-    vw_wr32(p + 20, audio ? 0x110u : 0x10u);     /* HASINDEX | INTERLEAVED */
+    /* AVIF_HASINDEX | AVIF_ISINTERLEAVED */
+    vw_wr32(p + 20, (indexed ? 0x10u : 0u) | (audio ? 0x100u : 0u));
     vw_wr32(p + 24, w->frames);
     vw_wr32(p + 32, audio ? 2u : 1u);
     vw_wr32(p + 36, w->largest_frame);
@@ -344,6 +373,7 @@ static void vw_release(FM_VideoFileWriter *w, FM_Bool remove_video,
     w->buf = NULL;
     w->ibuf = NULL;
     w->opened = FM_FALSE;
+    w->guard = 0u;
 }
 
 FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
@@ -357,6 +387,12 @@ FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
     if (w == NULL)
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (w->guard == VW_GUARD && w->opened)
+    {
+        /* This writer already has a file open.  Opening over it would
+         * leave that file without its index and its memory lost. */
+        return FM_ERR_BUSY;
     }
     memset(w, 0, sizeof(*w));
     if (path == NULL || cfg == NULL || cfg->width == 0u ||
@@ -408,7 +444,7 @@ FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
         return r;
     }
 
-    hlen = vw_build_header(w, hdr, 0u, 0u);
+    hlen = vw_build_header(w, hdr, 0u, 0u, FM_FALSE);
     w->movi_pos = (uint64_t)hlen - 4u;
     vw_put(w, hdr, hlen);
     vw_flush(w);
@@ -418,7 +454,9 @@ FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
         vw_release(w, FM_TRUE, path);
         return r;
     }
+    w->synced_pos = vw_pos(w);
     w->opened = FM_TRUE;
+    w->guard = VW_GUARD;
     FM_EVENT_LOG("open %s %ux%u %lu/%lu fps q%u audio %lu Hz %uch",
            path, (unsigned)cfg->width, (unsigned)cfg->height,
            (unsigned long)cfg->fps, (unsigned long)cfg->fps_den,
@@ -443,11 +481,52 @@ static FM_Result vw_ready(const FM_VideoFileWriter *w)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (!w->opened)
+    if (!w->opened || w->guard != VW_GUARD)
     {
         return FM_ERR_NOT_OPEN;
     }
     return w->error;
+}
+
+/* Called after every chunk.  When the file has grown by
+ * FM_VIDEO_ENC_SYNC_BYTES since the last time: everything buffered goes
+ * to the card, the header gets the counts so far and the file is synced.
+ * What is on the card is then a complete AVI without an index. */
+static void vw_checkpoint(FM_VideoFileWriter *w)
+{
+#if FM_VIDEO_ENC_SYNC_BYTES > 0u
+    uint8_t hdr[VW_HDR_MAX];
+    uint32_t hlen;
+    uint64_t end;
+
+    if (w->error != FM_OK ||
+        vw_pos(w) - w->synced_pos < (uint64_t)FM_VIDEO_ENC_SYNC_BYTES)
+    {
+        return;
+    }
+    vw_flush(w);
+    end = vw_pos(w);
+    hlen = vw_build_header(w, hdr, end, end, FM_FALSE);
+    if (w->error == FM_OK)
+    {
+        w->error = File_Seek(&w->file, 0, FM_SEEK_SET);
+    }
+    if (w->error == FM_OK)
+    {
+        w->error = vw_file_write(&w->file, hdr, hlen);
+    }
+    if (w->error == FM_OK)
+    {
+        w->error = File_Seek(&w->file, (int64_t)end, FM_SEEK_SET);
+    }
+    if (w->error == FM_OK)
+    {
+        w->error = File_Flush(&w->file);
+    }
+    w->synced_pos = end;
+#else
+    (void)w;
+#endif
 }
 
 FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
@@ -483,6 +562,7 @@ FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
         w->last_at = at;
         w->last_size = (uint32_t)size;
     }
+    vw_checkpoint(w);
     return w->error;
 }
 
@@ -536,6 +616,7 @@ static FM_Result vw_write_frame(FM_VideoFileWriter *w, const void *pixels,
         w->last_at = at;
         w->last_size = size;
     }
+    vw_checkpoint(w);
     return w->error;
 }
 
@@ -633,7 +714,8 @@ FM_Result VideoFileWriter_RepeatFrame(FM_VideoFileWriter *w, uint32_t count)
         w->last_at = at;
         count--;
     }
-    return FM_OK;
+    vw_checkpoint(w);
+    return w->error;
 }
 
 FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
@@ -687,34 +769,23 @@ FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
     {
         w->audio_bytes += bytes;
     }
+    vw_checkpoint(w);
     return w->error;
 }
 
-FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w)
+/* Index, counts and lengths: what turns a row of chunks into a finished
+ * file.  The writer stands right after the last chunk and everything
+ * before that is on the card. */
+static FM_Result vw_finish(FM_VideoFileWriter *w)
 {
     uint8_t hdr[VW_HDR_MAX];
-    uint64_t movi_end;
+    uint64_t movi_end = vw_pos(w);
     uint64_t end;
     uint32_t hlen;
     uint32_t left;
-    FM_Result r;
-    FM_Result c;
+    FM_Bool indexed = FM_TRUE;
+    FM_Result r = FM_OK;
 
-    if (w == NULL)
-    {
-        return FM_ERR_INVALID_ARGUMENT;
-    }
-    if (!w->opened)
-    {
-        return FM_ERR_NOT_OPEN;
-    }
-
-    /* Even after a write error the file is completed as far as it got:
-     * what is on the card then plays up to that point. */
-    r = w->error;
-    w->error = FM_OK;
-
-    movi_end = vw_pos(w);
     vw_index_flush(w);
     if (w->error == FM_OK)
     {
@@ -746,8 +817,19 @@ FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w)
     }
     vw_flush(w);
     end = vw_pos(w);
+    if (w->error != FM_OK)
+    {
+        /* The index did not fit (card full) or could not be read back.
+         * The file is completed without one: the header says so and
+         * counts only the chunks, which players then read in order. */
+        r = w->error;
+        w->error = FM_OK;
+        indexed = FM_FALSE;
+        end = movi_end;
+        (void)File_Truncate(&w->file, movi_end);         /* best effort */
+    }
 
-    hlen = vw_build_header(w, hdr, end, movi_end);
+    hlen = vw_build_header(w, hdr, end, movi_end, indexed);
     if (w->error == FM_OK)
     {
         w->error = File_Seek(&w->file, 0, FM_SEEK_SET);
@@ -760,18 +842,317 @@ FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w)
     {
         w->error = File_Flush(&w->file);
     }
+    return (r != FM_OK) ? r : w->error;
+}
+
+FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w)
+{
+    FM_Result r;
+    FM_Result c;
+
+    if (w == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (!w->opened || w->guard != VW_GUARD)
+    {
+        return FM_ERR_NOT_OPEN;
+    }
+
+    r = w->error;
     if (r == FM_OK)
     {
+        vw_flush(w);                 /* the last chunks */
         r = w->error;
     }
-    c = File_Close(&w->file);
     if (r == FM_OK)
     {
-        r = c;
+        r = vw_finish(w);
+        c = File_Close(&w->file);
+        if (r == FM_OK)
+        {
+            r = c;
+        }
+        FM_EVENT_LOG("close: %lu frames, %lu bytes, r=%d",
+               (unsigned long)w->frames, (unsigned long)vw_pos(w), (int)r);
+        vw_release(w, FM_FALSE, NULL);
+        return r;
     }
-    FM_EVENT_LOG("close: %lu frames, %lu bytes, r=%d", (unsigned long)w->frames,
-           (unsigned long)end, (int)r);
-    vw_release(w, FM_FALSE, NULL);
+
+    /* A write failed (card full, I/O error): the counts and the index
+     * kept in memory describe chunks that may not be on the card.  The
+     * file is completed from what is really there, exactly as for a
+     * recording that was never closed: every whole chunk is kept, the
+     * one that was cut is dropped.  The error stays the answer. */
+    {
+        char *path = w->index_path;
+        size_t n = strlen(path);
+
+        (void)File_Close(&w->file);
+        (void)File_Close(&w->index);
+        FM_Free(w->buf);
+        w->buf = NULL;
+        w->ibuf = NULL;
+        w->opened = FM_FALSE;
+        w->guard = 0u;
+        FM_EVENT_LOG("close after an error (r=%d): completing what is on "
+                     "the card", (int)r);
+        if (n > 4u)
+        {
+            path[n - 4u] = '\0';     /* "<name>.idx" -> "<name>" */
+            (void)VideoFile_Repair(path, NULL);
+        }
+    }
+    return r;
+}
+
+/* ------------------------------------------------------------------ */
+/* VideoFile_Repair                                                    */
+/* ------------------------------------------------------------------ */
+static uint32_t vw_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static FM_Result vw_read_at(FM_File *f, uint64_t at, uint8_t *dst,
+                            uint32_t len)
+{
+    uint32_t got = 0;
+    FM_Result r = File_Seek(f, (int64_t)at, FM_SEEK_SET);
+
+    if (r == FM_OK)
+    {
+        r = File_Read(f, dst, len, &got);
+    }
+    if (r == FM_OK && got != len)
+    {
+        r = FM_ERR_EOF;
+    }
+    return r;
+}
+
+/* The header of a file this writer made -> the configuration it was
+ * opened with.  FM_ERR_INVALID_FORMAT for anything else. */
+static FM_Result vw_parse_header(const uint8_t *h, uint32_t have,
+                                 FM_VideoSaveConfig *c, uint32_t *hlen)
+{
+    uint32_t streams;
+    uint32_t at;
+
+    memset(c, 0, sizeof(*c));
+    if (have < 224u || memcmp(h, "RIFF", 4) != 0 ||
+        memcmp(h + 8, "AVI LIST", 8) != 0 ||
+        memcmp(h + 20, "hdrlavih", 8) != 0 ||
+        memcmp(h + 100, "strh", 4) != 0 ||
+        memcmp(h + 108, "vidsMJPG", 8) != 0)
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    streams = vw_rd32(h + 24 + 32);
+    c->width = (uint16_t)vw_rd32(h + 24 + 40);
+    c->height = (uint16_t)vw_rd32(h + 24 + 44);
+    c->fps_den = vw_rd32(h + 100 + 28);
+    c->fps = vw_rd32(h + 100 + 32);
+    at = 212u;
+    if (streams == 2u)
+    {
+        if (have < 324u || memcmp(h + 224, "strh", 4) != 0 ||
+            memcmp(h + 232, "auds", 4) != 0)
+        {
+            return FM_ERR_INVALID_FORMAT;
+        }
+        c->audio_channels = (uint16_t)(h[288 + 10] | (h[288 + 11] << 8));
+        c->audio_rate = vw_rd32(h + 288 + 12);
+        at = 312u;
+    }
+    else if (streams != 1u)
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    if (memcmp(h + at, "LIST", 4) != 0 || memcmp(h + at + 8u, "movi", 4) != 0 ||
+        c->width == 0u || c->height == 0u || c->fps == 0u ||
+        (streams == 2u && (c->audio_rate == 0u || c->audio_channels < 1u ||
+                           c->audio_channels > 2u)))
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    *hlen = at + 12u;
+    return FM_OK;
+}
+
+FM_Result VideoFile_Repair(const char *path, uint32_t *frames)
+{
+    FM_VideoFileWriter *w;
+    uint8_t hdr[VW_HDR_MAX];
+    uint64_t size = 0;
+    uint64_t pos;
+    uint32_t hlen = 0;
+    uint32_t got = 0;
+    size_t plen;
+    FM_Bool there = FM_FALSE;
+    FM_Result r;
+
+    if (frames != NULL)
+    {
+        *frames = 0u;
+    }
+    if (path == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    plen = strlen(path);
+    if (plen + 5u > sizeof(w->index_path))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    w = (FM_VideoFileWriter *)FM_Calloc(1u, sizeof(*w));
+    if (w == NULL)
+    {
+        return FM_ERR_NO_MEMORY;
+    }
+    memcpy(w->index_path, path, plen);
+    memcpy(w->index_path + plen, ".idx", 5);
+
+    /* The side index is there only while a recording is open: no such
+     * file = the video was closed properly (or never existed). */
+    r = File_Exists(w->index_path, &there);
+    if (r == FM_OK && !there)
+    {
+        r = FM_ERR_NOT_FOUND;
+    }
+    if (r == FM_OK)
+    {
+        r = File_Exists(path, &there);
+        if (r == FM_OK && !there)
+        {
+            (void)File_Delete(w->index_path);    /* an index of nothing */
+            r = FM_ERR_NOT_FOUND;
+        }
+    }
+    if (r != FM_OK)
+    {
+        FM_Free(w);
+        return r;
+    }
+
+    w->buf_cap = (uint32_t)FM_VIDEO_ENC_OUT_BYTES;
+    w->buf = (uint8_t *)FM_Alloc((size_t)w->buf_cap + VW_INDEX_BUF);
+    if (w->buf == NULL)
+    {
+        FM_Free(w);
+        return FM_ERR_NO_MEMORY;
+    }
+    w->ibuf = w->buf + w->buf_cap;
+
+    r = File_OpenEx(&w->file, path, FM_OPEN_READ_WRITE);
+    if (r == FM_OK)
+    {
+        r = File_Size(&w->file, &size);
+    }
+    if (r == FM_OK)
+    {
+        r = File_Read(&w->file, hdr, sizeof(hdr), &got);
+    }
+    if (r == FM_OK)
+    {
+        r = vw_parse_header(hdr, got, &w->config, &hlen);
+    }
+    if (r != FM_OK)
+    {
+        /* Not a file of this writer, or it cannot be read: both files
+         * are left exactly as they are. */
+        if (File_IsOpen(&w->file))
+        {
+            (void)File_Close(&w->file);
+        }
+        FM_Free(w->buf);
+        FM_Free(w);
+        return r;
+    }
+    r = File_OpenEx(&w->index, w->index_path,
+                    FM_OPEN_READ_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    if (r != FM_OK)
+    {
+        (void)File_Close(&w->file);
+        FM_Free(w->buf);
+        FM_Free(w);
+        return r;
+    }
+    w->movi_pos = (uint64_t)hlen - 4u;
+
+    /* Walk the chunks that are whole; the index is made from them. */
+    pos = hlen;
+    while (pos + 8u <= size && w->error == FM_OK)
+    {
+        uint8_t ch[8];
+        uint32_t len;
+        FM_Bool picture;
+
+        if (vw_read_at(&w->file, pos, ch, 8u) != FM_OK)
+        {
+            break;
+        }
+        len = vw_rd32(ch + 4);
+        picture = (memcmp(ch, "00dc", 4) == 0) ? FM_TRUE : FM_FALSE;
+        if ((!picture && (memcmp(ch, "01wb", 4) != 0 ||
+                          w->config.audio_rate == 0u)) ||
+            len == 0u || len > 0x7FFFFFFFu ||
+            pos + 8u + (uint64_t)len + (len & 1u) > size)
+        {
+            break;                    /* the chunk that was cut */
+        }
+        if (picture)
+        {
+            w->frames++;
+            w->last_at = pos;
+            w->last_size = len;
+            if (len > w->largest_frame)
+            {
+                w->largest_frame = len;
+            }
+        }
+        else
+        {
+            w->audio_bytes += len;
+            if (len > w->largest_audio)
+            {
+                w->largest_audio = len;
+            }
+        }
+        vw_index_add(w, pos, picture ? "00dc" : "01wb", len);
+        pos += 8u + (uint64_t)len + (len & 1u);
+    }
+    /* Continue as a writer that stands right after the last whole chunk
+     * and finish it: index, counts and lengths are written as by Close
+     * (without the index when even that does not fit on the card). */
+    if (pos < size)
+    {
+        (void)File_Truncate(&w->file, pos);      /* best effort */
+    }
+    if (w->error == FM_OK)
+    {
+        w->error = File_Seek(&w->file, (int64_t)pos, FM_SEEK_SET);
+    }
+    w->buf_pos = pos;
+    if (frames != NULL)
+    {
+        *frames = w->frames;
+    }
+    FM_EVENT_LOG("repair %s: %lu frames, %lu bytes kept of %lu", path,
+           (unsigned long)w->frames, (unsigned long)pos,
+           (unsigned long)size);
+    r = vw_finish(w);
+    {
+        FM_Result c = File_Close(&w->file);
+
+        if (r == FM_OK)
+        {
+            r = c;
+        }
+    }
+    vw_release(w, FM_FALSE, NULL);   /* closes and removes "<path>.idx" */
+    FM_Free(w);
     return r;
 }
 
@@ -1090,6 +1471,16 @@ FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
 FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w)
 {
     (void)w;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result VideoFile_Repair(const char *path, uint32_t *frames)
+{
+    (void)path;
+    if (frames != NULL)
+    {
+        *frames = 0u;
+    }
     return FM_ERR_UNSUPPORTED;
 }
 

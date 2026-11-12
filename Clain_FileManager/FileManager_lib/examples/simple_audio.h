@@ -429,6 +429,12 @@ typedef struct
 
 static SimpleAudioState sa;
 
+/* حالت پوشهٔ RecPlaying: برای این تعداد ترکِ آخر یادش می‌ماند که هر کدام
+ * در کدام فایل ذخیره شده (هر ترک ۶ بایت RAM). */
+#ifndef SIMPLE_AUDIO_REC_NAMES
+#define SIMPLE_AUDIO_REC_NAMES 48u
+#endif
+
 /* ذخیرهٔ صدا. بیرون از SimpleAudioState است چون Begin آن را پاک می‌کند و
  * ذخیره (و تنظیم‌هایش) باید از Stop و Begin و عوض‌شدن ترک جان به‌در ببرد. */
 typedef struct
@@ -444,6 +450,12 @@ typedef struct
     uint16_t channels;
     uint64_t frames;
     FM_Result error;              /* چرا ذخیرهٔ موزیک خودش تمام شد         */
+    /* حالت پوشه: ترک‌هایی که در همین نوبتِ RecPlaying ذخیره شده‌اند و
+     * شماره‌ای که نام فایلشان گرفته (simple_audio_rec_track_path) */
+    uint32_t done_key[SIMPLE_AUDIO_REC_NAMES];
+    uint16_t done_no[SIMPLE_AUDIO_REC_NAMES];
+    uint16_t done_count;
+    uint16_t done_next;
     /* تنظیم‌های ماندگار */
     FM_AudioFileFormat format;
     uint16_t out_channels;
@@ -1862,9 +1874,92 @@ FM_Result SimpleAudio_RecWrite(const int16_t *pcm, size_t frames)
     return r;
 }
 
-/* نام فایل یک ترک در حالت «برای هر ترک یک فایل»: <پوشه>/<نام ترک><پسوند>.
- * اگر این همان فایلی باشد که دارد پخش می‌شود (پوشهٔ مقصد = پوشهٔ موزیک و
- * همان پسوند)، «‎_rec‎» به نام اضافه می‌شود تا فایل اصلی پاک نشود. */
+/* دو مسیر یکی‌اند؟ (بدون فرق حروف بزرگ و کوچک، مثل FAT) */
+static FM_Bool simple_audio_rec_same_path(const char *a, const char *b)
+{
+    for (;; a++, b++)
+    {
+        char x = *a;
+        char y = *b;
+
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y)
+        {
+            return FM_FALSE;
+        }
+        if (x == '\0')
+        {
+            return FM_TRUE;
+        }
+    }
+}
+
+/* <پوشه>/<نام><_rec?><_شماره?><پسوند> در sa_rec.path؛ شمارهٔ ۱ یعنی بدون
+ * شماره. */
+static FM_Result simple_audio_rec_build(const char *base, size_t blen,
+                                        FM_Bool rec_suffix, uint32_t no,
+                                        const char *ext)
+{
+    char num[8];
+    size_t dlen = strlen(sa_rec.dest);
+    size_t nlen = 0u;
+    size_t slen = rec_suffix ? 4u : 0u;
+    size_t elen = strlen(ext);
+    size_t off;
+
+    while (dlen > 0u && sa_rec.dest[dlen - 1u] == '/')
+    {
+        dlen--;
+    }
+    if (no > 1u)
+    {
+        char tmp[6];
+        size_t t = 0u;
+
+        while (no != 0u && t < sizeof(tmp))
+        {
+            tmp[t++] = (char)('0' + (no % 10u));
+            no /= 10u;
+        }
+        num[nlen++] = '_';
+        while (t > 0u)
+        {
+            num[nlen++] = tmp[--t];
+        }
+    }
+    if (dlen + 1u + blen + slen + nlen + elen + 1u > sizeof(sa_rec.path))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    memcpy(sa_rec.path, sa_rec.dest, dlen);
+    off = dlen;
+    sa_rec.path[off++] = '/';
+    memcpy(sa_rec.path + off, base, blen);
+    off += blen;
+    memcpy(sa_rec.path + off, "_rec", slen);
+    off += slen;
+    memcpy(sa_rec.path + off, num, nlen);
+    off += nlen;
+    memcpy(sa_rec.path + off, ext, elen);
+    off += elen;
+    sa_rec.path[off] = '\0';
+    return FM_OK;
+}
+
+/*
+ * نام فایل یک ترک در حالت «برای هر ترک یک فایل»: <پوشه>/<نام ترک><پسوند>.
+ *
+ * هیچ فایلی که از قبل هست پاک نمی‌شود:
+ *   - اگر آن نام همان فایلی باشد که دارد پخش می‌شود (پوشهٔ مقصد = پوشهٔ
+ *     موزیک و همان پسوند)، «‎_rec‎» به نام اضافه می‌شود.
+ *   - اگر فایلی با آن نام هست (ترک دیگری با همین نام از یک زیرپوشهٔ دیگر،
+ *     مثل ‎/music/a/song.mp3‎ و ‎/music/b/song.mp3‎، یا ذخیره‌ای از دفعهٔ قبل)،
+ *     شماره می‌خورد: song.wav، بعد song_2.wav، song_3.wav ...
+ *   - فقط وقتی «همین ترک» در «همین نوبت RecPlaying» دوباره پخش شود (تکرار
+ *     فهرست، Stop و Begin دوباره) روی فایل خودش نوشته می‌شود، تا با تکرار
+ *     فهرست کارت پر نشود. SIMPLE_AUDIO_REC_NAMES ترک آخر به یاد می‌مانند.
+ */
 static FM_Result simple_audio_rec_track_path(const char *track,
                                              const char *ext)
 {
@@ -1872,9 +1967,11 @@ static FM_Result simple_audio_rec_track_path(const char *track,
     const char *p;
     const char *dot = NULL;
     size_t blen;
-    size_t dlen = strlen(sa_rec.dest);
-    size_t elen = strlen(ext);
-    uint8_t pass;
+    uint32_t key = 2166136261u;          /* FNV-1a از مسیر ترک + پسوند */
+    uint32_t no;
+    uint32_t i;
+    FM_Bool rec_suffix = FM_FALSE;
+    FM_Result r;
 
     if (track == NULL)
     {
@@ -1883,10 +1980,18 @@ static FM_Result simple_audio_rec_track_path(const char *track,
     base = track;
     for (p = track; *p != '\0'; p++)
     {
+        char c = *p;
+
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        key = (key ^ (uint8_t)c) * 16777619u;
         if (*p == '/' || *p == '\\')
         {
             base = p + 1;
         }
+    }
+    for (p = ext; *p != '\0'; p++)
+    {
+        key = (key ^ (uint8_t)*p) * 16777619u;
     }
     for (p = base; *p != '\0'; p++)
     {
@@ -1901,51 +2006,55 @@ static FM_Result simple_audio_rec_track_path(const char *track,
         base = "track";
         blen = 5u;
     }
-    while (dlen > 0u && sa_rec.dest[dlen - 1u] == '/')
+
+    /* فایل خودِ ترک؟ */
+    r = simple_audio_rec_build(base, blen, FM_FALSE, 1u, ext);
+    if (r != FM_OK)
     {
-        dlen--;
+        return r;
     }
+    rec_suffix = simple_audio_rec_same_path(sa_rec.path, track);
 
-    for (pass = 0u; pass < 2u; pass++)
+    /* همین ترک در همین نوبت قبلاً ذخیره شده؟ -> همان فایل */
+    for (i = 0u; i < sa_rec.done_count; i++)
     {
-        const char *suffix = (pass == 0u) ? "" : "_rec";
-        size_t slen = strlen(suffix);
-        size_t off = 0u;
-        size_t i;
-
-        if (dlen + 1u + blen + slen + elen + 1u > sizeof(sa_rec.path))
+        if (sa_rec.done_key[i] == key)
         {
-            return FM_ERR_TOO_LARGE;
+            return simple_audio_rec_build(base, blen, rec_suffix,
+                                          sa_rec.done_no[i], ext);
         }
-        memcpy(sa_rec.path, sa_rec.dest, dlen);
-        off = dlen;
-        sa_rec.path[off++] = '/';
-        memcpy(sa_rec.path + off, base, blen);
-        off += blen;
-        memcpy(sa_rec.path + off, suffix, slen);
-        off += slen;
-        memcpy(sa_rec.path + off, ext, elen);
-        off += elen;
-        sa_rec.path[off] = '\0';
+    }
+    /* اولین نامی که آزاد است */
+    for (no = 1u; no <= 999u; no++)
+    {
+        FM_Bool exists = FM_FALSE;
 
-        for (i = 0u; sa_rec.path[i] != '\0' && track[i] != '\0'; i++)
+        r = simple_audio_rec_build(base, blen, rec_suffix, no, ext);
+        if (r != FM_OK)
         {
-            char a = sa_rec.path[i];
-            char b = track[i];
+            return r;
+        }
+        r = File_Exists(sa_rec.path, &exists);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        if (!exists)
+        {
+            uint32_t slot = sa_rec.done_next;
 
-            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-            if (a != b)
+            sa_rec.done_key[slot] = key;
+            sa_rec.done_no[slot] = (uint16_t)no;
+            sa_rec.done_next =
+                (uint16_t)((slot + 1u) % (uint32_t)SIMPLE_AUDIO_REC_NAMES);
+            if (sa_rec.done_count < (uint16_t)SIMPLE_AUDIO_REC_NAMES)
             {
-                break;
+                sa_rec.done_count++;
             }
-        }
-        if (sa_rec.path[i] != track[i])
-        {
-            return FM_OK;            /* فایل دیگری است */
+            return FM_OK;
         }
     }
-    return FM_OK;
+    return FM_ERR_EXISTS;                /* ۹۹۹ فایل با همین نام هست */
 }
 
 /* ذخیرهٔ موزیکِ در حال پخش به پایان رسید؛ دلیل در لاگ و در RecStop. */
@@ -2061,6 +2170,10 @@ static void simple_audio_rec_service(void)
  *                          "/rec" + "/music/a.mp3" -> "/rec/a.wav"
  *                          (پسوند طبق RecSetFormat). تا RecStop فعال می‌ماند،
  *                          حتی بعد از Stop و Begin دوباره.
+ *                          فایلی که از قبل هست پاک نمی‌شود: نام بعدی
+ *                          a_2.wav، a_3.wav ... می‌شود (دو ترک هم‌نام از دو
+ *                          زیرپوشه، یا ذخیرهٔ دفعهٔ قبل). فقط تکرار همان
+ *                          ترک در همین نوبت روی فایل خودش نوشته می‌شود.
  *   dest = فایل با پسوند   همهٔ ترک‌ها پشت‌سرهم در همین فایل، تا RecStop، یا
  *                          توقف پخش، یا ترکی با نرخ نمونه‌برداری دیگر.
  *
@@ -2114,6 +2227,8 @@ FM_Result SimpleAudio_RecPlaying(const char *dest)
     (void)strcpy(sa_rec.dest, dest);
     sa_rec.path[0] = '\0';
     sa_rec.per_track = is_file ? FM_FALSE : FM_TRUE;
+    sa_rec.done_count = 0u;          /* نوبت تازه: هنوز ترکی ذخیره نشده */
+    sa_rec.done_next = 0u;
     sa_rec.error = FM_OK;
     sa_rec.playing = FM_TRUE;
     return FM_OK;

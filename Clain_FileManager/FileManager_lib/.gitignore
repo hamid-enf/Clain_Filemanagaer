@@ -1,6 +1,7 @@
 # Build outputs
 *.o
 *.a
+.fm_build_flags
 fm_test
 examples/00_high_level_memory
 examples/01_hello_file

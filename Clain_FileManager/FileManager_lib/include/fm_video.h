@@ -335,6 +335,16 @@ FM_Result VideoWriter_Close(FM_VideoWriter *w);
  *
  * Errors: the first failed write stays the answer of every later call
  * and of Close.  Close still completes the file as far as it got.
+ * Open on a writer that still has a file open is FM_ERR_BUSY (Close it
+ * first): nothing is opened, the first file stays as it is.
+ *
+ * A recording that is never closed (reset, power loss, card pulled):
+ * every FM_VIDEO_ENC_SYNC_BYTES (1 MB; 0 = off) the header gets the
+ * counts so far and the file is synced, so the file on the card is a
+ * valid AVI up to the last such point, only without its index (players
+ * then read it in order).  "<name>.idx" is left beside it; call
+ * VideoFile_Repair(name) after the restart: it gives the file its index
+ * and exact length and removes "<name>.idx".
  */
 typedef struct
 {
@@ -371,8 +381,11 @@ typedef struct
     uint32_t  largest_audio;
     uint64_t  last_at;            /* chunk of the last picture ...     */
     uint32_t  last_size;          /* ... and its size (0 = none yet)   */
+    uint64_t  synced_pos;         /* file size at the last checkpoint  */
     FM_Result error;
     FM_Bool   opened;
+    uint32_t  guard;              /* set by Open; tells an open writer
+                                   * from one that was never used      */
 } FM_VideoFileWriter;
 
 FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
@@ -407,6 +420,17 @@ FM_Result VideoFileWriter_RepeatFrame(FM_VideoFileWriter *w, uint32_t count);
 FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
                                      const int16_t *pcm, size_t frames);
 FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w);
+/* Finish a recording that was not closed.  The sign of one is the file
+ * "<path>.idx" beside the video.  Every chunk that is whole in the file
+ * is kept, a chunk that was cut is dropped, then the index and the
+ * lengths are written as Close would have and "<path>.idx" is removed.
+ * `frames` (may be NULL) gets the number of pictures in the result.
+ *   FM_OK                  repaired
+ *   FM_ERR_NOT_FOUND       there is no "<path>.idx": nothing to repair
+ *   FM_ERR_INVALID_FORMAT  the file was not made by this writer; both
+ *                          files are left as they are
+ * Never call it for a file that is being recorded right now. */
+FM_Result VideoFile_Repair(const char *path, uint32_t *frames);
 
 /*
  * Video_Convert: decode `src` (any video this build plays: AVI, MP4,

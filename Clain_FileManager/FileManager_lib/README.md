@@ -225,6 +225,11 @@ make examples        # build examples 00-10
 make examples_run    # run examples 00-10
 ```
 
+Changing a switch (`make FM_USE_JSON=0`, `CFLAGS_EXTRA=...`, `CC=clang`)
+rebuilds the objects by itself: the compiler and its flags are kept in
+`.fm_build_flags` and every object depends on it (GNU make 4.2 or newer;
+with an older make run `make clean` first).
+
 **What the tests are, and are not.**  Everything above runs on a PC: the
 suite as a 64-bit and as a 32-bit program, under ASan / UBSan / TSan and
 in every combination of the `FM_USE_*` switches (`tools/check_matrix.sh`,
@@ -606,6 +611,36 @@ Notes:
   header per packet.  The header carries the real object type (it used to
   announce AAC Main for everything); HE-AAC is signalled as its AAC-LC
   core, at the core sampling rate, which is how ADTS carries it.
+
+### Saving: what is on the card when it goes wrong
+
+`AudioFileWriter_*` and `VideoFileWriter_*` (and the `SimpleAudio_Rec*` /
+`SimpleVideo_Rec*` calls on top of them):
+
+* **Never closed** (reset, power loss).  Every `FM_AUDIO_ENC_SYNC_BYTES`
+  (256 KB) / `FM_VIDEO_ENC_SYNC_BYTES` (1 MB) the lengths in the header
+  are brought up to date and the file is synced.  A WAV / ADPCM file
+  plays up to the last such point; a FLAC file is on the card up to
+  there, with "length unknown" in its header; an AVI is a valid file
+  without index up to there, and this library opens it.  For the AVI,
+  `"<name>.idx"` stays beside it: `VideoFile_Repair(path, &frames)` after
+  the restart writes the index and the exact lengths and removes it.
+  Set either option to 0 to switch the checkpoints off.
+* **Write error / card full.**  The first error stays the answer of every
+  later call and of `Close`.  `Close` still completes the file with what
+  reached the card: the header lengths equal what is really there (a
+  partial sample frame or ADPCM block is cut off; the AVI gets its index
+  when there is room for it, otherwise it is left valid without one).
+* **Open on a writer that still has a file open** is `FM_ERR_BUSY`; the
+  first file is not touched.
+* `SimpleAudio_RecPlaying("/folder")` never overwrites a file it did not
+  write in the same session: a second track of the same name becomes
+  `name_2.wav`, `name_3.wav`, ...
+
+These are host tests against a file system that fails on purpose
+(`test/audio_save_tests.h`, `test/video_save_tests.h`): they check every
+header field of the files byte by byte.  No external player and no real
+card were part of it.
 
 ## Images: PNG and the hardware JPEG path
 

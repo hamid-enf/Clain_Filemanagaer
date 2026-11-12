@@ -34,14 +34,15 @@
 #ifndef FM_BUFFERS
 #define FM_BUFFERS NORMAL
 #endif
+#include "fm_buffers_level.h"     /* FM_BUFFERS_LEVEL: 1 SMALL .. 4 HUGE */
 #ifndef FM_BUF_SCALE
-#if   FM_BUFFERS == SMALL
+#if   FM_BUFFERS_LEVEL == 1
 #define FM_BUF_SCALE_NUM 1u
 #define FM_BUF_SCALE_DEN 4u
-#elif FM_BUFFERS == LARGE
+#elif FM_BUFFERS_LEVEL == 3
 #define FM_BUF_SCALE_NUM 4u
 #define FM_BUF_SCALE_DEN 1u
-#elif FM_BUFFERS == HUGE
+#elif FM_BUFFERS_LEVEL == 4
 #define FM_BUF_SCALE_NUM 8u
 #define FM_BUF_SCALE_DEN 1u
 #else
@@ -415,7 +416,7 @@
  * A longer track is truncated to this many bytes of PCM (and a warning
  * logged) instead of exhausting the heap.  Raise/lower it in
  * fm_board_config.h for your SDRAM size. */
-#if FM_BUFFERS == SMALL
+#if FM_BUFFERS_LEVEL == 1
 #define FM_OPUS_MAX_PCM_BYTES (2u * 1024u * 1024u)
 #else
 #define FM_OPUS_MAX_PCM_BYTES (16u * 1024u * 1024u)
@@ -455,9 +456,9 @@
  * Scaled with FM_BUFFERS for tiny MCUs: SMALL->1024, NORMAL->4096,
  * LARGE->4096, HUGE->8192. Longer clips then stream from the movi list
  * (avi_audio continuation) instead of truncating. */
-#if FM_BUFFERS == SMALL
+#if FM_BUFFERS_LEVEL == 1
 #define FM_VIDEO_MAX_FRAMES 1024
-#elif FM_BUFFERS == HUGE
+#elif FM_BUFFERS_LEVEL == 4
 #define FM_VIDEO_MAX_FRAMES 8192
 #else
 #define FM_VIDEO_MAX_FRAMES 4096

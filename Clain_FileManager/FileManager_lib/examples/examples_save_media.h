@@ -48,8 +48,15 @@
  *
  * ویدیو: اگر پخش‌کننده فریم جا بیندازد (دیکد کند)، جای آن فریم‌ها همان
  * تصویر قبلی تکرار می‌شود (SimpleVideo_RecRepeat) تا زمان فایل با صدا جور
- * بماند. هر فایل یک ویدیو است: با رسیدن ویدیوی بعدی (یا برگشت به عقب)
- * فایل بسته می‌شود.
+ * بماند. هر فایل یک ویدیو است: با رسیدن ویدیوی بعدی (یا تکرار همان ویدیو
+ * از اول) فایل بسته می‌شود.
+ *
+ * پرش وسط ذخیره (SimpleVideo_SeekTo / SeekBy، جلو یا عقب): فایل همان چیزی
+ * را نگه می‌دارد که دیده و شنیده شد، یعنی در جای پرش «برش» می‌خورد و تصویر
+ * و صدای جای تازه با هم ادامه پیدا می‌کنند. پرش از SimpleVideo_SeekCount()
+ * فهمیده می‌شود، نه از شمارهٔ فریم. در جای برش آخرین تصویر ممکن است چند
+ * فریم (حدود یک بافر I2S) بیشتر بماند: صدایی که پخش‌کننده جلوتر دیکد کرده
+ * بود. جزئیات در save_demo_video_cut.
  *
  * حافظهٔ رینگ با FM_Alloc در RecStart گرفته و در RecStop آزاد می‌شود:
  *   SAVE_DEMO_MUSIC_RING_SAMPLES  پیش‌فرض ۷۰۰۰۰ نمونه (۱۴۰ کیلوبایت)
@@ -210,6 +217,12 @@ static size_t save_demo_ring_peek(const SaveDemoRing *q, const int16_t **pcm)
 static void save_demo_ring_skip(SaveDemoRing *q, size_t n)
 {
     q->tail = (q->tail + n) % q->cap;
+}
+
+/* چند نمونه الان در رینگ منتظر است. */
+static size_t save_demo_ring_used(const SaveDemoRing *q)
+{
+    return (q->cap != 0u) ? (q->head + q->cap - q->tail) % q->cap : 0u;
 }
 
 /* ====================================================================== */
@@ -711,9 +724,18 @@ static struct
     uint32_t     repeated;      /* فریم‌هایی که با تکرار پُر شدند */
     uint32_t     sound_rate;    /* 0 = فایل تراک صدا ندارد */
     uint32_t     sound_frames;
+    uint32_t     fps;           /* فریم در ثانیهٔ این فایل */
+    /* پرش (SimpleVideo_SeekTo / SeekBy) وسط ذخیره */
+    uint32_t     seeks;         /* آخرین SimpleVideo_SeekCount() که دیده شد */
+    uint32_t     cuts;          /* چند پرش در این فایل «برش» شد */
+    uint8_t      cut_wait;      /* کالبک صدا پرش را دیده، کالبک فریم هنوز نه */
+    size_t       cut_left;      /* نمونه‌های «قبل از پرش» که هنوز در رینگ‌اند */
+    size_t       cut_skip;      /* نمونه‌های «بعد از پرش» که نباید نوشته شوند */
     FM_Result    error;
     SaveDemoRing ring;
 } save_demo_video;
+
+static FM_Result save_demo_video_cut(uint32_t src, uint32_t sound_ms);
 
 /*
  * کالبک فریم (SimpleVideo_FrameFn). نصب:
@@ -766,16 +788,44 @@ void SaveDemo_VideoFrameCallback(void *ctx, const void *pixels, uint16_t w,
         save_demo_video.h = h;
         save_demo_video.item = info.playlist_index;
         save_demo_video.first_src = src;
+        save_demo_video.fps = info.fps;
+        save_demo_video.seeks = info.seek_count;
+        save_demo_video.cut_wait = 0u;
+        save_demo_video.cut_left = 0u;
+        save_demo_video.cut_skip = 0u;
         FM_Log("SaveDemo video: saving %ux%u %lu fps, sound %lu Hz -> %s\n",
                (unsigned)w, (unsigned)h, (unsigned long)info.fps,
                (unsigned long)save_demo_video.sound_rate,
                save_demo_video.dest);
     }
     else if (info.playlist_index != save_demo_video.item ||
-             w != save_demo_video.w || h != save_demo_video.h ||
-             src < save_demo_video.last_src)
+             w != save_demo_video.w || h != save_demo_video.h)
     {
-        /* ویدیوی بعدی، تکرار از اول، یا پرش به عقب: این فایل تمام است */
+        /* ویدیوی بعدی: این فایل تمام است */
+        save_demo_video.finish = 1u;
+        return;
+    }
+    else if (save_demo_video.cut_wait ||
+             info.seek_count != save_demo_video.seeks)
+    {
+        /* SimpleVideo_SeekTo / SeekBy (جلو یا عقب): فایل همان چیزی را نگه
+         * می‌دارد که دیده و شنیده شد، یعنی یک «برش». تصویر و صدای جای تازه
+         * درست پشت سرِ تصویر و صدای قبلی می‌آیند و با هم شروع می‌شوند.
+         * (شمارهٔ فریم به‌تنهایی کافی نیست: بدون این شاخه، پرش به جلو مثل
+         * «چند صد فریم جاافتاده» دیده می‌شد، تصویر به اندازهٔ کل پرش ثابت
+         * می‌ماند و صدا از همان‌جا تا آخر فایل از تصویر جلو می‌افتاد.) */
+        save_demo_video.seeks = info.seek_count;
+        r = save_demo_video_cut(src, info.seek_sound_ms);
+        if (r != FM_OK)
+        {
+            save_demo_video.error = r;
+            save_demo_video.finish = 1u;
+            return;
+        }
+    }
+    else if (src < save_demo_video.last_src)
+    {
+        /* بدون پرش به عقب برگشته: تکرار ویدیو از اول -> این فایل تمام است */
         save_demo_video.finish = 1u;
         return;
     }
@@ -824,6 +874,17 @@ void SaveDemo_VideoSoundCallback(void *ctx, int16_t *pcm, size_t samples,
     {
         return;
     }
+    if (save_demo_video.open && !save_demo_video.cut_wait &&
+        SimpleVideo_SeekCount() != save_demo_video.seeks)
+    {
+        /* اولین صدای بعد از یک پرش. بعد از پرش، پخش‌کننده اول صدای جای
+         * تازه را می‌فرستد و بعد تصویرش را؛ پس اینجا فقط علامت گذاشته
+         * می‌شود که صدای قبل از پرش تا کجای رینگ است. بقیه با کالبک فریم. */
+        save_demo_video.seeks = SimpleVideo_SeekCount();
+        save_demo_video.cut_left =
+            save_demo_ring_used(&save_demo_video.ring);
+        save_demo_video.cut_wait = 1u;
+    }
     save_demo_ring_put(&save_demo_video.ring, pcm, samples);
 }
 
@@ -858,6 +919,12 @@ FM_Result SaveDemo_VideoRecStart(const char *dest)
     save_demo_video.repeated = 0u;
     save_demo_video.sound_rate = 0u;
     save_demo_video.sound_frames = 0u;
+    save_demo_video.fps = 0u;
+    save_demo_video.seeks = 0u;
+    save_demo_video.cuts = 0u;
+    save_demo_video.cut_wait = 0u;
+    save_demo_video.cut_left = 0u;
+    save_demo_video.cut_skip = 0u;
     save_demo_video.error = FM_OK;
     save_demo_video.armed = 1u;             /* آخر از همه: کالبک‌ها فعال شدند */
     FM_Log("SaveDemo video: waiting for the frame callback -> %s\n", dest);
@@ -869,9 +936,12 @@ FM_Bool SaveDemo_VideoRecActive(void)
     return save_demo_video.armed ? FM_TRUE : FM_FALSE;
 }
 
-/* صدای رینگ -> تراک صدای فایل (اگر فایل تراک صدا ندارد، دور ریخته می‌شود). */
-static FM_Result save_demo_video_drain(void)
+/* صدای رینگ -> تراک صدای فایل (اگر فایل تراک صدا ندارد، دور ریخته می‌شود).
+ * all = FM_FALSE: اگر پرشی منتظر کالبک فریم است، فقط صدای قبل از پرش
+ * نوشته می‌شود و صدای جای تازه در رینگ می‌ماند. */
+static FM_Result save_demo_video_drain(FM_Bool all)
 {
+    FM_Bool hold = (!all && save_demo_video.cut_wait) ? FM_TRUE : FM_FALSE;
     FM_Result r = FM_OK;
     const int16_t *pcm;
     size_t n;
@@ -879,6 +949,29 @@ static FM_Result save_demo_video_drain(void)
     while (r == FM_OK &&
            (n = save_demo_ring_peek(&save_demo_video.ring, &pcm)) != 0u)
     {
+        if (hold)
+        {
+            if (save_demo_video.cut_left == 0u)
+            {
+                break;
+            }
+            if (n > save_demo_video.cut_left)
+            {
+                n = save_demo_video.cut_left;
+            }
+            save_demo_video.cut_left -= n;
+        }
+        else if (save_demo_video.cut_skip != 0u)
+        {
+            /* اول صدای جای تازه که از تصویرش عقب‌تر شروع شده بود */
+            if (n > save_demo_video.cut_skip)
+            {
+                n = save_demo_video.cut_skip;
+            }
+            save_demo_video.cut_skip -= n;
+            save_demo_ring_skip(&save_demo_video.ring, n);
+            continue;
+        }
         if (save_demo_video.sound_rate != 0u)
         {
             r = SimpleVideo_RecWriteAudio(pcm, n / 2u);
@@ -886,6 +979,98 @@ static FM_Result save_demo_video_drain(void)
         }
         save_demo_ring_skip(&save_demo_video.ring, n);
     }
+    return r;
+}
+
+/*
+ * برش در جای پرش. کالبک فریم با اولین تصویرِ بعد از پرش صدا می‌زند
+ * (src = شمارهٔ آن تصویر در ویدیوی اصلی).
+ *
+ * قبل از برش، تراک تصویر و تراک صدای فایل باید دقیقاً یک طول داشته باشند،
+ * وگرنه از اینجا تا آخر فایل صدا و تصویر از هم فاصله می‌گیرند:
+ *   ۱) صدای قبل از پرش که هنوز در رینگ است نوشته می‌شود.
+ *   ۲) صدا بلندتر است (معمولاً: پخش‌کننده صدا را تا حدود یک بافر I2S جلوتر
+ *      دیکد می‌کند) -> آخرین تصویر چند فریم بیشتر می‌ماند.
+ *   ۳) باقی‌ماندهٔ کمتر از یک فریم (یا اگر صدا کوتاه‌تر بود) -> سکوت.
+ * بعد first_src طوری جابه‌جا می‌شود که تصویر تازه فریمِ بعدیِ فایل باشد.
+ *
+ *   ۴) تصویر تازه فریم شمارهٔ src ویدیو است، ولی صدای تازه از sound_ms
+ *      شروع شده (SimpleVideoInfo.seek_sound_ms): پخش‌کننده صدا را با ساعتش
+ *      جور می‌کند و ساعت در مدت دیکدِ همان فریم جلو رفته است. اگر صدا
+ *      جلوتر شروع شده، به همان اندازه سکوت قبل از آن می‌آید؛ اگر عقب‌تر
+ *      (کمتر از یک بستهٔ صدا)، همان‌قدر از اولش نوشته نمی‌شود. بدون این،
+ *      با یک پخش‌کنندهٔ کُند صدا بعد از هر پرش به اندازهٔ زمان دیکد یک فریم
+ *      از تصویر جلو می‌افتاد.
+ */
+static FM_Result save_demo_video_cut(uint32_t src, uint32_t sound_ms)
+{
+    static const int16_t silence[2u * 64u] = { 0 };
+    uint32_t rate = save_demo_video.sound_rate;
+    uint32_t fps = save_demo_video.fps;
+    uint32_t have = SimpleVideo_RecFrames();
+    FM_Result r = FM_OK;
+
+    if (!save_demo_video.cut_wait)
+    {
+        /* کالبک صدا هنوز صدایی از جای تازه نگرفته: هرچه الان در رینگ است
+         * مال قبل از پرش است. اندازه همین‌جا ثابت می‌شود، چون نوشتنِ پایین
+         * ممکن است وسط کار کالبک صدا را با صدای جای تازه صدا بزند. */
+        save_demo_video.cut_left =
+            save_demo_ring_used(&save_demo_video.ring);
+        save_demo_video.cut_wait = 1u;
+    }
+    if (rate != 0u && fps != 0u)
+    {
+        uint64_t pic;       /* طول تراک تصویر، به فریم صدا */
+        uint64_t snd;       /* طول تراک صدا */
+
+        r = save_demo_video_drain(FM_FALSE);
+        snd = save_demo_video.sound_frames;
+        pic = ((uint64_t)have * rate) / fps;
+        if (r == FM_OK && snd > pic)
+        {
+            uint32_t n = (uint32_t)(((snd - pic) * fps + rate - 1u) / rate);
+
+            r = SimpleVideo_RecRepeat(n);
+            save_demo_video.repeated += n;
+            have += n;
+            pic = ((uint64_t)have * rate) / fps;
+        }
+        /* ۴) فاصلهٔ شروع صدای تازه از تصویر تازه، به فریم صدا */
+        {
+            uint64_t snd_at = ((uint64_t)sound_ms * rate) / 1000u;
+            uint64_t pic_at = ((uint64_t)src * rate) / fps;
+
+            if (snd_at > pic_at)
+            {
+                pic += snd_at - pic_at;             /* سکوتِ بیشتر */
+            }
+            else
+            {
+                save_demo_video.cut_skip =
+                    (size_t)(pic_at - snd_at) * 2u;
+            }
+        }
+        while (r == FM_OK && pic > snd)
+        {
+            size_t n = (pic - snd > 64u) ? 64u : (size_t)(pic - snd);
+
+            r = SimpleVideo_RecWriteAudio(silence, n);
+            save_demo_video.sound_frames += (uint32_t)n;
+            snd += n;
+        }
+    }
+    else
+    {
+        r = save_demo_video_drain(FM_FALSE);    /* تراک صدا نیست: دور ریختن */
+    }
+    save_demo_video.cut_wait = 0u;
+    save_demo_video.cut_left = 0u;
+    /* (src - first_src) باید همان تعداد فریمِ الانِ فایل شود؛ تفریق بدون
+     * علامت است و در پرش به عقب هم درست می‌ماند. */
+    save_demo_video.first_src = src - have;
+    save_demo_video.last_src = src;
+    save_demo_video.cuts++;
     return r;
 }
 
@@ -902,7 +1087,7 @@ FM_Result SaveDemo_VideoRecStop(void)
     if (save_demo_video.open)
     {
         uint32_t frames = SimpleVideo_RecFrames();
-        FM_Result rd = save_demo_video_drain();
+        FM_Result rd = save_demo_video_drain(FM_TRUE);
         FM_Result rs = SimpleVideo_RecStop();
 
         if (r == FM_OK)
@@ -910,10 +1095,11 @@ FM_Result SaveDemo_VideoRecStop(void)
             r = (rd != FM_OK) ? rd : rs;
         }
         save_demo_video.open = 0u;
-        FM_Log("SaveDemo video: %s, %lu frames (%lu repeated), sound %lu "
-               "frames, dropped %lu samples: %s\n", save_demo_video.dest,
-               (unsigned long)frames,
+        FM_Log("SaveDemo video: %s, %lu frames (%lu repeated, %lu seeks), "
+               "sound %lu frames, dropped %lu samples: %s\n",
+               save_demo_video.dest, (unsigned long)frames,
                (unsigned long)save_demo_video.repeated,
+               (unsigned long)save_demo_video.cuts,
                (unsigned long)save_demo_video.sound_frames,
                (unsigned long)save_demo_video.ring.dropped,
                File_GetErrorString(r));
@@ -944,7 +1130,7 @@ FM_Result SaveDemo_VideoRecPump(void)
     /* ۱) صدا: رینگ -> فایل (تا فایل باز نشده، در رینگ می‌ماند) */
     if (save_demo_video.open)
     {
-        r = save_demo_video_drain();
+        r = save_demo_video_drain(FM_FALSE);
     }
     /* ۲) ویدیو به آخر رسیده؟ بعد از آخرین فریم دیگر کالبکی نمی‌آید، پس
      *    اینجا از خود پخش‌کننده پرسیده می‌شود. */

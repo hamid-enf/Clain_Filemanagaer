@@ -199,6 +199,9 @@ typedef struct
     uint16_t audio_channels;
     uint32_t playlist_count;
     uint32_t playlist_index;
+    uint32_t seek_count;        /* تعداد SeekTo/SeekBy انجام‌شده تا الان */
+    uint32_t seek_sound_ms;     /* صدای بعد از آخرین پرش از این میلی‌ثانیهٔ
+                                 * ویدیو شروع شد (توضیح: SimpleVideo_SeekCount) */
     const void *pixels;
     size_t   bytes;
     FM_PixelFormat format;
@@ -258,6 +261,8 @@ FM_Result SimpleVideo_SeekTo(double seconds)
 { (void)seconds; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_SeekBy(double seconds)
 { (void)seconds; return FM_ERR_UNSUPPORTED; }
+uint32_t SimpleVideo_SeekCount(void)
+{ return 0u; }
 void SimpleVideo_SetPresent(SimpleVideo_PresentFn fn)
 { (void)fn; }
 void SimpleVideo_SetTrackStartCallback(SimpleVideo_TrackStartFn fn, void *ctx)
@@ -550,6 +555,9 @@ typedef struct
     uint16_t audio_channels;
     uint32_t playlist_count;
     uint32_t playlist_index;
+    uint32_t seek_count;        /* تعداد SeekTo/SeekBy انجام‌شده تا الان */
+    uint32_t seek_sound_ms;     /* صدای بعد از آخرین پرش از این میلی‌ثانیهٔ
+                                 * ویدیو شروع شد (توضیح: SimpleVideo_SeekCount) */
     const void *pixels;
     size_t   bytes;
     FM_PixelFormat format;
@@ -630,6 +638,15 @@ typedef struct
 FM_Result SimpleVideo_Stop(void);
 
 static SimpleVideoState sv;
+
+/* تعداد پرش‌های انجام‌شده (SeekTo / SeekBy). بیرون از sv است تا Begin آن
+ * را صفر نکند: هر کس عدد قبلی را نگه داشته، با اولین پرش بعدی فرق را
+ * می‌بیند. */
+static uint32_t sv_seek_count;
+/* صدای بعد از آخرین پرش از کدام میلی‌ثانیهٔ ویدیو شروع شد. */
+static uint32_t sv_seek_sound_ms;
+/* آخرین جایی که simple_video_sync_audio صدا را به آن برد. */
+static uint32_t sv_sound_sync_ms;
 static uint8_t sv_slot;
 static uint8_t sv_show;
 /* Runtime output pixel format: 0 = use SIMPLE_VIDEO_FORMAT.
@@ -2047,6 +2064,9 @@ static FM_Result simple_video_sync_audio(void)
     {
         idx = sv.audio.sample_count - 1u;
     }
+    /* زمانِ شروع همین بسته، برای SimpleVideoInfo.seek_sound_ms */
+    sv_sound_sync_ms = (uint32_t)(((uint64_t)idx * dur_ms) /
+                                  sv.audio.sample_count);
     return Video_SeekAudio(&sv.player.video, idx);
 }
 
@@ -2548,13 +2568,20 @@ static FM_Result simple_video_apply_pending(void)
         r = simple_video_decode_one();
         if (r == FM_OK)
         {
+            sv_sound_sync_ms = sv.elapsed_ms;   /* بدون صدا: همان جای پرش */
             (void)simple_video_sync_audio();
+            sv_seek_sound_ms = sv_sound_sync_ms;
 #if SIMPLE_VIDEO_I2S
             (void)sv_i2s_board_stop();
             /* Audio cursor moved: drop the stale partial chunk from the
              * old position so the seek restart is sample-clean. */
             sv_pcm_len = 0u;
             sv_pcm_off = 0u;
+            /* شمارندهٔ پرش درست همین‌جا بالا می‌رود: I2S ایستاده و هیچ
+             * صدایی از جای قبلی دیگر به کالبک نمی‌رسد؛ اولین صدا
+             * (sv_i2s_start) و اولین تصویر (simple_video_present) که عدد
+             * تازه را می‌بینند هر دو از جای تازه‌اند. */
+            sv_seek_count++;
             r = sv_i2s_start();
             if (r != FM_OK)
             {
@@ -2562,6 +2589,8 @@ static FM_Result simple_video_apply_pending(void)
                        File_GetErrorString(r), (int)r);
                 r = FM_OK;
             }
+#else
+            sv_seek_count++;
 #endif
             simple_video_present();
             FM_Log("SimpleVideo: seek -> %.2f s\n", want);
@@ -3343,6 +3372,26 @@ FM_Result SimpleVideo_SeekTo(double seconds)
     return FM_OK;
 }
 
+/*
+ * تعداد پرش‌هایی که تا الان انجام شده‌اند (نه درخواست‌شده: پرش در Poll
+ * انجام می‌شود). کالبک فریم و کالبک صدا با مقایسهٔ این عدد با دفعهٔ قبل
+ * می‌فهمند که بین دو فراخوانی، پخش به جای دیگری از ویدیو پریده است؛ شمارهٔ
+ * فریم به‌تنهایی این را نمی‌گوید، چون پخش‌کنندهٔ کُند هم فریم جا می‌اندازد.
+ * همین عدد در SimpleVideoInfo.seek_count هم هست. تکرار ویدیو و رفتن به
+ * ویدیوی بعدی پرش حساب نمی‌شوند.
+ *
+ * SimpleVideoInfo.seek_sound_ms: بعد از پرش، تصویر و صدا لزوماً از یک نقطهٔ
+ * ویدیو شروع نمی‌شوند. تصویر، فریمِ جای پرش است (frame_index - 1)؛ صدا از
+ * جایی شروع می‌شود که ساعت پخش بعد از دیکد همان فریم به آن رسیده (و روی
+ * مرز یک بستهٔ صدا). seek_sound_ms زمان شروع آن صدا در ویدیو است؛ کسی که
+ * هر دو را ذخیره می‌کند با آن می‌فهمد صدا چقدر از تصویر جلوتر یا عقب‌تر
+ * شروع شده (نمونه: save_demo_video_cut در examples_save_media.h).
+ */
+uint32_t SimpleVideo_SeekCount(void)
+{
+    return sv_seek_count;
+}
+
 FM_Result SimpleVideo_SeekBy(double seconds)
 {
     double pos = (double)simple_video_now_elapsed() / 1000.0;
@@ -3779,6 +3828,8 @@ void SimpleVideo_Info(SimpleVideoInfo *out)
     out->running = sv.running ? 1u : 0u;
     out->format = sv.format;
     out->volume_pct = sv_volume_pct;
+    out->seek_count = sv_seek_count;
+    out->seek_sound_ms = sv_seek_sound_ms;
     /* The first picture of an item is presented (frame callback included)
      * just before `running` is set; the item is open by then, so its
      * details are reported there too. */

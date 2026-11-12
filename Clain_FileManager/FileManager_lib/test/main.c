@@ -4872,6 +4872,12 @@ static FM_FS     g_wfs;
 static FM_FS     g_wfs_base;
 static FM_Result g_wfs_delete_result = FM_OK;
 static int64_t   g_wfs_write_budget = -1;   /* bytes left, -1 = no limit */
+/* A card with this many free bytes (-1 = no limit).  Unlike the budget
+ * above, only what makes a file longer is charged: writing over bytes
+ * that are already there always works, and cutting a file short gives
+ * the space back.  That is how a full card behaves, and it is what lets
+ * a writer still fix the header of a file it could not finish. */
+static int64_t   g_wfs_card_free = -1;
 static uint32_t  g_wfs_read_calls;
 static uint32_t  g_wfs_read_fail_at;        /* fail this call (1-based)  */
 static uint32_t  g_wfs_open_calls;
@@ -4884,6 +4890,7 @@ static void wfs_reset(void)
 {
     g_wfs_delete_result = FM_OK;
     g_wfs_write_budget = -1;
+    g_wfs_card_free = -1;
     g_wfs_read_calls = 0u;
     g_wfs_read_fail_at = 0u;
     g_wfs_open_calls = 0u;
@@ -4938,6 +4945,30 @@ static FM_Result wfs_write(FM_FS *fs, void *fh, const void *buf,
 {
     uint32_t n = len;
 
+    if (g_wfs_card_free >= 0)
+    {
+        uint64_t pos = 0u;
+        uint64_t size = 0u;
+        uint64_t grow;
+
+        (void)g_wfs_base.ops.file_tell(fs, fh, &pos);
+        (void)g_wfs_base.ops.file_size(fs, fh, &size);
+        grow = (pos + n > size) ? (pos + n - size) : 0u;
+        if (grow > (uint64_t)g_wfs_card_free)
+        {
+            uint64_t fits = ((pos < size) ? (size - pos) : 0u) +
+                            (uint64_t)g_wfs_card_free;
+
+            if (fits == 0u)
+            {
+                if (put != NULL) { *put = 0u; }
+                return FM_ERR_NO_SPACE;
+            }
+            n = (uint32_t)fits;
+            grow = (uint64_t)g_wfs_card_free;
+        }
+        g_wfs_card_free -= (int64_t)grow;
+    }
     if (g_wfs_write_budget >= 0)
     {
         if (g_wfs_write_budget == 0)
@@ -4978,6 +5009,20 @@ static FM_Result wfs_flush(FM_FS *fs, void *fh)
                ? g_wfs_base.ops.file_flush(fs, fh) : FM_OK;
 }
 
+static FM_Result wfs_truncate(FM_FS *fs, void *fh, uint64_t size)
+{
+    uint64_t old = 0u;
+    FM_Result r;
+
+    (void)g_wfs_base.ops.file_size(fs, fh, &old);
+    r = g_wfs_base.ops.file_truncate(fs, fh, size);
+    if (r == FM_OK && g_wfs_card_free >= 0 && old > size)
+    {
+        g_wfs_card_free += (int64_t)(old - size);
+    }
+    return r;
+}
+
 static FM_Result wfs_mount(const char *where)
 {
     FM_Result r = PosixFS_Init(&g_wfs_base);
@@ -4995,6 +5040,7 @@ static FM_Result wfs_mount(const char *where)
     g_wfs.ops.file_read = wfs_read;
     g_wfs.ops.file_write = wfs_write;
     g_wfs.ops.file_flush = wfs_flush;
+    g_wfs.ops.file_truncate = wfs_truncate;
     wfs_reset();
     r = FS_Register(&g_wfs);
     if (r == FM_OK)

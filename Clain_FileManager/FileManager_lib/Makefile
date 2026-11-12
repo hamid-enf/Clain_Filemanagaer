@@ -242,6 +242,30 @@ endif
 
 LIBS     = libfilemanager.a
 
+# ------------------------------------------------------------------
+# Flags stamp: objects are rebuilt when the compiler or its flags change.
+#
+# Without it `make FM_USE_JSON=0` (or CFLAGS_EXTRA=..., or CC=clang) after
+# a normal build recompiled nothing: make only compares file times, the
+# old objects were "up to date", and the result was a library built with
+# one set of -D switches linked to a test built with another.  Every
+# object now also depends on $(FLAGS_STAMP), a file holding the compiler
+# and flags of the last run; it is rewritten (and so becomes newer than
+# every object) only when they differ from this run's.
+#
+# Needs GNU make 4.2 or newer for $(file <...).  An older make creates
+# the stamp once through the rule below and then behaves as before
+# (no flag tracking): run `make clean` after changing a switch there.
+# ------------------------------------------------------------------
+FLAGS_STAMP := .fm_build_flags
+FLAGS_NOW   := $(strip $(CC) $(CFLAGS))
+ifneq ($(FLAGS_NOW),$(strip $(file < $(FLAGS_STAMP))))
+$(file > $(FLAGS_STAMP),$(FLAGS_NOW))
+endif
+
+$(FLAGS_STAMP):
+	@echo "(flags not tracked: GNU make older than 4.2)" > $@
+
 EXAMPLES = examples/setup examples/file_basics \
            examples/file_copy_move examples/advanced_handle \
            examples/directory examples/json_example \
@@ -255,7 +279,7 @@ all: $(LIBS) fm_test
 
 examples: $(EXAMPLES)
 
-examples/%: examples/%.c $(OBJS)
+examples/%: examples/%.c $(OBJS) $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -o $@ $< $(OBJS) $(LDFLAGS) -lm
 
 examples_run: examples
@@ -272,28 +296,28 @@ libfilemanager.a: $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
 # Objects
-src/%.o: src/%.c include/fm*.h
+src/%.o: src/%.c include/fm*.h $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-backends/%.o: backends/%.c include/fm*.h
+backends/%.o: backends/%.c include/fm*.h $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Vendored third-party code is built with relaxed warnings: it is upstream
 # code, not maintained under this project's strict warning set.  littlefs
 # diagnostics are silenced because the first-mount "corrupted" report is an
 # expected condition that the adapter auto-formats.
-third_party/littlefs/%.o: third_party/littlefs/%.c
+third_party/littlefs/%.o: third_party/littlefs/%.c $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -c -o $@ $<
 
-third_party/h264bsd/src/%.o: third_party/h264bsd/src/%.c
+third_party/h264bsd/src/%.o: third_party/h264bsd/src/%.c $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter \
 		-Wno-unused-but-set-variable -Wno-maybe-uninitialized \
 		-include include/fm_alloc.h \
 		-Dmalloc=FM_Alloc -Dfree=FM_Free -c -o $@ $<
 
-third_party/picojpeg/%.o: third_party/picojpeg/%.c
+third_party/picojpeg/%.o: third_party/picojpeg/%.c $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-sequence-point \
 		-Wno-unused-but-set-variable -Wno-pedantic \
@@ -302,7 +326,7 @@ third_party/picojpeg/%.o: third_party/picojpeg/%.c
 # Vendored libopus (decoder-only tree).  No -D flags: the vendor carries
 # working defaults (see include/opus_types.h / celt/stack_alloc.h), which
 # is exactly how STM32CubeIDE compiles it — this rule verifies that path.
-third_party/opus/%.o: third_party/opus/%.c
+third_party/opus/%.o: third_party/opus/%.c $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-pedantic \
 		-Wno-sign-compare -Wno-maybe-uninitialized $(OPUS_INC) \
@@ -310,13 +334,14 @@ third_party/opus/%.o: third_party/opus/%.c
 
 # stb_vorbis single-file library, compiled as its own object (the sole
 # implementation TU — src/fm_vorbis.c includes it header-only).
-third_party/stb/%.o: third_party/stb/%.c
+third_party/stb/%.o: third_party/stb/%.c $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-pedantic \
 		-Wno-maybe-uninitialized -c -o $@ $<
 
-# Test executable
-fm_test: test/main.c $(OBJS)
+# Test executable.  The test bodies live in test/*.h, all included by
+# test/main.c: they are prerequisites too, so editing one rebuilds it.
+fm_test: test/main.c $(wildcard test/*.h) include/fm*.h $(OBJS) $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) -o $@ test/main.c $(SYNC_HOST) $(OBJS) $(LDFLAGS) -lm
 
 # ------------------------------------------------------------------
@@ -460,6 +485,8 @@ fatfs:
 
 # check — everything: tests, sanitizers, ports, examples
 check: test cachetest videohooks audiorecordtest saveexamplestest tapstest asan ports fatfs
+	@sh tools/check_switch_names.sh
+	@sh tools/check_flag_stamp.sh
 	@sh tools/check_examples.sh
 	@sh tools/check_cubeide.sh
 	@sh tools/check_cmake.sh
@@ -467,6 +494,7 @@ check: test cachetest videohooks audiorecordtest saveexamplestest tapstest asan 
 
 clean:
 	rm -rf build-asan
+	rm -f $(FLAGS_STAMP)
 	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
