@@ -473,9 +473,14 @@ FM_Result SimpleImage_Begin(void)
     SimpleImage_PresentFn present = si.present;
     uint16_t out_w = si.out_w;
     uint16_t out_h = si.out_h;
+    uint32_t slideshow_ms = si.slideshow_ms;
 
+    /* What the application chose is kept across Stop()/Begin(): the
+     * present callback, the output size and the slideshow period. */
     memset(&si, 0, sizeof(si));
     si.present = present;
+    si.slideshow_ms = slideshow_ms;
+    si.slideshow_last = HAL_GetTick();
     si.out_w = (out_w != 0u) ? out_w : (uint16_t)SIMPLE_IMAGE_OUT_W;
     si.out_h = (out_h != 0u) ? out_h : (uint16_t)SIMPLE_IMAGE_OUT_H;
     (void)Image_SetWorkBuffer(si_file, sizeof(si_file));
@@ -525,8 +530,7 @@ FM_Result SimpleImage_Poll(void)
 FM_Result SimpleImage_Stop(void)
 {
     si.pending_cmd = SI_CMD_NONE;
-    si.loaded = FM_FALSE;
-    si.slideshow_ms = 0u;
+    si.loaded = FM_FALSE;   /* the slideshow period is kept for the next Begin */
     if (si.album_ok)
     {
         Player_Deinit(&si.album);
@@ -587,6 +591,8 @@ FM_Result SimpleImage_SetOutputSize(uint16_t width, uint16_t height)
     return FM_OK;
 }
 
+/* Show the next picture every period_ms (0 = off).  Before or after
+ * Begin(); kept across Stop()/Begin(). */
 FM_Result SimpleImage_SetSlideshow(uint32_t period_ms)
 {
     si.slideshow_ms = period_ms;

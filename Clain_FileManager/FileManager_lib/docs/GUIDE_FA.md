@@ -496,7 +496,7 @@ SimpleVideo_Start();
 | `SimpleImage_Stop()` | پایان | – | – |
 | `SimpleImage_Show(path)` | یک عکس مشخص | مسیر فایل | نمایشگر |
 | `SimpleImage_Next()` / `Prev()` | عکس بعدی / قبلی | – | نمایشگر |
-| `SimpleImage_SetSlideshow(ms)` | هر `ms` میلی‌ثانیه عکس بعدی (`0` = خاموش)؛ بعد از `Begin` | – | – |
+| `SimpleImage_SetSlideshow(ms)` | هر `ms` میلی‌ثانیه عکس بعدی (`0` = خاموش)؛ ماندگار | – | – |
 | `SimpleImage_Rotate(deg)` | چرخش ۹۰ / ۱۸۰ / ۲۷۰ | عکس فعلی | نمایشگر |
 | `SimpleImage_FlipH()` / `FlipV()` | برعکس افقی / عمودی | عکس فعلی | نمایشگر |
 | `SimpleImage_Resize(w, h)` | تغییر اندازه | عکس فعلی | نمایشگر |
@@ -508,8 +508,8 @@ SimpleVideo_Start();
 ```c
 SimpleImage_SetPresent(lcd_show);
 SimpleImage_SetOutputSize(320, 240);
+SimpleImage_SetSlideshow(3000);          /* هر ۳ ثانیه */
 SimpleImage_Begin();
-SimpleImage_SetSlideshow(3000);          /* هر ۳ ثانیه؛ بعد از Begin */
 
 while (1)
 {
