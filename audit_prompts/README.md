@@ -34,3 +34,28 @@ What is different in this round:
   settled by running, not by reading.
 - The debug levels and the log output are in scope: each auditor checks the
   messages of that part; the file auditor also audits the mechanism.
+
+## Round for the save / record part (`05_save_record.md`)
+
+| File | Part | Report expected |
+|---|---|---|
+| `05_save_record.md` | saving and recording: audio encoders, MJPEG-AVI writer, JPEG encoder, the recorders and callbacks of `SimpleAudio` / `SimpleVideo`, the save examples, the board glue — and how these work together | `AUDIT_SAVE_V1.md` |
+
+It pins commit `523d2da` on `arena/ba6a87b3-clain-filemanagaer` and, like the
+others, forbids any change on GitHub. It is self-contained: the auditor gets
+this one file and nothing else.
+
+How it differs from prompts `01`–`04`:
+
+- This code is new (`c688b9e`, `4cbd8a0`, `523d2da`) and has had no audit, so
+  there is no table of earlier findings. In its place is a list of twelve
+  **leads from the author's own review** (L1–L12): things he suspects or could
+  not measure. The report must give a verdict on each.
+- The main job is **combination**, not single functions: recording together
+  with both players, their callbacks, the UART commands of the board and the
+  timing of the main loop.
+- The first job is again **comparison with reference tools** (ffmpeg, `flac
+  -t`, another JPEG decoder), because the suite reads most files back with the
+  library's own readers.
+- Scores: the seven axes A–G of the other prompts, plus **H. Working
+  together**; the report ends with "the three things to fix first".
