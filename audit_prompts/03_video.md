@@ -1,4 +1,4 @@
-# External audit V4 — video
+# External audit V5 — video
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
@@ -20,8 +20,8 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `48a00bc` (`48a00bc613cac4eb407f99b56c923de187d20544`). Audit exactly
-  this commit (`git checkout 48a00bc`) and quote it in your report. Later
+- Commit: `fc31b25` (`fc31b259c8345180a0ca2297c802c8e9f4b7dcdc`). Audit exactly
+  this commit (`git checkout fc31b25`) and quote it in your report. Later
   commits on the branch change only the folder `audit_prompts/`.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
@@ -34,7 +34,8 @@ History of this part:
 |---|---|---|---|
 | first | `8dd0f25` | `ReportV2.txt`, lines 1089–1265 | one finding, fixed; then the maintainers' own comparison with ffmpeg changed much of the audio-track code, up to `a6cf829` |
 | follow-up ("V3") | `a6cf829` | none in the repository | the prompt was written (`git show f161ff8:audit_prompts/03_video.md`); no report of it is in the repository. **This part has had the least outside scrutiny of the five.** Its jobs are carried into this round |
-| this one (V4) | `48a00bc` | `AUDIT_VIDEO_V4.md` | |
+| V4 | `48a00bc` | `ReportV3.txt`, lines 1273–2075 | seven findings (VID4-01 … -07), all fixed in `fc31b25`; six suspicions open |
+| this one (V5) | `fc31b25` | `AUDIT_VIDEO_V5.md` | |
 
 It is a C99 file-manager and media library for STM32 microcontrollers. The
 reference board is an STM32H743 with an SD card, SDRAM, I2S audio out and an
@@ -98,7 +99,7 @@ parts.
    do not have, or of a file you did not create. When a tool this prompt names
    is not available to you, say so in the audit record and say what you used
    in its place. Check every line number against
-   `git show 48a00bc:<path> | sed -n '<from>,<to>p'` before you write it down:
+   `git show fc31b25:<path> | sed -n '<from>,<to>p'` before you write it down:
    a wrong line number makes a finding unusable, and one invented trace makes
    the whole report untrustworthy.
 6. **One root cause, one finding.** The same mistake in five places is one
@@ -118,11 +119,11 @@ parts.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite: 557 tests at this commit
+make test                 # whole suite: 589 tests at this commit
 make asan                 # the same suite under ASan + UBSan (+ LeakSanitizer)
-make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (562 tests)
+make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (594 tests)
                           #   make tsan FM_SYNC_IMPL=freertos | cmsis_rtos2  goes through that port
-make m32                  # the suite built and run as a 32-bit x86 program (558 tests);
+make m32                  # the suite built and run as a 32-bit x86 program (590 tests);
 make m32 M32=ubsan        #   needs:  pip install ziglang
 make cachetest videohooks audiorecordtest saveexamplestest tapstest fatfs
                           # the smaller host tests (stub HAL, mock FatFS)
@@ -200,22 +201,24 @@ FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library pr
   shell scripts use LF. Comments in `top_api/`, `examples/`, `board/` and the
   guides in `docs/` are in Persian; code and identifiers are English.
 
-**What is established at `48a00bc`** (the maintainers ran it; running it again
+**What is established at `fc31b25`** (the maintainers ran it; running it again
 will find nothing):
 
 | Check | Result |
 |---|---|
-| `make test` | `Results: 557/557 passed, 0 failures` |
+| `make test` | `Results: 589/589 passed, 0 failures` |
 | `make check` | exit status 0 (includes the suite under ASan + UBSan, the ports, the FatFS mock, CMake 13 configurations, 32-bit) |
-| `make m32`, `make m32 M32=ubsan` | 558/558 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
-| `make tsan` (pthread port) | 562/562, 0 ThreadSanitizer warnings |
+| `make m32`, `make m32 M32=ubsan` | 590/590 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
+| `make tsan` (pthread port) | 594/594, 0 ThreadSanitizer warnings |
 | `make matrix-quick` | 8 configurations, 0 failed |
-| `make matrix` | 53 configurations. 52 passed in the run. The 53rd, `FM_FILE_FORCE_BOUNCE` with `FM_USE_THREADS=1`, failed (`concurrent png (err=-18)`) because a second build was started in the same tree while it was being built; the same failure was then reproduced on purpose that way in a copy of the tree. Built alone, that configuration passes: 562/562 in 20 runs (8 of them with every CPU loaded), and 562/562 with 0 warnings under ThreadSanitizer |
-| `make audiorecordtest`, `make saveexamplestest` | 99 and 55 checks pass |
-| `Core/Src/main.c`, `src/fm_audio_enc.c`, `src/fm_video_enc.c` compiled for Cortex-M7 (clang, ST HAL headers) | 0 warnings; not linked, not run |
+| `make matrix` | 57 configurations, 0 failed (run alone, in a copy of the tree; one build at a time per tree: a second build in the same tree mixes object files). New since the last round: `FM_BUFFERS=SMALL` / `LARGE` / `HUGE` and both `..._ENC_SYNC_BYTES=0` |
+| `make audiorecordtest`, `make saveexamplestest` | 99 and 74 checks pass |
+| `make hwjpegtest`, `make videohooks` | 73 checks and 22 checks pass (new in this round: the hardware-JPEG glue against a software model of the peripheral) |
 
 **What is not established** (nobody did it at this commit):
 
+- the compile for Cortex-M7 (clang with ST HAL headers; 0 warnings at
+  `48a00bc`) was not repeated at this commit;
 - nothing ran on a board, on a real SD card, or was built with
   `arm-none-eabi-gcc`; the last CubeIDE log in the repository (`Report.txt`,
   commit `b6bcc4e`) ends in a link error that commit `459ed7d` was written to
@@ -268,6 +271,44 @@ would it fail if the feature were broken in a plausible way?
 For your part the reference is ffmpeg / ffprobe: every decoded picture against
 ffmpeg's (PSNR), every decoded audio track sample for sample, every duration,
 frame count, frame rate and timestamp against ffprobe.
+
+### What round V4 found, and what the fixes claim
+
+The report of that round is in the repository: `ReportV3.txt`, lines 1273–2075 (the five reports are in one
+file; the harnesses the auditors wrote are not in the repository). Read it, then
+the diff of the fixes:
+
+```bash
+git diff 48a00bc..fc31b25 -- src/fm_video.c src/fm_player.c src/fm_flac.c src/fm_video_enc.c include/fm_video.h \
+    third_party/h264bsd/src/h264bsd_seq_param_set.c top_api/simple_video.h
+```
+
+These rows belong to Job 1 and come first. For each: fixed, partly fixed, not
+fixed, or fixed but something else broke. The tests are in
+`test/audit_v4_tests.h` unless the row says otherwise; remove the fix locally
+and see whether the test fails.
+
+| ID | What was wrong | What the fix claims |
+|---|---|---|
+| VID4-01 | an H.264 SPS with an absurd picture size crashed the decoder (32-bit wrap of the macroblock count) | `h264bsd_seq_param_set.c` refuses a width or height of 0 and more than 36864 macroblocks. Tests `VID4-01 …` (`av4_h264_sps` in `test/audit_v4_tests.h`); with the fix removed the suite dies with a floating point exception |
+| VID4-02 | an MP4 box with a 64-bit size of 0…15 made `Video_Open` loop for ever | `mp4_box_at` returns `FM_ERR_CORRUPTED`. Test `VID4-02 …` (the suite is killed by `alarm` when the fix is removed) |
+| VID4-03 | `simple_video_sync_audio` multiplied in 32 bits: after a seek deep into a long file the sound started at the wrong place | `sv_audio_index_at` (64-bit) in `top_api/simple_video.h`; checked in section `[7]` of `tools/save_examples_host_test.c` |
+| VID4-04 | MP3, 8-bit and 24-bit PCM tracks were silent in `SimpleVideo` | `sv_track_decodes_inline` asks `Video_GetAudioInfo(...).decodable`; `sv_i2s_start` no longer tests the sample width. Section `[7]` |
+| VID4-05 | the frame rate was a rounded integer (29.97 → 30, 12.5 → 13): positions, durations and A/V sync drifted | `FM_VideoInfo.fps_num` / `fps_den` filled by all four container parsers and used by `Player_Seek`, the position / duration of the player, the clock of `SimpleVideo` (`sv_frame_at_ms`, `sv_ms_of_frame`) and `Video_Convert`. `fps` stays the rounded figure. **The struct grew by 8 bytes** |
+| VID4-06 | a FLAC block larger than the caller's buffer was cut and returned with `FM_OK` | `flac_decode` and `Video_ReadAudioFrame` return `FM_ERR_TOO_LARGE`, consume nothing and stay on the block; `SIMPLE_VIDEO_PCM_CHUNK` and `FM_VIDEO_CONVERT_AUDIO_BYTES` are 18432 now |
+| VID4-07 | the folder scan of the player ignored `.mkv`, `.webm`, `.flv` | `is_video_path` in `src/fm_player.c` |
+
+Open questions the maintainers have about their own fixes (they are questions,
+not findings; nobody has an answer):
+
+1. VID4-05: what do `fps_num` / `fps_den` say for a variable-frame-rate MP4 (several `stts` entries), an MKV without `DefaultDuration`, an FLV whose first timestamps are not regular, an AVI with `dwMicroSecPerFrame` = 0 but a `strh` rate / scale? Compare every vector and your own files with `ffprobe -show_streams` (`r_frame_rate`, `avg_frame_rate`). `Video_Convert` halves numerator and denominator until the numerator is below 1 000 001: what does that do to an MKV rate?
+2. VID4-06: with `FM_BUFFERS=SMALL` `SIMPLE_VIDEO_PCM_CHUNK` is a quarter (4608 bytes), so every FLAC block of a normal file is refused and the track is silent (logged as "PCM read"). Is that documented where a user reads it? Are the other callers of the registry `decode` (`src/fm_audio.c`, the Opus and the stream paths) prepared for `FM_ERR_TOO_LARGE` from `flac_decode`?
+3. VID4-01: is 36864 macroblocks the right bound (level 5.1 / 5.2 pictures, a legitimate 4096x2304 stream), and are the other SPS / PPS fields that size an allocation or a loop bounded as well (`num_ref_frames`, `pic_size_in_map_units`, slice groups, the VUI)?
+4. `src/fm_media.c` (owned by the audio part) has no type for `.mkv` / `.webm` / `.flv`: what does `File_DetectType` say for the files the player now plays?
+5. The six suspicions of the V4 report (S-1 `dr_flac.h` signed overflow, S-2 negative shift in `h264bsd_reconstruct.c`, S-3 MP3 with a buffer below 4608 samples, S-4 end trim of Vorbis / Opus in MP4, S-5 picture clock and I2S clock not tied, S-6 slow fuzz files) were not worked on. Settle them.
+6. The last sections of the V4 video report (`ReportV3.txt`, lines 1960–2075) were not turned into work by the maintainers. Read them as leads.
+7. Job 1 of V4 found two tests of the earlier fixes that cannot fail: the Microsoft ADPCM track test, and the BT.709 full-range row of `k_yuv_matrix`. They are still as they were.
+
 
 ### Job 1 — check the fixes (do this first; it is the cheapest way to find a defect)
 
@@ -736,9 +777,9 @@ third-party code, what it does with the results — is fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_VIDEO_V4.md`. It is used as a work list:
+Deliver **one Markdown file** named `AUDIT_VIDEO_V5.md`. It is used as a work list:
 each finding is opened by someone who has not seen your session and has only
-the report and a clean checkout of `48a00bc`. Use this structure, in this
+the report and a clean checkout of `fc31b25`. Use this structure, in this
 order, with these headings:
 
 1. **Summary in Persian** (8 to 12 lines): how many confirmed defects by
@@ -752,7 +793,7 @@ order, with these headings:
      had, and the tools this prompt names that you did not have (with what you
      used in their place);
    - the result line of `make test` on your machine before you changed
-     anything (expected: `Results: 557/557 passed, 0 failures`; if yours
+     anything (expected: `Results: 589/589 passed, 0 failures`; if yours
      differs, that comes first in the report);
    - a table of what you did: method, target, amount (executions, files,
      cases, hours), coverage reached, result;
@@ -762,34 +803,34 @@ order, with these headings:
 3. **Table of findings**: ID, severity, status (confirmed / suspicion), owning
    part, `file:line`, one-line title, fix tested (yes / no), regression test
    included (yes / no). Sorted by severity.
-4. **One section per confirmed finding**, IDs `VID4-01`, `VID4-02`, ...:
+4. **One section per confirmed finding**, IDs `VID5-01`, `VID5-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps; a recording that lost or misplaced data). S3:
      wrong error handling — a leaked handle or slot, a wrong error code, state
      not restored after a failure. S4: mismatch with the documentation,
      portability, wasted time or memory, a test that cannot fail.
-   - **Where** — `path:from-to`, function, at `48a00bc`, and the lines
+   - **Where** — `path:from-to`, function, at `fc31b25`, and the lines
      themselves (quote at most 15).
    - **Reach** — which public function leads there, which action of a user of
      the board (a UART command, a file on the card, a sequence of calls), which
      build configurations, 32 bits / 64 bits / both, and how likely it is with
      ordinary files and ordinary use.
-   - **How to reproduce** — from a clean checkout of `48a00bc`: the files to
+   - **How to reproduce** — from a clean checkout of `fc31b25`: the files to
      add (full source in the appendix), the exact commands, and the output as
      it was printed (sanitizer report, wrong value, hang with the time you
      waited). For an input file: a hex dump if it is under 200 bytes, otherwise
      the script that generates it.
    - **Expected and observed.**
    - **Root cause** — why it happens, not just where.
-   - **Proposed fix** — a unified diff against `48a00bc` in a `diff` block.
+   - **Proposed fix** — a unified diff against `fc31b25` in a `diff` block.
      Produce it with `git diff`, do not type it: the sources have CRLF line
      endings and a typed diff will not apply. Then state: applied (yes / no),
      the reproducer after the fix, the result line of `make test` after the
      fix, and anything else you ran with it (`make asan`, `make m32`, the
      smaller host tests).
    - **Regression test** — the test to add (which file, the code), with its
-     result on `48a00bc` (must fail) and with your fix (must pass). If a test
+     result on `fc31b25` (must fail) and with your fix (must pass). If a test
      is not possible on a PC, say why.
    - **Siblings** — where else you looked for the same mistake (other formats,
      other backends, the twin in `examples/`, the other player) and what you
@@ -852,10 +893,10 @@ must be able to reproduce every confirmed finding from the report alone.
 **Before you deliver, check your own report** (and say in the audit record
 that you did):
 
-- Make a fresh clone at `48a00bc` and re-run every reproducer from the text of
+- Make a fresh clone at `fc31b25` and re-run every reproducer from the text of
   the report alone. Drop or downgrade what does not reproduce.
 - Run `git apply --check` for every diff on that clean tree.
-- Re-check every `file:line` against `git show 48a00bc:<path>`.
+- Re-check every `file:line` against `git show fc31b25:<path>`.
 - The numbers in the Persian summary, in the table of findings and in the
   findings index agree.
 - No finding rests on a documented limit, and no "confirmed" finding contains

@@ -1,4 +1,4 @@
-# External audit V4 — files, storage, filesystems, build configuration
+# External audit V5 — files, storage, filesystems, build configuration
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
@@ -20,8 +20,8 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `48a00bc` (`48a00bc613cac4eb407f99b56c923de187d20544`). Audit exactly
-  this commit (`git checkout 48a00bc`) and quote it in your report. Later
+- Commit: `fc31b25` (`fc31b259c8345180a0ca2297c802c8e9f4b7dcdc`). Audit exactly
+  this commit (`git checkout fc31b25`) and quote it in your report. Later
   commits on the branch change only the folder `audit_prompts/`.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
@@ -34,7 +34,8 @@ History of this part:
 |---|---|---|---|
 | first | `8dd0f25` | `ReportV2.txt`, lines 1–1087 | the findings were worked on, up to `a6cf829` |
 | follow-up ("V3") | `a6cf829` | none in the repository | the prompt was written (`git show f161ff8:audit_prompts/01_file_storage_filesystem.md`); no report of it is in the repository, so **nobody outside has checked the fixes of the first round**. Its jobs are carried into this round |
-| this one (V4) | `48a00bc` | `AUDIT_FILE_V4.md` | |
+| V4 | `48a00bc` | `ReportV3.txt`, lines 1–641 | five findings (FILE4-01 … -05), all fixed in `fc31b25` |
+| this one (V5) | `fc31b25` | `AUDIT_FILE_V5.md` | |
 
 It is a C99 file-manager and media library for STM32 microcontrollers. The
 reference board is an STM32H743 with an SD card, SDRAM, I2S audio out and an
@@ -97,7 +98,7 @@ which files, and how far you may go into the other parts.
    do not have, or of a file you did not create. When a tool this prompt names
    is not available to you, say so in the audit record and say what you used
    in its place. Check every line number against
-   `git show 48a00bc:<path> | sed -n '<from>,<to>p'` before you write it down:
+   `git show fc31b25:<path> | sed -n '<from>,<to>p'` before you write it down:
    a wrong line number makes a finding unusable, and one invented trace makes
    the whole report untrustworthy.
 6. **One root cause, one finding.** The same mistake in five places is one
@@ -117,11 +118,11 @@ which files, and how far you may go into the other parts.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite: 557 tests at this commit
+make test                 # whole suite: 589 tests at this commit
 make asan                 # the same suite under ASan + UBSan (+ LeakSanitizer)
-make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (562 tests)
+make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (594 tests)
                           #   make tsan FM_SYNC_IMPL=freertos | cmsis_rtos2  goes through that port
-make m32                  # the suite built and run as a 32-bit x86 program (558 tests);
+make m32                  # the suite built and run as a 32-bit x86 program (590 tests);
 make m32 M32=ubsan        #   needs:  pip install ziglang
 make cachetest videohooks audiorecordtest saveexamplestest tapstest fatfs
                           # the smaller host tests (stub HAL, mock FatFS)
@@ -199,22 +200,24 @@ FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library pr
   shell scripts use LF. Comments in `top_api/`, `examples/`, `board/` and the
   guides in `docs/` are in Persian; code and identifiers are English.
 
-**What is established at `48a00bc`** (the maintainers ran it; running it again
+**What is established at `fc31b25`** (the maintainers ran it; running it again
 will find nothing):
 
 | Check | Result |
 |---|---|
-| `make test` | `Results: 557/557 passed, 0 failures` |
+| `make test` | `Results: 589/589 passed, 0 failures` |
 | `make check` | exit status 0 (includes the suite under ASan + UBSan, the ports, the FatFS mock, CMake 13 configurations, 32-bit) |
-| `make m32`, `make m32 M32=ubsan` | 558/558 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
-| `make tsan` (pthread port) | 562/562, 0 ThreadSanitizer warnings |
+| `make m32`, `make m32 M32=ubsan` | 590/590 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
+| `make tsan` (pthread port) | 594/594, 0 ThreadSanitizer warnings |
 | `make matrix-quick` | 8 configurations, 0 failed |
-| `make matrix` | 53 configurations. 52 passed in the run. The 53rd, `FM_FILE_FORCE_BOUNCE` with `FM_USE_THREADS=1`, failed (`concurrent png (err=-18)`) because a second build was started in the same tree while it was being built; the same failure was then reproduced on purpose that way in a copy of the tree. Built alone, that configuration passes: 562/562 in 20 runs (8 of them with every CPU loaded), and 562/562 with 0 warnings under ThreadSanitizer |
-| `make audiorecordtest`, `make saveexamplestest` | 99 and 55 checks pass |
-| `Core/Src/main.c`, `src/fm_audio_enc.c`, `src/fm_video_enc.c` compiled for Cortex-M7 (clang, ST HAL headers) | 0 warnings; not linked, not run |
+| `make matrix` | 57 configurations, 0 failed (run alone, in a copy of the tree; one build at a time per tree: a second build in the same tree mixes object files). New since the last round: `FM_BUFFERS=SMALL` / `LARGE` / `HUGE` and both `..._ENC_SYNC_BYTES=0` |
+| `make audiorecordtest`, `make saveexamplestest` | 99 and 74 checks pass |
+| `make hwjpegtest`, `make videohooks` | 73 checks and 22 checks pass (new in this round: the hardware-JPEG glue against a software model of the peripheral) |
 
 **What is not established** (nobody did it at this commit):
 
+- the compile for Cortex-M7 (clang with ST HAL headers; 0 warnings at
+  `48a00bc`) was not repeated at this commit;
 - nothing ran on a board, on a real SD card, or was built with
   `arm-none-eabi-gcc`; the last CubeIDE log in the repository (`Report.txt`,
   commit `b6bcc4e`) ends in a link error that commit `459ed7d` was written to
@@ -269,6 +272,40 @@ semantics: the same sequence of operations on FMFS, LittleFS, FatFS and POSIX
 (section 6), and an image written by this library's FatFS / LittleFS adapters
 checked with the tools of those filesystems (`fsck.fat`, `mtools`, `littlefs`'s
 own `lfs` FUSE or Python tools).
+
+### What round V4 found, and what the fixes claim
+
+The report of that round is in the repository: `ReportV3.txt`, lines 1–641 (the five reports are in one
+file; the harnesses the auditors wrote are not in the repository). Read it, then
+the diff of the fixes:
+
+```bash
+git diff 48a00bc..fc31b25 -- src/fm_fmfs.c src/fm_file.c src/fm_directory.c src/fm_internal.h src/fm_transfer.c \
+    include/fm_cache.h include/fm_board_config.h include/fm_file.h backends/fm_littlefs.c tools
+```
+
+These rows belong to Job 1 and come first. For each: fixed, partly fixed, not
+fixed, or fixed but something else broke. The tests are in
+`test/audit_v4_tests.h` unless the row says otherwise; remove the fix locally
+and see whether the test fails.
+
+| ID | What was wrong | What the fix claims |
+|---|---|---|
+| FILE4-01 | `File_Flush` on an FMFS volume returned `FM_OK` without calling the storage driver's `sync`: data "flushed" before a power cut was lost | `fmfs_file_flush` (`src/fm_fmfs.c`) calls `storage->sync()` and returns its result. Tests `FILE4-01 …` in `test/audit_v4_tests.h` (a RAM disk whose `sync` can be switched off: `av4_power_cut`) |
+| FILE4-02 | `#define FM_CACHE on` (lower case, or any word that is not a known value) silently switched the cache off | compile-time check in `include/fm_cache.h`; `tools/check_switch_names.sh` (18 cases) |
+| FILE4-03 | delete / rename / copy / move onto a file that is open succeeded and left the open handle on a dead entry | all of them return `FM_ERR_BUSY` while a handle is open (`src/fm_file.c`, `src/fm_internal.h`, `src/fm_directory.c`). **Public behaviour change** |
+| FILE4-04 | `File_Delete` on a directory and `Directory_Delete` on a file gave backend-dependent results | `FM_ERR_IS_DIRECTORY` / `FM_ERR_NOT_DIRECTORY` on every backend |
+| FILE4-05 | `FM_BUFFERS=SMALL` made the transfer chunk smaller than a flash erase unit | a floor and a log line in `src/fm_transfer.c`; `tools/check_matrix.sh` runs `FM_BUFFERS=SMALL`, `LARGE`, `HUGE` |
+
+Open questions the maintainers have about their own fixes (they are questions,
+not findings; nobody has an answer):
+
+1. The BUSY rule of FILE4-03 is new and wide. Which internal callers of `File_Delete` / `File_Rename` / `Directory_DeleteRecursive` (`File_SafeReplace`, the transfer layer, the recorders' numbered names, the converters, the media cache) can now meet `FM_ERR_BUSY` on a handle of their own, and what do they do with it? Nobody listed them.
+2. How does the rule identify "the same file"? Two spellings of one path (case on FAT, `//`, `/./`, a trailing `/`), two mounts of one volume, a directory that contains an open file being renamed or deleted recursively.
+3. Was a mutation run made for FILE4-03, -04, -05? No: only FILE4-01 was checked that way (565/567 with the fix removed). The maintainers suspect that the FILE4-05 test cannot fail.
+4. `File_Flush` on FMFS now costs a driver sync. The recorders flush at every checkpoint: what does that cost on a NOR / QSPI volume, and is the cost documented?
+5. `FM_BUF_SCALE(base)` multiplies by up to 8 in 32-bit preprocessor arithmetic with no guard; the LittleFS `lookahead` size is not checked for alignment.
+
 
 ### Job 1 — check the fixes (do this first; it is the cheapest way to find a defect)
 
@@ -738,9 +775,9 @@ third-party code, what it does with the results — is fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_FILE_V4.md`. It is used as a work list:
+Deliver **one Markdown file** named `AUDIT_FILE_V5.md`. It is used as a work list:
 each finding is opened by someone who has not seen your session and has only
-the report and a clean checkout of `48a00bc`. Use this structure, in this
+the report and a clean checkout of `fc31b25`. Use this structure, in this
 order, with these headings:
 
 1. **Summary in Persian** (8 to 12 lines): how many confirmed defects by
@@ -754,7 +791,7 @@ order, with these headings:
      had, and the tools this prompt names that you did not have (with what you
      used in their place);
    - the result line of `make test` on your machine before you changed
-     anything (expected: `Results: 557/557 passed, 0 failures`; if yours
+     anything (expected: `Results: 589/589 passed, 0 failures`; if yours
      differs, that comes first in the report);
    - a table of what you did: method, target, amount (executions, files,
      cases, hours), coverage reached, result;
@@ -764,34 +801,34 @@ order, with these headings:
 3. **Table of findings**: ID, severity, status (confirmed / suspicion), owning
    part, `file:line`, one-line title, fix tested (yes / no), regression test
    included (yes / no). Sorted by severity.
-4. **One section per confirmed finding**, IDs `FILE4-01`, `FILE4-02`, ...:
+4. **One section per confirmed finding**, IDs `FILE5-01`, `FILE5-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps; a recording that lost or misplaced data). S3:
      wrong error handling — a leaked handle or slot, a wrong error code, state
      not restored after a failure. S4: mismatch with the documentation,
      portability, wasted time or memory, a test that cannot fail.
-   - **Where** — `path:from-to`, function, at `48a00bc`, and the lines
+   - **Where** — `path:from-to`, function, at `fc31b25`, and the lines
      themselves (quote at most 15).
    - **Reach** — which public function leads there, which action of a user of
      the board (a UART command, a file on the card, a sequence of calls), which
      build configurations, 32 bits / 64 bits / both, and how likely it is with
      ordinary files and ordinary use.
-   - **How to reproduce** — from a clean checkout of `48a00bc`: the files to
+   - **How to reproduce** — from a clean checkout of `fc31b25`: the files to
      add (full source in the appendix), the exact commands, and the output as
      it was printed (sanitizer report, wrong value, hang with the time you
      waited). For an input file: a hex dump if it is under 200 bytes, otherwise
      the script that generates it.
    - **Expected and observed.**
    - **Root cause** — why it happens, not just where.
-   - **Proposed fix** — a unified diff against `48a00bc` in a `diff` block.
+   - **Proposed fix** — a unified diff against `fc31b25` in a `diff` block.
      Produce it with `git diff`, do not type it: the sources have CRLF line
      endings and a typed diff will not apply. Then state: applied (yes / no),
      the reproducer after the fix, the result line of `make test` after the
      fix, and anything else you ran with it (`make asan`, `make m32`, the
      smaller host tests).
    - **Regression test** — the test to add (which file, the code), with its
-     result on `48a00bc` (must fail) and with your fix (must pass). If a test
+     result on `fc31b25` (must fail) and with your fix (must pass). If a test
      is not possible on a PC, say why.
    - **Siblings** — where else you looked for the same mistake (other formats,
      other backends, the twin in `examples/`, the other player) and what you
@@ -854,10 +891,10 @@ must be able to reproduce every confirmed finding from the report alone.
 **Before you deliver, check your own report** (and say in the audit record
 that you did):
 
-- Make a fresh clone at `48a00bc` and re-run every reproducer from the text of
+- Make a fresh clone at `fc31b25` and re-run every reproducer from the text of
   the report alone. Drop or downgrade what does not reproduce.
 - Run `git apply --check` for every diff on that clean tree.
-- Re-check every `file:line` against `git show 48a00bc:<path>`.
+- Re-check every `file:line` against `git show fc31b25:<path>`.
 - The numbers in the Persian summary, in the table of findings and in the
   findings index agree.
 - No finding rests on a documented limit, and no "confirmed" finding contains

@@ -1,4 +1,4 @@
-# External audit V2 — saving and recording (audio, video) and how the parts work together
+# External audit V3 — saving and recording (audio, video) and how the parts work together
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
@@ -20,8 +20,8 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `48a00bc` (`48a00bc613cac4eb407f99b56c923de187d20544`). Audit exactly
-  this commit (`git checkout 48a00bc`) and quote it in your report. Later
+- Commit: `fc31b25` (`fc31b259c8345180a0ca2297c802c8e9f4b7dcdc`). Audit exactly
+  this commit (`git checkout fc31b25`) and quote it in your report. Later
   commits on the branch change only the folder `audit_prompts/`.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
@@ -35,7 +35,8 @@ callbacks), `4cbd8a0` (encoders, AVI writer, converters, recording functions),
 | Round | Commit audited | Report | Then |
 |---|---|---|---|
 | first (V1) | `523d2da` | `AUDIT_SAVE_V1` — its text is **not** in the repository; the table in section 4 is the maintainers' summary of its eight findings | all eight were worked on in one commit, `48a00bc` (29 files, tests included) |
-| this one (V2) | `48a00bc` | `AUDIT_SAVE_V2.md` | |
+| V2 | `48a00bc` | `ReportV3.txt`, lines 2076–2501 | one finding and one suspicion (SAV2-02, SAV2-03) and two blind tests, all fixed in `fc31b25` |
+| this one (V3) | `fc31b25` | `AUDIT_SAVE_V3.md` | |
 
 It is a C99 file-manager and media library for STM32 microcontrollers. The
 reference board is an STM32H743 with an SD card, SDRAM, I2S audio out and an
@@ -113,7 +114,7 @@ For this part, add to the list above:
    do not have, or of a file you did not create. When a tool this prompt names
    is not available to you, say so in the audit record and say what you used
    in its place. Check every line number against
-   `git show 48a00bc:<path> | sed -n '<from>,<to>p'` before you write it down:
+   `git show fc31b25:<path> | sed -n '<from>,<to>p'` before you write it down:
    a wrong line number makes a finding unusable, and one invented trace makes
    the whole report untrustworthy.
 6. **One root cause, one finding.** The same mistake in five places is one
@@ -133,11 +134,11 @@ For this part, add to the list above:
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite: 557 tests at this commit
+make test                 # whole suite: 589 tests at this commit
 make asan                 # the same suite under ASan + UBSan (+ LeakSanitizer)
-make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (562 tests)
+make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (594 tests)
                           #   make tsan FM_SYNC_IMPL=freertos | cmsis_rtos2  goes through that port
-make m32                  # the suite built and run as a 32-bit x86 program (558 tests);
+make m32                  # the suite built and run as a 32-bit x86 program (590 tests);
 make m32 M32=ubsan        #   needs:  pip install ziglang
 make cachetest videohooks audiorecordtest saveexamplestest tapstest fatfs
                           # the smaller host tests (stub HAL, mock FatFS)
@@ -215,22 +216,24 @@ FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library pr
   shell scripts use LF. Comments in `top_api/`, `examples/`, `board/` and the
   guides in `docs/` are in Persian; code and identifiers are English.
 
-**What is established at `48a00bc`** (the maintainers ran it; running it again
+**What is established at `fc31b25`** (the maintainers ran it; running it again
 will find nothing):
 
 | Check | Result |
 |---|---|
-| `make test` | `Results: 557/557 passed, 0 failures` |
+| `make test` | `Results: 589/589 passed, 0 failures` |
 | `make check` | exit status 0 (includes the suite under ASan + UBSan, the ports, the FatFS mock, CMake 13 configurations, 32-bit) |
-| `make m32`, `make m32 M32=ubsan` | 558/558 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
-| `make tsan` (pthread port) | 562/562, 0 ThreadSanitizer warnings |
+| `make m32`, `make m32 M32=ubsan` | 590/590 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
+| `make tsan` (pthread port) | 594/594, 0 ThreadSanitizer warnings |
 | `make matrix-quick` | 8 configurations, 0 failed |
-| `make matrix` | 53 configurations. 52 passed in the run. The 53rd, `FM_FILE_FORCE_BOUNCE` with `FM_USE_THREADS=1`, failed (`concurrent png (err=-18)`) because a second build was started in the same tree while it was being built; the same failure was then reproduced on purpose that way in a copy of the tree. Built alone, that configuration passes: 562/562 in 20 runs (8 of them with every CPU loaded), and 562/562 with 0 warnings under ThreadSanitizer |
-| `make audiorecordtest`, `make saveexamplestest` | 99 and 55 checks pass |
-| `Core/Src/main.c`, `src/fm_audio_enc.c`, `src/fm_video_enc.c` compiled for Cortex-M7 (clang, ST HAL headers) | 0 warnings; not linked, not run |
+| `make matrix` | 57 configurations, 0 failed (run alone, in a copy of the tree; one build at a time per tree: a second build in the same tree mixes object files). New since the last round: `FM_BUFFERS=SMALL` / `LARGE` / `HUGE` and both `..._ENC_SYNC_BYTES=0` |
+| `make audiorecordtest`, `make saveexamplestest` | 99 and 74 checks pass |
+| `make hwjpegtest`, `make videohooks` | 73 checks and 22 checks pass (new in this round: the hardware-JPEG glue against a software model of the peripheral) |
 
 **What is not established** (nobody did it at this commit):
 
+- the compile for Cortex-M7 (clang with ST HAL headers; 0 warnings at
+  `48a00bc`) was not repeated at this commit;
 - nothing ran on a board, on a real SD card, or was built with
   `arm-none-eabi-gcc`; the last CubeIDE log in the repository (`Report.txt`,
   commit `b6bcc4e`) ends in a link error that commit `459ed7d` was written to
@@ -316,6 +319,39 @@ Board layer (board/app_save_hooks.h, board/app_flow.h, top_api/code_cmd.h, Core/
   UART commands arec / arecs (music) and vrec / vrecs (video); two Pump calls in while (1)
 ```
 
+### What round V2 found, and what the fixes claim
+
+The report of that round is in the repository: `ReportV3.txt`, lines 2076–2501 (the five reports are in one
+file; the harnesses the auditors wrote are not in the repository). Read it, then
+the diff of the fixes:
+
+```bash
+git diff 48a00bc..fc31b25 -- test/audio_save_tests.h test/video_save_tests.h tools/save_examples_host_test.c \
+    tools/check_matrix.sh src/fm_video_enc.c docs/GUIDE_FA.md README.md
+```
+
+These rows belong to Job 1 and come first. For each: fixed, partly fixed, not
+fixed, or fixed but something else broke. The tests are in
+`test/audit_v4_tests.h` unless the row says otherwise; remove the fix locally
+and see whether the test fails.
+
+| ID | What was wrong | What the fix claims |
+|---|---|---|
+| SAV2-02 | the "never closed" tests failed when the documented `..._ENC_SYNC_BYTES = 0` was used | both tests follow the switch (`ASV_SYNC_BYTES`, `VSV_SYNC_BYTES`); `tools/check_matrix.sh` has a configuration with both at 0 |
+| SAV2-03 | the branch `snd_at > pic_at` of `save_demo_video_cut` was reached by no check | section `[5b]` of `tools/save_examples_host_test.c` demands the exact figures of the slow-player case (4 in sync, 2 silent, 43 392 sound frames); with the branch switched off the new check fails |
+| section 8 of the report | removing the `File_Flush` of a checkpoint failed no test | the "never closed" tests write through a counting mount and demand the flushes: each of the four flush sites (`src/fm_audio_enc.c` WAV, ADPCM, FLAC; `src/fm_video_enc.c`) now fails a test when removed |
+| section 12 of the report | the checkpoint distance is in bytes; at 8 kHz mono ADPCM it is 64 s | stated in `README.md`, `docs/GUIDE_FA.md`, `docs/OPTIONS_FA.md`, `include/fm_audio.h`. The default was not changed |
+
+Open questions the maintainers have about their own fixes (they are questions,
+not findings; nobody has an answer):
+
+1. The "never closed" tests still end with a `File_Close` of the handle; what they prove about a power cut is the flush count and nothing below it. A cut below `File_Write` (a torn sector, a FAT whose directory entry was not updated, LittleFS / FMFS write ordering) is still not modelled. The file part has a RAM disk whose `sync` can be switched off (`av4_power_cut` in `test/audit_v4_tests.h`): use it under the writers.
+2. Should the checkpoint distance be time (or a number of blocks) and not bytes? At low rates a default of 256 KB loses a minute. Measure what a checkpoint costs on the playback path before you propose a number.
+3. `Video_Convert` now writes the exact rate of the source (`fps` / `fps_den` of the writer) and paces the sound with it. Check the written header against `ffprobe` for 29.97, 23.976, 12.5 fps and an MKV source, and the sound length against the picture length.
+4. The size arithmetic near 2 GB / 4 GB has still not been run: the suite passes as a 32-bit program, but no test writes a file of that size.
+5. Job 4 of the last round (callback contexts, re-entrancy, the board command sequences, persistence across runs) was read only. It is the least examined area of this part.
+
+
 ### Job 1 — check the fixes of the first audit (do this first)
 
 Eight findings, one fixing commit, written in one pass: that is exactly when
@@ -348,9 +384,10 @@ the tests):
 | ADPCM `fact` chunk left 0 | a test fails |
 | the whole seek branch of `SaveDemo_VideoFrameCallback` switched off | 11 checks of `[5b]` fail |
 | `pic += 0u` instead of the extra silence in `save_demo_video_cut` | 2 checks fail |
-| the condition forced to false, `if (0 && snd_at > pic_at)`, in `save_demo_video_cut` | **nothing fails**, 55 of 55 pass (lead W1) |
+| the condition forced to false, `if (0 && snd_at > pic_at)`, in `save_demo_video_cut` | 1 check fails ("the sound that starts late is put behind its silence"). At `48a00bc` nothing failed: lead W1 of that round, SAV2-03 |
 
-Reference output of `./fm_saveexamplestest`, section `[5b]`, at `48a00bc`
+Reference output of `./fm_saveexamplestest`, section `[5b]`, at `fc31b25`
+(the same figures as at `48a00bc`)
 (your build must print the same before you change anything):
 forward seek 19 slots / 13 new pictures / 6 held / 13 in sync / 30 400 sound
 frames; backward seek 37 / 29 / 8 / 29 / 59 200; slow player with a seek 29
@@ -538,7 +575,10 @@ slow.
 
 ### Open leads — an answer to each is wanted in the report
 
-New at this commit (the maintainers know these and have not resolved them):
+These were the leads of the last round. The answers of that round's auditor
+are in `ReportV3.txt`, lines 2076–2501 (section 7 of that report); what the
+maintainers did with them is noted under each. Give your own answer where a
+lead is still open:
 
 - **W1. An untested branch.** In `save_demo_video_cut` the branch
   `if (snd_at > pic_at)` (the sound of the new place starts later than its
@@ -547,6 +587,9 @@ New at this commit (the maintainers know these and have not resolved them):
   3 in sync / 3 silent / 32 000 sound frames instead of 4 / 2 / 43 392, and
   the check is `in_sync >= 3`).
   Is the branch right, and which test would hold it?
+  *Since `fc31b25`:* a check on the exact figures holds it (SAV2-03). Whether
+  the branch is **right** has still been judged by nobody outside: the figures
+  are what the code produces, not what a reference says.
 - **W2. "Never closed" is modelled by a close.** The tests for SAVE1-F3 drop
   the writer and call `File_Close` on its file handle (`asv_abandon`,
   `vsv_abandon`). A close writes the directory entry and whatever the file
@@ -556,14 +599,23 @@ New at this commit (the maintainers know these and have not resolved them):
   after a checkpoint, at every block write between two checkpoints, and half
   way through the header patch; remount; open the file with this library and
   with ffmpeg.
+  *Since `fc31b25`:* the last auditor cut at every `File_Write` (harness not in
+  the repository) and found the documented contract kept; the tests now count
+  the flushes of the checkpoints. The block-level experiment is still not
+  built: this lead is open.
 - **W3. A slow player with a seek** cannot give every picture its own sound:
   the first picture after the seek is silent, and the sound track of the file
   can be up to about 0.19 s shorter than its picture track. Is that the best
   that can be done, and is the user told (`docs/GUIDE_FA.md`, the comment
   above `save_demo_video_cut`)?
+  *Last round:* measured, judged not a defect.
 - **W4. Nothing has been played back.** No file of this part was opened with
   an external tool, nothing ran on the board, on a real card, or was built
   with `arm-none-eabi-gcc` (Job 2).
+  *Last round:* the auditor opened every writer's files with ffmpeg / ffprobe
+  (WAV and FLAC byte-identical, ADPCM identical to ffmpeg's decode, AVI
+  clean). Still open: `flac -t` and the STREAMINFO MD5, the board, a real
+  card, `arm-none-eabi-gcc`.
 - **W5. The documentation after the fixes.** `docs/GUIDE_FA.md` was written for
   `523d2da` and patched for `48a00bc`. Look for sentences that describe the
   old behaviour (that saving a playing video across a seek is not possible,
@@ -684,7 +736,7 @@ it again. These are the methods most likely to pay off now:
 | `top_api/simple_video.h` (search `Rec`, `sv_avi`, `Convert`, `sv_i2s_fill_half_inner`, `SimpleVideo_Info`, `sv_swap16_active`, `sv_seek_count`, `sv_sound_sync_ms`) | recorder and callbacks of the video player |
 | `top_api/examples_save_media.h` | 1 270 lines: the save examples, the two rings, the cut at a seek |
 | `board/app_save_hooks.h`, `board/app_flow.h`, `board/app_audio_hooks.h`, `board/app_video_hooks.h`, `board/app_uart_commands.h`, `top_api/code_cmd.h`, `Core/Src/main.c`, `Core/Src/defines.h` | how the board wires it all: callbacks, commands, the main loop |
-| `test/audio_save_tests.h` (19 tests), `test/video_save_tests.h` (19), `tools/save_examples_host_test.c` (55 checks), `tools/audio_record_host_test.c` (99 checks; sections 7, 8), `test/video_hooks_test.c`, `tools/board_taps_host_test.c`, `tools/halstub/` | the tests of this part and the stub HAL they run on |
+| `test/audio_save_tests.h` (19 tests), `test/video_save_tests.h` (19), `tools/save_examples_host_test.c` (74 checks), `tools/audio_record_host_test.c` (99 checks; sections 7, 8), `test/video_hooks_test.c`, `tools/board_taps_host_test.c`, `tools/halstub/` | the tests of this part and the stub HAL they run on |
 | `docs/GUIDE_FA.md` sections 7.2, 7.5, 7.6, 8.2–8.5, `board/README.md` (search `arec`), `docs/OPTIONS_FA.md`, `README.md` ("Saving: what is on the card when it goes wrong") | what the user is told (Persian) |
 
 Every header in `top_api/` has a twin in `examples/`; audit one and diff the
@@ -826,9 +878,9 @@ fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_SAVE_V2.md`. It is used as a work list:
+Deliver **one Markdown file** named `AUDIT_SAVE_V3.md`. It is used as a work list:
 each finding is opened by someone who has not seen your session and has only
-the report and a clean checkout of `48a00bc`. Use this structure, in this
+the report and a clean checkout of `fc31b25`. Use this structure, in this
 order, with these headings:
 
 1. **Summary in Persian** (8 to 12 lines): how many confirmed defects by
@@ -842,7 +894,7 @@ order, with these headings:
      had, and the tools this prompt names that you did not have (with what you
      used in their place);
    - the result line of `make test` on your machine before you changed
-     anything (expected: `Results: 557/557 passed, 0 failures`; if yours
+     anything (expected: `Results: 589/589 passed, 0 failures`; if yours
      differs, that comes first in the report);
    - a table of what you did: method, target, amount (executions, files,
      cases, hours), coverage reached, result;
@@ -852,34 +904,34 @@ order, with these headings:
 3. **Table of findings**: ID, severity, status (confirmed / suspicion), owning
    part, `file:line`, one-line title, fix tested (yes / no), regression test
    included (yes / no). Sorted by severity.
-4. **One section per confirmed finding**, IDs `SAV2-01`, `SAV2-02`, ...:
+4. **One section per confirmed finding**, IDs `SAV3-01`, `SAV3-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps; a recording that lost or misplaced data). S3:
      wrong error handling — a leaked handle or slot, a wrong error code, state
      not restored after a failure. S4: mismatch with the documentation,
      portability, wasted time or memory, a test that cannot fail.
-   - **Where** — `path:from-to`, function, at `48a00bc`, and the lines
+   - **Where** — `path:from-to`, function, at `fc31b25`, and the lines
      themselves (quote at most 15).
    - **Reach** — which public function leads there, which action of a user of
      the board (a UART command, a file on the card, a sequence of calls), which
      build configurations, 32 bits / 64 bits / both, and how likely it is with
      ordinary files and ordinary use.
-   - **How to reproduce** — from a clean checkout of `48a00bc`: the files to
+   - **How to reproduce** — from a clean checkout of `fc31b25`: the files to
      add (full source in the appendix), the exact commands, and the output as
      it was printed (sanitizer report, wrong value, hang with the time you
      waited). For an input file: a hex dump if it is under 200 bytes, otherwise
      the script that generates it.
    - **Expected and observed.**
    - **Root cause** — why it happens, not just where.
-   - **Proposed fix** — a unified diff against `48a00bc` in a `diff` block.
+   - **Proposed fix** — a unified diff against `fc31b25` in a `diff` block.
      Produce it with `git diff`, do not type it: the sources have CRLF line
      endings and a typed diff will not apply. Then state: applied (yes / no),
      the reproducer after the fix, the result line of `make test` after the
      fix, and anything else you ran with it (`make asan`, `make m32`, the
      smaller host tests).
    - **Regression test** — the test to add (which file, the code), with its
-     result on `48a00bc` (must fail) and with your fix (must pass). If a test
+     result on `fc31b25` (must fail) and with your fix (must pass). If a test
      is not possible on a PC, say why.
    - **Siblings** — where else you looked for the same mistake (other formats,
      other backends, the twin in `examples/`, the other player) and what you
@@ -948,10 +1000,10 @@ must be able to reproduce every confirmed finding from the report alone.
 **Before you deliver, check your own report** (and say in the audit record
 that you did):
 
-- Make a fresh clone at `48a00bc` and re-run every reproducer from the text of
+- Make a fresh clone at `fc31b25` and re-run every reproducer from the text of
   the report alone. Drop or downgrade what does not reproduce.
 - Run `git apply --check` for every diff on that clean tree.
-- Re-check every `file:line` against `git show 48a00bc:<path>`.
+- Re-check every `file:line` against `git show fc31b25:<path>`.
 - The numbers in the Persian summary, in the table of findings and in the
   findings index agree.
 - No finding rests on a documented limit, and no "confirmed" finding contains

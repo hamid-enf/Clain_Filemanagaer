@@ -22,13 +22,13 @@
 
 | File | Part | Report expected | Finding IDs |
 |---|---|---|---|
-| `01_file_storage_filesystem.md` | file API, filesystems, storage drivers, utilities, the log layer, the build configuration | `AUDIT_FILE_V4.md` | `FILE4-nn` |
-| `02_image.md` | BMP / PNG / JPEG decode and encode, pixel operations, `SimpleImage` | `AUDIT_IMAGE_V4.md` | `IMG4-nn` |
-| `03_video.md` | containers, H.264, MJPEG, audio tracks of video files, A/V timing, media cache, playback side of `SimpleVideo` | `AUDIT_VIDEO_V4.md` | `VID4-nn` |
-| `04_audio.md` | audio decoders, playlist player, type detection, playback side of `SimpleAudio` / `AudioDma` (output switch, callbacks) | `AUDIT_AUDIO_V4.md` | `AUD4-nn` |
-| `05_save_record.md` | everything that writes media (encoders, AVI writer, converters, `Rec*`, save examples, board glue) and how the parts work together | `AUDIT_SAVE_V2.md` | `SAV2-nn` |
+| `01_file_storage_filesystem.md` | file API, filesystems, storage drivers, utilities, the log layer, the build configuration | `AUDIT_FILE_V5.md` | `FILE5-nn` |
+| `02_image.md` | BMP / PNG / JPEG decode and encode, pixel operations, `SimpleImage` | `AUDIT_IMAGE_V5.md` | `IMG5-nn` |
+| `03_video.md` | containers, H.264, MJPEG, audio tracks of video files, A/V timing, media cache, playback side of `SimpleVideo` | `AUDIT_VIDEO_V5.md` | `VID5-nn` |
+| `04_audio.md` | audio decoders, playlist player, type detection, playback side of `SimpleAudio` / `AudioDma` (output switch, callbacks) | `AUDIT_AUDIO_V5.md` | `AUD5-nn` |
+| `05_save_record.md` | everything that writes media (encoders, AVI writer, converters, `Rec*`, save examples, board glue) and how the parts work together | `AUDIT_SAVE_V3.md` | `SAV3-nn` |
 
-All five pin the same commit, **`48a00bc`** on
+All five pin the same commit, **`fc31b25`** on
 `arena/ba6a87b3-clain-filemanagaer`, and forbid any change on GitHub. Each is
 self-contained: the auditor gets one file and nothing else.
 
@@ -65,22 +65,29 @@ self-contained: the auditor gets one file and nothing else.
 
 ## Where this round stands
 
-- Parts 1–4 were audited once, at `8dd0f25` (reports: `ReportV2.txt` at the
-  repository root). A follow-up round was prepared at `a6cf829`
-  (`git show f161ff8:audit_prompts/`), but no report of it is in the
-  repository. So in this round Job 1 of parts 1–4 is still the check of the
-  first round's fixes, and Job 2 has two layers: what was written before
-  `a6cf829` and never read from outside, and what was written after.
-- Part 5 was audited once, at `523d2da` (`AUDIT_SAVE_V1`, prompt:
-  `git show 0aa69e7:audit_prompts/05_save_record.md`). Its eight findings were
-  worked on in `48a00bc`. The text of that report is not in the repository;
-  the prompt carries the maintainers' summary of it.
-- Scope changes against the earlier prompts: the build configuration
-  (`FM_USE_*`, `FM_BUFFERS`, the firmware-build rules) now belongs to part 1;
-  the JPEG encoder is examined by part 2 as an image encoder and by part 5 as
-  the source of video frames; the playback side of the two players (output
-  switch, callbacks, seek) belongs to parts 3 and 4, their recording functions
-  to part 5.
+- Round one: parts 1–4 at `8dd0f25` (reports: `ReportV2.txt` at the repository
+  root); part 5 at `523d2da` (`AUDIT_SAVE_V1`; its text is not in the
+  repository). A follow-up of parts 1–4 was prepared at `a6cf829`, but no
+  report of it exists.
+- Round two (V4 for parts 1–4, V2 for part 5): all five parts at `48a00bc`.
+  The five reports are in one file, `ReportV3.txt` at the repository root
+  (file: lines 1–641, image: 642–1272, video: 1273–2075, save: 2076–2501,
+  audio: 2502–3576). It returned 18 confirmed findings (file 5, image 2,
+  video 7, audio 3, save 1) and a number of suspicions. All confirmed
+  findings and the suspicions IMG4-S2, AUD4 SUSP-A and SAV2-03 were fixed in
+  `fc31b25`; what was left open is listed in each prompt.
+- This round (V5 for parts 1–4, V3 for part 5) audits `fc31b25`. In every
+  prompt, section 4 has a new block in front of Job 1, "What round V4 (V2)
+  found, and what the fixes claim": the table of that round's findings with
+  the place of each fix and of its test, and the questions the maintainers
+  have about their own fixes. The older Job 1 tables stay: the V4 auditors
+  gave their verdicts on them, and those verdicts are in `ReportV3.txt`.
+- Several fixes of round two change public behaviour (delete / rename of an
+  open file is refused, `FM_SCALE_BILINEAR` gives other pixels, `FM_VideoInfo`
+  grew, an MP3 that changes its channel count plays on converted, a WAV with
+  a `data` length of 0 plays to its end). Each prompt names the ones of its
+  part; check them as changes of a contract, not only as fixes.
+- Scope of the parts is unchanged against round two.
 
 ## Starting the next round
 
@@ -89,8 +96,9 @@ After the reports are in and the fixes are committed:
 1. Put the reports into `audit_reports/` and commit them.
 2. Merge the five findings indexes into one list; note for each finding the
    fixing commit and the test that was added.
-3. In every prompt change: the pinned commit (section 1, and every
-   `48a00bc` in the text), the history table of the part, the table of
+3. In every prompt change: the pinned commit (section 1, and every place
+   where the text means "the commit under audit"; older commits stay where
+   the text speaks of history), the history table of the part, the table of
    section 3 ("What is established") with figures measured at the new commit,
    the Job 1 table (the findings of this round and what each fix claims), the
    Job 2 list (what the fixing commits changed), the open leads (drop the
