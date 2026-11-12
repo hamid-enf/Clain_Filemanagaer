@@ -78,6 +78,10 @@ void FM_Mount_Unlock(void *mount);
  * lock.  Returns NULL, with nothing held, when `fs` is not mounted;
  * FM_VFS_LeaveFS(NULL) is a no-op. */
 FM_MountEntry *FM_VFS_EnterFS(const FM_FS *fs);
+/* A handle is open on `rel` of this mount (tree: or below it).  Call
+ * with the mount's backend lock held (see src/fm_file.c). */
+FM_Bool        FM_File_OpenOnPath(const FM_MountEntry *mount,
+                                  const char *rel, FM_Bool tree);
 void           FM_VFS_LeaveFS(FM_MountEntry *mount);
 
 /* Create / destroy the locks owned by each module.  Called from

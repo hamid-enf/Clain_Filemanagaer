@@ -1147,6 +1147,21 @@ static FM_Result audio_parse_wav(FM_Audio *a)
         }
         else if (memcmp(chunk, "data", 4) == 0)
         {
+            if (chunk_size == 0u && have_fmt && file_size > payload)
+            {
+                /* A length of 0 with sound behind it: a recording that
+                 * was never closed (power lost, reset) before its first
+                 * checkpoint -- the writer fills the length in later.
+                 * Such a file used to open as an empty track although
+                 * all its samples are on the card.  Like other players:
+                 * the sound runs to the end of the file. */
+                uint64_t rest = file_size - payload;
+
+                chunk_size = (rest > UINT32_MAX) ? UINT32_MAX : (uint32_t)rest;
+                next = file_size;
+                FM_EVENT_LOG("wav: data length 0, %lu bytes follow: played to the end of the file",
+                             (unsigned long)chunk_size);
+            }
             a->info.data_offset = payload;
             a->info.data_size = chunk_size;
             have_data = FM_TRUE;
@@ -1237,6 +1252,8 @@ typedef struct
     mp3dec_t dec;
     uint32_t channels;
     uint32_t hz;
+    uint32_t open_channels;      /* what FM_AudioInfo says since the open: */
+    uint32_t open_hz;            /* every frame is handed out in this form */
     uint8_t  in[FM_MP3_INPUT_BUF];
     size_t   in_len;
     size_t   in_off;
@@ -1442,6 +1459,51 @@ static FM_Result mp3_decode_one(FM_Mp3Stream *m)
                                       m->pcm, &info);
         if (samples > 0)
         {
+            /* A file made by joining two MP3s can change its sample rate
+             * or its channel count in the middle.  Everything that reads
+             * the stream works with the figures of the open (the info
+             * block, positions, the player's I2S set-up), so a frame in
+             * another form used to be played as if nothing had changed:
+             * stereo read as mono at half speed, and so on.
+             *   - another channel count: the frame is converted to the
+             *     count of the open (below), the track plays on;
+             *   - another sample rate: cannot be played on a clock that
+             *     is already running.  FM_ERR_UNSUPPORTED, and the frame
+             *     is left where it is, so every further read says the
+             *     same: the track ends here with a reason. */
+            if (m->open_hz != 0u && (uint32_t)info.hz != m->open_hz)
+            {
+                FM_ERR_LOG("mp3: sample rate changes in the file (%lu -> %d Hz)",
+                           (unsigned long)m->open_hz, info.hz);
+                return FM_ERR_UNSUPPORTED;
+            }
+            if (m->open_channels != 0u &&
+                (uint32_t)info.channels != m->open_channels)
+            {
+                int k;
+
+                if (m->open_channels == 2u && info.channels == 1)
+                {
+                    for (k = samples - 1; k >= 0; k--)   /* mono -> L = R */
+                    {
+                        m->pcm[2 * k + 1] = m->pcm[k];
+                        m->pcm[2 * k] = m->pcm[k];
+                    }
+                }
+                else if (m->open_channels == 1u && info.channels == 2)
+                {
+                    for (k = 0; k < samples; k++)        /* (L + R) / 2 */
+                    {
+                        m->pcm[k] = (int16_t)(((int32_t)m->pcm[2 * k] +
+                                               (int32_t)m->pcm[2 * k + 1]) / 2);
+                    }
+                }
+                else
+                {
+                    return FM_ERR_UNSUPPORTED;
+                }
+                info.channels = (int)m->open_channels;
+            }
             /* Consume the frame exactly as minimp3 reports it:
              * frame_bytes is frame_offset + frame_size, i.e. the distance
              * from the buffer start to the first byte after this frame
@@ -1619,6 +1681,9 @@ static FM_Result mp3_open(FM_Audio *a)
          * read error, whatever the file is. */
         return (r == FM_ERR_EOF) ? FM_ERR_INVALID_FORMAT : r;
     }
+    /* the form of the stream from here on (see mp3_decode_one) */
+    m->open_channels = m->channels;
+    m->open_hz = m->hz;
     if (m->have_xing)
     {
         /* The Xing/Info frame describes the stream and carries no audio:
@@ -2140,39 +2205,53 @@ static void aac_release(FM_AacStream *s)
     }
 }
 
-/* Find the next ADTS sync word; returns the offset or -1. */
+/* Find the next ADTS sync word from the current position; returns its
+ * offset (the file is left there) or -1.
+ *
+ * Read in blocks.  This used to be one File_Tell, one 2-byte File_Read
+ * and one File_Seek for every byte, and it runs inside Audio_Read, on
+ * the refill path of the player, whenever a file ends in something that
+ * is not AAC: half a second a megabyte on a PC, far more on a card. */
 static int64_t aac_find_sync(FM_AacStream *s)
 {
-    uint8_t b[2];
-    uint64_t pos;
+    uint8_t buf[256];
+    uint64_t base = 0;          /* file offset of buf[0] */
+    size_t have = 0;
 
+    if (File_Tell(s->file, &base) != FM_OK)
+    {
+        return -1;
+    }
     for (;;)
     {
         uint32_t got = 0;
+        size_t i;
         FM_Result r;
 
-        if (File_Tell(s->file, &pos) != FM_OK)
+        r = File_Read(s->file, buf + have, (uint32_t)(sizeof(buf) - have),
+                      &got);
+        if (got == 0u || (r != FM_OK && r != FM_ERR_EOF))
         {
-            return -1;
+            return -1;          /* the end, or an error: no sync word */
         }
-        r = File_Read(s->file, b, 2, &got);
-        if (got < 2 || (r != FM_OK && r != FM_ERR_EOF))
+        have += got;
+        for (i = 0; i + 1u < have; i++)
         {
-            return -1;
-        }
-        if (b[0] == 0xFF && (b[1] & 0xF6u) == 0xF0u)
-        {
-            /* rewind so the caller reads from the sync word itself */
-            if (File_Seek(s->file, (int64_t)pos, FM_SEEK_SET) != FM_OK)
+            if (buf[i] == 0xFFu && (buf[i + 1u] & 0xF6u) == 0xF0u)
             {
-                return -1;
+                /* the caller reads from the sync word itself */
+                if (File_Seek(s->file, (int64_t)(base + i),
+                              FM_SEEK_SET) != FM_OK)
+                {
+                    return -1;
+                }
+                return (int64_t)(base + i);
             }
-            return (int64_t)pos;
         }
-        if (File_Seek(s->file, (int64_t)pos + 1, FM_SEEK_SET) != FM_OK)
-        {
-            return -1;
-        }
+        /* the last byte may be the first half of a sync word */
+        base += (uint64_t)(have - 1u);
+        buf[0] = buf[have - 1u];
+        have = 1u;
     }
 }
 
@@ -2331,6 +2410,48 @@ static FM_Result aac_decode_one(FM_AacStream *s)
         {
             return r;
         }
+        if (hz != s->hz || channels != s->channels)
+        {
+            /* Either the stream changes its sample rate or channel count
+             * here (two files joined), or these are stray bytes that look
+             * like a header.  A real frame is followed by another header
+             * of the same form; anything else is skipped like other junk.
+             * A real change cannot be played: what the decoder would hand
+             * out no longer fits the figures everything was set up with
+             * at the open, and under those it is noise at the wrong
+             * speed.  The frame is left where it is, so every further
+             * read says the same. */
+            uint8_t nx[4];
+            uint32_t ng = 0;
+            FM_Bool real = FM_FALSE;
+
+            if (File_Seek(s->file, (int64_t)(start + frame_len),
+                          FM_SEEK_SET) == FM_OK &&
+                File_Read(s->file, nx, sizeof(nx), &ng) == FM_OK && ng == 4u &&
+                nx[0] == 0xFFu && (nx[1] & 0xF6u) == 0xF0u &&
+                aac_freq_hz((uint32_t)((nx[2] >> 2) & 0x0Fu)) == hz &&
+                ((((uint32_t)(nx[2] & 1u)) << 2) | ((uint32_t)nx[3] >> 6)) == channels)
+            {
+                real = FM_TRUE;
+            }
+            if (File_Seek(s->file, (int64_t)start + (real ? 0 : 1),
+                          FM_SEEK_SET) != FM_OK)
+            {
+                return FM_ERR_IO;
+            }
+            if (!real)
+            {
+                if (aac_find_sync(s) < 0)
+                {
+                    return FM_ERR_EOF;
+                }
+                continue;
+            }
+            FM_ERR_LOG("aac: the stream changes form (%lu Hz %lu ch -> %lu Hz %lu ch)",
+                       (unsigned long)s->hz, (unsigned long)s->channels,
+                       (unsigned long)hz, (unsigned long)channels);
+            return FM_ERR_UNSUPPORTED;
+        }
         r = file_read_exact(s->file, s->frame + 7, frame_len - 7u, NULL);
         if (r != FM_OK)
         {
@@ -2449,6 +2570,7 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
 {
     uint8_t magic[12];
     uint32_t got = 0;
+    uint64_t adts_at = 0;       /* ADTS frames behind an ID3v2 tag */
     FM_Result r;
 
     FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
@@ -2462,8 +2584,36 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
         return r;
     }
     (void)File_Read(&a->file, magic, sizeof(magic), &got);
-    r = File_Seek(&a->file, 0, FM_SEEK_SET);
-    if (r == FM_OK && got >= 4 && memcmp(magic, "RIFF", 4) == 0)
+    /* An ID3v2 tag in front of ADTS frames hides the sync word from the
+     * tests below: the file went to the MP3 parser, which skips the tag,
+     * finds no MP3 frame behind it and calls a playable file "invalid
+     * format".  Look behind the tag first. */
+    if (got >= 10 && memcmp(magic, "ID3", 3) == 0)
+    {
+        uint8_t after[2];
+        uint32_t ag = 0;
+        uint64_t end = 10u + (((uint32_t)(magic[6] & 0x7Fu) << 21) |
+                              ((uint32_t)(magic[7] & 0x7Fu) << 14) |
+                              ((uint32_t)(magic[8] & 0x7Fu) << 7) |
+                              (uint32_t)(magic[9] & 0x7Fu));
+
+        if (magic[5] & 0x10u)
+        {
+            end += 10u;                         /* the tag has a footer */
+        }
+        if (File_Seek(&a->file, (int64_t)end, FM_SEEK_SET) == FM_OK &&
+            File_Read(&a->file, after, sizeof(after), &ag) == FM_OK &&
+            ag == 2u && after[0] == 0xFFu && (after[1] & 0xF6u) == 0xF0u)
+        {
+            adts_at = end;
+        }
+    }
+    r = File_Seek(&a->file, (int64_t)adts_at, FM_SEEK_SET);
+    if (r == FM_OK && adts_at != 0u)
+    {
+        r = aac_open(a);        /* starts at the first frame it finds */
+    }
+    else if (r == FM_OK && got >= 4 && memcmp(magic, "RIFF", 4) == 0)
     {
         r = audio_parse_wav(a);
     }

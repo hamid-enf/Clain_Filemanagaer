@@ -865,11 +865,14 @@ static void simple_video_swap16(uint8_t *p, size_t bytes)
  * removes a separate ~32 KB DMA ring from .dma_buffer. */
 #define sv_i2s_buf simple_i2s_ring
 /* PCM demux chunk buffer.  Sized by SIMPLE_VIDEO_PCM_CHUNK
- * (fm_board_config.h, default 8 KB) — it used to be a hard-coded 8192
- * so that knob did nothing.  Chunks larger than this are delivered in
- * consecutive pieces by Video_ReadAudioFrame (nothing is dropped). */
+ * (fm_board_config.h, default 18 KB) — it used to be a hard-coded 8192
+ * so that knob did nothing.  PCM chunks larger than this are delivered
+ * in consecutive pieces by Video_ReadAudioFrame (nothing is dropped).
+ * A FLAC block is not: it comes whole or the read answers
+ * FM_ERR_TOO_LARGE (logged below as "PCM read"), so the default holds
+ * one stereo block of 4608 frames. */
 #ifndef SIMPLE_VIDEO_PCM_CHUNK
-#define SIMPLE_VIDEO_PCM_CHUNK 8192u
+#define SIMPLE_VIDEO_PCM_CHUNK 18432u
 #endif
 __attribute__((section(".dma_buffer"), aligned(32)))
 static uint8_t sv_pcm_chunk[SIMPLE_VIDEO_PCM_CHUNK];
@@ -1493,9 +1496,12 @@ static FM_Result sv_i2s_start(void)
         return FM_OK;
     }
     rate = sv.audio.sample_rate;
+    /* The width of the track in the file is not asked here: whatever
+     * it is (8, 16, 24 bit PCM, MP3 with no width at all),
+     * Video_ReadAudioFrame hands out 16-bit PCM for every track it
+     * calls decodable, and only those get this far. */
     if (!sv_i2s_rate_ok(rate) ||
-        (sv.audio.channels != 1u && sv.audio.channels != 2u) ||
-        sv.audio.bits_per_sample != 16u)
+        (sv.audio.channels != 1u && sv.audio.channels != 2u))
     {
         FM_Log("SimpleVideo: PCM %lu Hz %uch %ubit not I2S-playable\n",
                (unsigned long)rate, (unsigned)sv.audio.channels,
@@ -1696,12 +1702,73 @@ static uint32_t simple_video_fps(void)
     return (fps == 0u) ? 10u : fps;
 }
 
+/* The exact rate as a fraction: 30000/1001 is not 30, 25/2 is not 13.
+ * simple_video_fps() is the rounded figure, for messages and for
+ * "how long may one picture take"; time is worked out from this one. */
+static void simple_video_rate(uint32_t *num, uint32_t *den)
+{
+    *num = sv.player.video.info.fps_num;
+    *den = sv.player.video.info.fps_den;
+    if (*num == 0u || *den == 0u)
+    {
+        *num = simple_video_fps();
+        *den = 1u;
+    }
+}
+
+/* The picture that is due `ms` into a clip of num/den pictures a
+ * second (64 bits: ms * num passes 2^32 within the first seconds). */
+static uint32_t sv_frame_at_ms(uint32_t ms, uint32_t num, uint32_t den)
+{
+    uint64_t f = ((uint64_t)ms * num) / ((uint64_t)den * 1000u);
+
+    return (f > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)f;
+}
+
+/* ...and the time at which picture `frame` is due. */
+static uint32_t sv_ms_of_frame(uint32_t frame, uint32_t num, uint32_t den)
+{
+    return (uint32_t)(((uint64_t)frame * den * 1000u) / num);
+}
+
+/* The sound packet to restart from, `ms` into a track of `count`
+ * packets lasting `dur_ms`.  64 bits: for a PCM track in MP4 one packet
+ * is one sample frame, and ms * count passes 2^32 before the first
+ * minute is over. */
+static uint32_t sv_audio_index_at(uint32_t ms, uint32_t count,
+                                  uint32_t dur_ms)
+{
+    uint64_t idx = ((uint64_t)ms * count) / dur_ms;
+
+    return (idx >= count) ? (count - 1u) : (uint32_t)idx;
+}
+
+/* Can the speaker play this track?  What decides is the library's own
+ * answer, `decodable`: Video_ReadAudioFrame then hands out 16-bit PCM.
+ * The width of the samples in the file does not decide: it is 0 for
+ * MP3 and 8 or 24 for PCM the library converts, and asking for 16 here
+ * turned all of those into silence. */
+static FM_Bool sv_track_decodes_inline(const FM_AudioTrackInfo *a)
+{
+    if (!a->decodable)
+    {
+        return FM_FALSE;
+    }
+    return (a->codec == FM_VIDEO_AUDIO_PCM ||
+            a->codec == FM_VIDEO_AUDIO_MP3 ||
+            a->codec == FM_VIDEO_AUDIO_ADPCM ||
+            a->codec == FM_VIDEO_AUDIO_ALAW ||
+            a->codec == FM_VIDEO_AUDIO_ULAW) ? FM_TRUE : FM_FALSE;
+}
+
 static double simple_video_duration(void)
 {
-    uint32_t fps = simple_video_fps();
+    uint32_t num;
+    uint32_t den;
     uint32_t n = sv.player.video.info.frame_count;
 
-    return (fps == 0u) ? 0.0 : ((double)n / (double)fps);
+    simple_video_rate(&num, &den);
+    return ((double)n * (double)den) / (double)num;
 }
 
 static uint32_t simple_video_now_elapsed(void)
@@ -2059,7 +2126,11 @@ static FM_Result simple_video_sync_audio(void)
     {
         return FM_OK;
     }
-    idx = (simple_video_now_elapsed() * sv.audio.sample_count) / dur_ms;
+    /* 64 bits: position in ms times the number of packets passes 2^32
+     * within a minute for a PCM track (one packet per sample frame),
+     * and the sound then restarted somewhere else. */
+    idx = sv_audio_index_at(simple_video_now_elapsed(),
+                            sv.audio.sample_count, dur_ms);
     if (idx >= sv.audio.sample_count)
     {
         idx = sv.audio.sample_count - 1u;
@@ -2131,22 +2202,11 @@ static FM_Result simple_video_prime_item(uint32_t index)
         if (Video_GetAudioInfo(&sv.player.video, &sv.audio) == FM_OK)
         {
             sv.has_audio = FM_TRUE;
-            if (sv.audio.codec == FM_VIDEO_AUDIO_PCM &&
-                (sv.audio.bits_per_sample == 16u ||
-                 sv.audio.bits_per_sample == 8u))
+            if (sv_track_decodes_inline(&sv.audio))
             {
-                /* 8-bit PCM is up-converted to 16-bit in fm_video.c
-                 * Video_ReadAudioFrame, so I2S can play it. */
-                sv.audio_pcm = FM_TRUE;
-            }
-            else if ((sv.audio.codec == FM_VIDEO_AUDIO_MP3 ||
-                      sv.audio.codec == FM_VIDEO_AUDIO_ADPCM ||
-                      sv.audio.codec == FM_VIDEO_AUDIO_ALAW ||
-                      sv.audio.codec == FM_VIDEO_AUDIO_ULAW) &&
-                     sv.audio.bits_per_sample == 16u)
-            {
-                /* Video_ReadAudioFrame decodes these to 16-bit PCM in
-                 * fm_video.c (minimp3 / G.711 / ADPCM) so I2S can play. */
+                /* PCM of any width the library converts, MP3, ADPCM and
+                 * G.711: Video_ReadAudioFrame decodes these to 16-bit
+                 * PCM in fm_video.c, so I2S can play them. */
                 sv.audio_pcm = FM_TRUE;
             }
 #if FM_USE_FLAC || FM_USE_OPUS || FM_USE_VORBIS || FM_USE_AAC
@@ -2795,6 +2855,8 @@ FM_Result SimpleVideo_Begin(void)
 FM_Result SimpleVideo_Poll(void)
 {
     uint32_t fps;
+    uint32_t rate_num;
+    uint32_t rate_den;
     uint32_t want;
     uint32_t have;
     FM_Result r;
@@ -2833,7 +2895,8 @@ FM_Result SimpleVideo_Poll(void)
 #endif
 
     fps = simple_video_fps();
-    want = (simple_video_now_elapsed() * fps) / 1000u;
+    simple_video_rate(&rate_num, &rate_den);
+    want = sv_frame_at_ms(simple_video_now_elapsed(), rate_num, rate_den);
     /* current_frame is the NEXT frame to decode (already-shown + 1). */
     have = sv.player.video.current_frame;
     if (have > want)
@@ -2848,8 +2911,7 @@ FM_Result SimpleVideo_Poll(void)
      * sustainable rate — smooth slow motion, no storm. */
     if (!sv.has_audio && want > have + 3u)
     {
-        sv.t0_ms = HAL_GetTick() -
-                   (uint32_t)(((uint64_t)have * 1000u) / fps);
+        sv.t0_ms = HAL_GetTick() - sv_ms_of_frame(have, rate_num, rate_den);
         want = have;
     }
     /* If decode is slower than real time we fall behind the clock.

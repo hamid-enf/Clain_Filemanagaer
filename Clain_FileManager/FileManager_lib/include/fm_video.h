@@ -60,6 +60,15 @@ typedef struct
     uint32_t      frame_size;       /* fixed frame size (0=var)   */
     FM_VideoCodec codec;
     char          container[8];     /* "FMRV","AVI","MP4"         */
+    /* The exact frame rate, fps_num / fps_den pictures a second:
+     * 30000/1001 for NTSC, 25/2 for 12.5.  `fps` above is this to the
+     * nearest whole number and is what to print; time has to be worked
+     * out from the fraction (picture n is shown at n * fps_den /
+     * fps_num seconds), or a 29.97 fps film runs 1.8 s ahead of its
+     * sound after half an hour.  Both are non-zero after Video_Open
+     * (fps/1 when the file gives a whole rate or none). */
+    uint32_t      fps_num;
+    uint32_t      fps_den;
 } FM_VideoInfo;
 
 /* Codec plugin interface (stateful; one context per open video).
@@ -182,6 +191,13 @@ FM_Result Video_GetAudioInfo(const FM_Video *v, FM_AudioTrackInfo *info);
  *       bytes works: what does not fit is handed out by the next calls.
  *       The first packet of a stream, and the first two after a seek,
  *       have no output; the call passes over them.
+ *   FLAC block size               : one FLAC block is handed out whole
+ *       or not at all.  A block is up to 4608 sample frames in an
+ *       ordinary file (18432 bytes of stereo PCM; ffmpeg writes 4096 or
+ *       4608): give `cap` at least that.  With less room than the block
+ *       needs the call returns FM_ERR_TOO_LARGE, takes nothing and stays
+ *       on that block, so the same call with a larger buffer continues
+ *       without a gap.
  *   AAC, FLAC, Opus               : decoded by the decoder registered
  *       under "AAC" / "FLAC" / "OPUS" (Audio_RegisterDecoder;
  *       FileManager_Init registers the built-in ones that are compiled

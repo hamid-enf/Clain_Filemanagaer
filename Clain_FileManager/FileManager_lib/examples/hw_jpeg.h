@@ -16,6 +16,12 @@
  * دیگر «out of memory (-14)» روی عکس‌های /photos نمی‌دهد.
  *
  * خروجی MCUهای 4:2:0 / 4:2:2 / 4:4:4 و grayscale پشتیبانی می‌شود.
+ * بافر MCU از روی سرآیند خود فایل اندازه می‌شود (۱٫۵، ۲ یا ۳ بایت برای
+ * هر پیکسل). با SIMPLE_IMAGE_HW_YCBCR_MAX پیش‌فرض یک عکس 800x480 از نوع
+ * 4:2:0 یا 4:2:2 جا می‌شود؛ 4:4:4 تا حدود 256 هزار پیکسل (مثلاً 480x480؛
+ * برای 4:4:4 تمام‌صفحه SIMPLE_IMAGE_HW_YCBCR_MAX را 800*480*3 بگذارید).
+ * عکس بزرگ‌تر FM_ERR_TOO_LARGE می‌گیرد و Image_Load آن را نرم‌افزاری باز
+ * می‌کند. JPEG پیش‌رونده (progressive) و CMYK را سخت‌افزار باز نمی‌کند.
  * فایل فشرده در Image_SetWorkBuffer (SimpleImage: si_file در
  * .sdram_buffers) و YCbCr هم در .sdram_buffers است — heap لمس نمی‌شود.
  */
@@ -63,24 +69,6 @@ static uint8_t si_hw_jpeg_announced;
 __attribute__((section(SIMPLE_IMAGE_HW_YCBCR_SECTION), aligned(32)))
 static uint8_t si_hw_ycbcr[SIMPLE_IMAGE_HW_YCBCR_MAX];
 
-static int si_jpeg_clamp(int v)
-{
-    if (v < 0) return 0;
-    if (v > 255) return 255;
-    return v;
-}
-
-static void si_jpeg_ycbcr(int y, int cb, int cr, uint8_t *rgb)
-{
-    int r = y + ((359 * (cr - 128)) >> 8);
-    int g = y - ((88 * (cb - 128) + 183 * (cr - 128)) >> 8);
-    int b = y + ((453 * (cb - 128)) >> 8);
-
-    rgb[0] = (uint8_t)si_jpeg_clamp(r);
-    rgb[1] = (uint8_t)si_jpeg_clamp(g);
-    rgb[2] = (uint8_t)si_jpeg_clamp(b);
-}
-
 /* Branch-free saturation table for the fast MCU paths below.
  *
  * The per-pixel path above costs three compares/branches per component.
@@ -121,18 +109,59 @@ static FM_Result si_jpeg_mcus_to_rgb_sw(const JPEG_ConfTypeDef *cfg,
     uint32_t x;
     uint32_t y;
 
+    /* What the peripheral hands out is never a picture row by row: it is
+     * the MCUs of the file one after another, each made of 8x8 blocks.
+     *   grayscale  one  8x8 MCU = Y                      64 bytes
+     *   4:4:4      one  8x8 MCU = Y, Cb, Cr             192 bytes
+     *   4:2:2      one 16x8 MCU = Y0, Y1, Cb, Cr        256 bytes
+     *   4:2:0      one 16x16 MCU = Y00,Y01,Y10,Y11,Cb,Cr 384 bytes
+     * (the block sizes of ST's own jpeg_utils.c). */
     if (cfg->ColorSpace == JPEG_GRAYSCALE_COLORSPACE)
     {
-        size_t i;
-        size_t n = (size_t)w * h;
+        uint32_t mbw = (w + 7u) / 8u;
+        uint32_t mbh = (h + 7u) / 8u;
+        uint32_t mx;
+        uint32_t my;
+        const uint8_t *p = mcu;
 
-        if (mcu_bytes < n)
+        if (mcu_bytes < (size_t)mbw * mbh * 64u)
         {
             return FM_ERR_TOO_LARGE;
         }
-        for (i = 0; i < n; i++)
+        for (my = 0; my < mbh; my++)
         {
-            rgb[i * 3u] = rgb[i * 3u + 1u] = rgb[i * 3u + 2u] = mcu[i];
+            FM_Idle(); /* keep audio DMA fed during the row */
+            for (mx = 0; mx < mbw; mx++)
+            {
+                uint32_t by;
+                uint32_t bx;
+
+                for (by = 0; by < 8u; by++)
+                {
+                    uint8_t *row;
+
+                    y = my * 8u + by;
+                    if (y >= h)
+                    {
+                        break;
+                    }
+                    row = rgb + ((size_t)y * w + (size_t)mx * 8u) * 3u;
+                    for (bx = 0; bx < 8u; bx++)
+                    {
+                        uint8_t v = p[by * 8u + bx];
+
+                        x = mx * 8u + bx;
+                        if (x >= w)
+                        {
+                            break;
+                        }
+                        row[bx * 3u] = v;
+                        row[bx * 3u + 1u] = v;
+                        row[bx * 3u + 2u] = v;
+                    }
+                }
+                p += 64;
+            }
         }
         return FM_OK;
     }
@@ -342,24 +371,281 @@ static FM_Result si_jpeg_mcus_to_rgb_sw(const JPEG_ConfTypeDef *cfg,
         return FM_OK;
     }
 
-    /* 4:4:4 fallback: packed Y,Cb,Cr per pixel if HAL produced it. */
-    if (mcu_bytes >= (size_t)w * h * 3u)
+    if (cfg->ChromaSubsampling == JPEG_444_SUBSAMPLING)
     {
-        for (y = 0; y < h; y++)
-        {
-            for (x = 0; x < w; x++)
-            {
-                size_t i = (size_t)y * w + x;
+        /* 4:4:4: every pixel has its own Cb and Cr.  (There used to be
+         * a loop here that read the buffer as packed Y,Cb,Cr pixels, a
+         * layout the peripheral never writes: small pictures came out
+         * with the wrong colours, larger ones were refused.) */
+        uint32_t mbw = (w + 7u) / 8u;
+        uint32_t mbh = (h + 7u) / 8u;
+        uint32_t mx;
+        uint32_t my;
+        const uint8_t *p = mcu;
 
-                si_jpeg_ycbcr((int)mcu[i * 3u], (int)mcu[i * 3u + 1u],
-                              (int)mcu[i * 3u + 2u],
-                              rgb + i * 3u);
+        if (mcu_bytes < (size_t)mbw * mbh * 192u)
+        {
+            return FM_ERR_TOO_LARGE;
+        }
+        if (!si_jpeg_clamp_ready)
+        {
+            si_jpeg_clamp_init();
+        }
+        for (my = 0; my < mbh; my++)
+        {
+            FM_Idle(); /* keep audio DMA fed during the row */
+            for (mx = 0; mx < mbw; mx++)
+            {
+                const uint8_t *yb = p;
+                const uint8_t *cb = p + 64;
+                const uint8_t *cr = p + 128;
+                uint32_t by;
+                uint32_t bx;
+
+                p += 192;
+                for (by = 0; by < 8u; by++)
+                {
+                    uint8_t *o;
+
+                    y = my * 8u + by;
+                    if (y >= h)
+                    {
+                        break;
+                    }
+                    o = rgb + ((size_t)y * w + (size_t)mx * 8u) * 3u;
+                    for (bx = 0; bx < 8u; bx++)
+                    {
+                        uint32_t k = by * 8u + bx;
+                        int dcb;
+                        int dcr;
+                        int yv;
+
+                        x = mx * 8u + bx;
+                        if (x >= w)
+                        {
+                            break;
+                        }
+                        dcb = (int)cb[k] - 128;
+                        dcr = (int)cr[k] - 128;
+                        yv = (int)yb[k];
+                        o[0] = SI_JPEG_CL(yv + ((359 * dcr) >> 8));
+                        o[1] = SI_JPEG_CL(yv - ((88 * dcb + 183 * dcr) >> 8));
+                        o[2] = SI_JPEG_CL(yv + ((453 * dcb) >> 8));
+                        o += 3;
+                    }
+                }
             }
         }
         return FM_OK;
     }
-    (void)mcu_bytes;
     return FM_ERR_UNSUPPORTED;
+}
+
+/* Read the layout of a JPEG file from its own frame header: size,
+ * colour space and chroma subsampling, in the peripheral's terms.
+ * The MCU buffer has to be sized BEFORE the decode, and how many bytes
+ * the peripheral is going to write depends on the subsampling (1.5, 2
+ * or 3 bytes a pixel), so it cannot wait for HAL_JPEG_GetInfo.
+ * FM_ERR_UNSUPPORTED = a file the peripheral cannot decode (progressive,
+ * CMYK, 12 bit, an unusual sampling): the caller falls back to the
+ * software decoder. */
+static FM_Result si_jpeg_file_layout(const uint8_t *d, size_t n,
+                                     JPEG_ConfTypeDef *cfg)
+{
+    size_t i = 2u;
+
+    if (d == NULL || cfg == NULL || n < 4u || d[0] != 0xFFu || d[1] != 0xD8u)
+    {
+        return FM_ERR_INVALID_FORMAT;
+    }
+    while (i + 4u <= n)
+    {
+        uint8_t m;
+        size_t len;
+
+        if (d[i] != 0xFFu)
+        {
+            return FM_ERR_INVALID_FORMAT;
+        }
+        m = d[i + 1u];
+        if (m == 0xFFu)
+        {
+            i++;                        /* fill byte before a marker */
+            continue;
+        }
+        if (m == 0xD8u || m == 0x01u || (m >= 0xD0u && m <= 0xD7u))
+        {
+            i += 2u;                    /* markers without a length */
+            continue;
+        }
+        if (m == 0xD9u || m == 0xDAu)
+        {
+            break;                      /* picture data before a frame header */
+        }
+        len = ((size_t)d[i + 2u] << 8) | d[i + 3u];
+        if (len < 2u || len > n - i - 2u)
+        {
+            return FM_ERR_INVALID_FORMAT;
+        }
+        if (m == 0xC0u || m == 0xC1u)
+        {
+            const uint8_t *s = d + i + 4u;
+            uint32_t nf;
+
+            if (len < 8u)
+            {
+                return FM_ERR_INVALID_FORMAT;
+            }
+            nf = s[5];
+            if (len < 8u + 3u * (size_t)nf)
+            {
+                return FM_ERR_INVALID_FORMAT;
+            }
+            if (s[0] != 8u)
+            {
+                return FM_ERR_UNSUPPORTED;
+            }
+            memset(cfg, 0, sizeof(*cfg));
+            cfg->ImageHeight = ((uint32_t)s[1] << 8) | s[2];
+            cfg->ImageWidth = ((uint32_t)s[3] << 8) | s[4];
+            if (cfg->ImageWidth == 0u || cfg->ImageHeight == 0u)
+            {
+                return FM_ERR_INVALID_FORMAT;
+            }
+            if (nf == 1u)
+            {
+                cfg->ColorSpace = JPEG_GRAYSCALE_COLORSPACE;
+                cfg->ChromaSubsampling = JPEG_444_SUBSAMPLING;
+                return FM_OK;
+            }
+            if (nf != 3u || s[10] != 0x11u || s[13] != 0x11u)
+            {
+                return FM_ERR_UNSUPPORTED;
+            }
+            cfg->ColorSpace = JPEG_YCBCR_COLORSPACE;
+            if (s[7] == 0x22u)
+            {
+                cfg->ChromaSubsampling = JPEG_420_SUBSAMPLING;
+            }
+            else if (s[7] == 0x21u)
+            {
+                cfg->ChromaSubsampling = JPEG_422_SUBSAMPLING;
+            }
+            else if (s[7] == 0x11u)
+            {
+                cfg->ChromaSubsampling = JPEG_444_SUBSAMPLING;
+            }
+            else
+            {
+                return FM_ERR_UNSUPPORTED;
+            }
+            return FM_OK;
+        }
+        if (m >= 0xC0u && m <= 0xCFu && m != 0xC4u && m != 0xC8u &&
+            m != 0xCCu)
+        {
+            return FM_ERR_UNSUPPORTED;  /* progressive, lossless, ... */
+        }
+        i += 2u + len;
+    }
+    return FM_ERR_INVALID_FORMAT;
+}
+
+/* Bytes of MCU data the peripheral writes for a picture of this layout. */
+static size_t si_jpeg_mcu_bytes(const JPEG_ConfTypeDef *cfg)
+{
+    size_t w8 = ((size_t)cfg->ImageWidth + 7u) / 8u;
+    size_t h8 = ((size_t)cfg->ImageHeight + 7u) / 8u;
+    size_t w16 = ((size_t)cfg->ImageWidth + 15u) / 16u;
+    size_t h16 = ((size_t)cfg->ImageHeight + 15u) / 16u;
+
+    if (cfg->ColorSpace == JPEG_GRAYSCALE_COLORSPACE)
+    {
+        return w8 * h8 * 64u;
+    }
+    if (cfg->ChromaSubsampling == JPEG_420_SUBSAMPLING)
+    {
+        return w16 * h16 * 384u;
+    }
+    if (cfg->ChromaSubsampling == JPEG_422_SUBSAMPLING)
+    {
+        return w16 * h8 * 256u;
+    }
+    return w8 * h8 * 192u;
+}
+
+/* One JPEG file through the peripheral into si_hw_ycbcr.
+ *
+ * `rgb_cap` is the room the caller has for the RGB888 result.  On FM_OK
+ * `*cfg` describes the picture and `*mcu_bytes` says how much of
+ * si_hw_ycbcr is filled.  The buffer is asked for exactly what the file
+ * needs: the peripheral never reaches the end of it (the HAL starts
+ * again at the beginning when it does, and reports success), and a
+ * 4:2:0 picture is not charged the three bytes a pixel of 4:4:4. */
+static FM_Result si_hw_jpeg_to_mcus(const uint8_t *data, size_t size,
+                                    size_t rgb_cap, int clear,
+                                    JPEG_ConfTypeDef *cfg,
+                                    size_t *mcu_bytes)
+{
+    JPEG_ConfTypeDef file_cfg;
+    FM_ImageInfo inf;
+    size_t ysz;
+    HAL_StatusTypeDef hs;
+    FM_Result r;
+
+    if (si_hjpeg == NULL)
+    {
+        return FM_ERR_NOT_READY;
+    }
+    r = Image_ProbeJPEG(data, size, &inf);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    r = si_jpeg_file_layout(data, size, &file_cfg);
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    if ((size_t)file_cfg.ImageWidth * file_cfg.ImageHeight * 3u > rgb_cap)
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    ysz = si_jpeg_mcu_bytes(&file_cfg);
+    if (ysz > sizeof(si_hw_ycbcr))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (clear)
+    {
+        memset(si_hw_ycbcr, 0, ysz);
+    }
+    hs = HAL_JPEG_Decode(si_hjpeg, (uint8_t *)(uintptr_t)data, (uint32_t)size,
+                         si_hw_ycbcr, (uint32_t)ysz,
+                         SIMPLE_IMAGE_HW_JPEG_TIMEOUT_MS);
+    if (hs != HAL_OK)
+    {
+        FM_Log("SimpleImage: HAL_JPEG_Decode %d\n", (int)hs);
+        return FM_ERR_IO;
+    }
+    memset(cfg, 0, sizeof(*cfg));
+    if (HAL_JPEG_GetInfo(si_hjpeg, cfg) != HAL_OK || cfg->ImageWidth == 0u ||
+        cfg->ImageHeight == 0u)
+    {
+        /* The peripheral does not say: the file's own header does. (This
+         * used to assume 4:2:0 for every file.) */
+        *cfg = file_cfg;
+    }
+    else if (cfg->ImageWidth != file_cfg.ImageWidth ||
+             cfg->ImageHeight != file_cfg.ImageHeight ||
+             si_jpeg_mcu_bytes(cfg) > ysz)
+    {
+        /* It describes a picture the buffers were not sized for. */
+        FM_Log("SimpleImage: JPEG info differs from the file header\n");
+        return FM_ERR_UNSUPPORTED;
+    }
+    *mcu_bytes = ysz;
+    return FM_OK;
 }
 
 /*
@@ -394,50 +680,15 @@ static FM_Result si_hw_jpeg_decode(const uint8_t *data, size_t size,
                                    size_t capacity)
 {
     JPEG_ConfTypeDef cfg;
-    FM_ImageInfo inf;
-    uint8_t *ycbcr;
-    size_t ysz;
-    HAL_StatusTypeDef hs;
+    size_t ysz = 0;
     FM_Result r;
 
-    if (si_hjpeg == NULL)
-    {
-        return FM_ERR_NOT_READY;
-    }
-    r = Image_ProbeJPEG(data, size, &inf);
+    r = si_hw_jpeg_to_mcus(data, size, capacity, 1, &cfg, &ysz);
     if (r != FM_OK)
     {
         return r;
     }
-    if ((size_t)inf.width * inf.height * 3u > capacity)
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    /* YCbCr 4:2:0 worst-case ≈ 1.5 bytes/pixel, round up to 2. */
-    ysz = (size_t)inf.width * inf.height * 2u + 384u;
-    if (ysz > sizeof(si_hw_ycbcr))
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    ycbcr = si_hw_ycbcr;
-    memset(ycbcr, 0, ysz);
-    hs = HAL_JPEG_Decode(si_hjpeg, (uint8_t *)data, (uint32_t)size,
-                         ycbcr, (uint32_t)ysz,
-                         SIMPLE_IMAGE_HW_JPEG_TIMEOUT_MS);
-    if (hs != HAL_OK)
-    {
-        FM_Log("SimpleImage: HAL_JPEG_Decode %d\n", (int)hs);
-        return FM_ERR_IO;
-    }
-    memset(&cfg, 0, sizeof(cfg));
-    if (HAL_JPEG_GetInfo(si_hjpeg, &cfg) != HAL_OK)
-    {
-        cfg.ImageWidth = inf.width;
-        cfg.ImageHeight = inf.height;
-        cfg.ColorSpace = JPEG_YCBCR_COLORSPACE;
-        cfg.ChromaSubsampling = JPEG_420_SUBSAMPLING;
-    }
-    r = si_jpeg_mcus_to_rgb(&cfg, ycbcr, ysz, (uint8_t *)pixel_buffer);
+    r = si_jpeg_mcus_to_rgb(&cfg, si_hw_ycbcr, ysz, (uint8_t *)pixel_buffer);
     if (r != FM_OK)
     {
         return r;
@@ -445,11 +696,6 @@ static FM_Result si_hw_jpeg_decode(const uint8_t *data, size_t size,
     memset(img, 0, sizeof(*img));
     img->width = (uint16_t)cfg.ImageWidth;
     img->height = (uint16_t)cfg.ImageHeight;
-    if (img->width == 0)
-    {
-        img->width = inf.width;
-        img->height = inf.height;
-    }
     img->format = FM_PIXEL_RGB888;
     img->channels = 3;
     img->bit_depth = 24;

@@ -79,6 +79,12 @@ FM_Result File_Seek(FM_File *f, int64_t offset, FM_SeekOrigin origin);
 FM_Result File_Tell(FM_File *f, uint64_t *pos);
 FM_Result File_Size(FM_File *f, uint64_t *size);
 FM_Result File_Truncate(FM_File *f, uint64_t size);
+/* File_Flush: when it returns FM_OK, every byte written through this
+ * handle before the call has been handed to the medium
+ * (f_sync, lfs_file_sync, fsync; on FMFS the driver's sync()), and the
+ * size of the file is on the medium with it.  File_Close does the same
+ * first.  It costs a sync of the driver: call it at checkpoints, not
+ * after every write. */
 FM_Result File_Flush(FM_File *f);
 FM_Bool  File_EOF(FM_File *f);
 FM_Bool  File_IsOpen(const FM_File *f);
@@ -87,6 +93,14 @@ FM_Bool  File_IsOpen(const FM_File *f);
 /* Simple API - whole-file operations                                  */
 /* ------------------------------------------------------------------ */
 FM_Result File_Create(const char *path);                  /* empty file */
+/* File_Delete / File_Rename / File_Move, the same on every backend:
+ *   - a file that is open (any handle, read or write) is not deleted,
+ *     renamed or replaced: FM_ERR_BUSY.  Close it first.  The same for
+ *     a directory with an open file below it (rename), and for the
+ *     target of File_Copy / File_Move;
+ *   - File_Delete on a directory answers FM_ERR_IS_DIRECTORY, also when
+ *     it is empty; Directory_Delete on a file answers
+ *     FM_ERR_NOT_DIRECTORY. */
 FM_Result File_Delete(const char *path);
 /* Rename inside one mount (cross-mount -> FM_ERR_UNSUPPORTED, use
  * File_Move).  Renaming an entry onto itself -- also when the two paths

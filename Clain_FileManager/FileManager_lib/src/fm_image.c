@@ -1754,28 +1754,39 @@ static FM_Result image_scale_run(const void *src, uint16_t sw, uint16_t sh,
     {
         for (y = 0; y < dh; y++)
         {
-            uint32_t y0 = (uint32_t)(((uint64_t)y * sh * 2u) / dh);
-            uint32_t y1 = y0 / 2u;
-            uint32_t y2 = (y0 + 2u) / 2u;
-            int yw = (int)(y0 & 1u); /* fractional weight (0 or 1) */
+            /* Where this destination row lies in the source, in 1/256
+             * of a source pixel.  Pixel centres map onto pixel centres:
+             * source = (y + 1/2) * sh / dh - 1/2.  The weight of the
+             * lower row is the fraction, 0..255.  (This used to be
+             * computed in half pixels with a weight of 0 or 1, which
+             * picks one of the four neighbours: the result was the
+             * nearest pixel under the name "bilinear".) */
+            uint64_t vy = (((uint64_t)y * 2u + 1u) * sh * 128u) / dh;
+            uint64_t fy = (vy < 128u) ? 0u : (vy - 128u);
+            uint32_t y1 = (uint32_t)(fy / 256u);
+            uint32_t y2 = y1 + 1u;
+            uint32_t yw = (uint32_t)(fy & 255u);
 
             if ((y & 7u) == 0u)
             {
                 FM_Idle();
             }
 
+            if (y1 >= sh) y1 = sh - 1;      /* the edge is repeated */
             if (y2 >= sh) y2 = sh - 1;
 
             for (x = 0; x < dw; x++)
             {
-                uint32_t x0 = (uint32_t)(((uint64_t)x * sw * 2u) / dw);
-                uint32_t x1 = x0 / 2u;
-                uint32_t x2 = (x0 + 2u) / 2u;
-                int xw = (int)(x0 & 1u);
+                uint64_t vx = (((uint64_t)x * 2u + 1u) * sw * 128u) / dw;
+                uint64_t fx = (vx < 128u) ? 0u : (vx - 128u);
+                uint32_t x1 = (uint32_t)(fx / 256u);
+                uint32_t x2 = x1 + 1u;
+                uint32_t xw = (uint32_t)(fx & 255u);
                 int r00, g00, b00, a00, r01, g01, b01, a01;
                 int r10, g10, b10, a10, r11, g11, b11, a11;
                 int r, g, b, a;
 
+                if (x1 >= sw) x1 = sw - 1;
                 if (x2 >= sw) x2 = sw - 1;
 
                 image_scale_get(in, fmt, (size_t)y1 * sw + x1,
@@ -1787,15 +1798,17 @@ static FM_Result image_scale_run(const void *src, uint16_t sw, uint16_t sh,
                 image_scale_get(in, fmt, (size_t)y2 * sw + x2,
                                 &r11, &g11, &b11, &a11);
 
-                /* bilinear blend in fixed-point (weights are 0 or 1) */
-                r = (r00 * (2 - xw) * (2 - yw) + r01 * xw * (2 - yw) +
-                     r10 * (2 - xw) * yw + r11 * xw * yw + 2) / 4;
-                g = (g00 * (2 - xw) * (2 - yw) + g01 * xw * (2 - yw) +
-                     g10 * (2 - xw) * yw + g11 * xw * yw + 2) / 4;
-                b = (b00 * (2 - xw) * (2 - yw) + b01 * xw * (2 - yw) +
-                     b10 * (2 - xw) * yw + b11 * xw * yw + 2) / 4;
-                a = (a00 * (2 - xw) * (2 - yw) + a01 * xw * (2 - yw) +
-                     a10 * (2 - xw) * yw + a11 * xw * yw + 2) / 4;
+                /* the four neighbours, weighted in 1/65536 */
+#define SCALE_MIX(v00, v01, v10, v11)                                  \
+    ((int)(((uint32_t)(v00) * (256u - xw) * (256u - yw) +              \
+            (uint32_t)(v01) * xw * (256u - yw) +                       \
+            (uint32_t)(v10) * (256u - xw) * yw +                       \
+            (uint32_t)(v11) * xw * yw + 32768u) >> 16))
+                r = SCALE_MIX(r00, r01, r10, r11);
+                g = SCALE_MIX(g00, g01, g10, g11);
+                b = SCALE_MIX(b00, b01, b10, b11);
+                a = SCALE_MIX(a00, a01, a10, a11);
+#undef SCALE_MIX
 
                 image_scale_set(out, fmt, (size_t)y * dw + x, r, g, b, a);
             }

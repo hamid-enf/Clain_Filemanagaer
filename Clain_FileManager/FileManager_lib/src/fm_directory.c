@@ -272,7 +272,25 @@ FM_Result Directory_Delete(const char *path)
         FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
-    FM_FS_CALL(mount, r, rmdir(mount->fs, rel));
+    /* The mirror of File_Delete: a file is not a directory, on every
+     * backend (one adapter removed the file and answered FM_OK). */
+    FM_Mount_Lock(mount);
+    {
+        FM_FileInfo info;
+
+        r = FM_OK;
+        if (mount->fs->ops.stat != NULL &&
+            mount->fs->ops.stat(mount->fs, rel, &info) == FM_OK &&
+            info.type != FM_ITEM_DIR)
+        {
+            r = FM_ERR_NOT_DIRECTORY;
+        }
+        if (r == FM_OK)
+        {
+            r = mount->fs->ops.rmdir(mount->fs, rel);
+        }
+    }
+    FM_Mount_Unlock(mount);
     FM_VFS_Unpin(mount);
     FM_Core_SetLastError(r);
     return r;

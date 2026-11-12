@@ -497,7 +497,8 @@ picture, and comes out as interleaved 16-bit PCM:
 
 ```c
 FM_AudioTrackInfo ti;
-static uint8_t pcm[8192];
+static uint8_t pcm[18432];              /* one FLAC block of stereo PCM;
+                                           4608 is enough without FLAC */
 size_t size = 0;
 
 Video_GetAudioInfo(&v, &ti);            /* codec, channels, sample_rate */
@@ -626,6 +627,13 @@ Notes:
   `"<name>.idx"` stays beside it: `VideoFile_Repair(path, &frames)` after
   the restart writes the index and the exact lengths and removes it.
   Set either option to 0 to switch the checkpoints off.
+  The distance is in bytes, so in time it depends on the format: 256 KB
+  is about 1.5 s of 44.1 kHz stereo WAV, 6 s of 44.1 kHz stereo ADPCM and
+  **64 s of 8 kHz mono ADPCM**.  A recording shorter than that is an empty
+  file after a power loss (on FAT its size is still 0); for low rates
+  make `FM_AUDIO_ENC_SYNC_BYTES` smaller.
+  (A WAV whose `data` length is 0 with sound behind it -- from another
+  recorder, or a stream -- is played to the end of the file.)
 * **Write error / card full.**  The first error stays the answer of every
   later call and of `Close`.  `Close` still completes the file with what
   reached the card: the header lengths equal what is really there (a

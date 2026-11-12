@@ -258,6 +258,21 @@ u32 h264bsdDecodeSeqParamSet(strmData_t *pStrmData, seqParamSet_t *pSeqParamSet)
         return(tmp);
     pSeqParamSet->picHeightInMbs = value + 1;
 
+    /* FileManager: a picture larger than any level allows (MaxFS of
+     * level 5.1 is 36864 macroblocks, 4096x2304) is damage, not a
+     * picture.  The sizes computed from it wrap in 32 bits
+     * (65536 x 65536 macroblocks is 0), the buffers allocated from the
+     * wrapped size are then far too small for the loops that follow,
+     * which run on the unwrapped width and height. */
+    if (pSeqParamSet->picWidthInMbs == 0 ||
+        pSeqParamSet->picHeightInMbs == 0 ||
+        pSeqParamSet->picWidthInMbs > 36864u ||
+        pSeqParamSet->picHeightInMbs >
+            36864u / pSeqParamSet->picWidthInMbs)
+    {
+        return(HANTRO_NOK);
+    }
+
     /* frame_mbs_only_flag, shall be 1 for baseline profile */
     tmp = h264bsdGetBits(pStrmData, 1);
     if (tmp == END_OF_STREAM)

@@ -88,5 +88,41 @@ if $CC -std=gnu11 -DFM_HOST_BUILD=1 -Iinclude -Ibackends -Isrc \
     rc=1
 fi
 
+# FM_CACHE: the default must be a true expression, ON and OFF must be 1
+# and 0, and a value that is neither (the lower-case `on` the default
+# once was: 0 in #if, without a word) must not compile.
+cache_case() {   # $1 = text before the include, $2 = expected value or "refuse"
+    {
+        printf '%s\n' "$1"
+        echo '#include "fm_config.h"'
+        echo '#include "fm_cache.h"'
+        echo '#if FM_CACHE'
+        echo 'int main(void) { return ((FM_CACHE) == 1) ? 1 : 9; }'
+        echo '#else'
+        echo 'int main(void) { return ((FM_CACHE) == 0) ? 0 : 9; }'
+        echo '#endif'
+    } > "$TMP/t.c"
+    n=$((n + 1))
+    if ! $CC -std=gnu11 -Wall -Werror -DFM_HOST_BUILD=1 -Iinclude -Ibackends \
+            -Isrc "$TMP/t.c" -o "$TMP/t" 2> "$TMP/err"; then
+        if [ "$2" != refuse ]; then
+            echo "FAIL switch names: FM_CACHE case '$1' does not compile"
+            head -5 "$TMP/err"
+            rc=1
+        fi
+        return
+    fi
+    "$TMP/t"; st=$?
+    if [ "$2" = refuse ] || [ $st -ne "$2" ]; then
+        echo "FAIL switch names: FM_CACHE case '$1': got $st, expected $2"
+        rc=1
+    fi
+}
+cache_case ''                      1
+cache_case '#define FM_CACHE ON'   1
+cache_case '#define FM_CACHE OFF'  0
+cache_case '#define FM_CACHE on'   refuse
+cache_case '#define FM_CACHE 2'    refuse
+
 [ $rc -eq 0 ] && echo "check_switch_names: OK ($n cases)"
 exit $rc

@@ -17675,7 +17675,7 @@ static void test_sync_report(void)
         }
         CHECK_RESULT(r, "in-place write");
 
-        TEST("FMFS: handle of a deleted file cannot touch its successor");
+        TEST("FMFS: an open file is not deleted, its handle stays good");
         {
             static const uint8_t junk[16] = {
                 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
@@ -17690,19 +17690,27 @@ static void test_sync_report(void)
                                          FM_OPEN_READ | FM_OPEN_WRITE)
                              : NULL;
             if (r == FM_OK && f == NULL) r = File_GetLastError();
-            if (r == FM_OK) r = File_Delete("/srm/x.bin");
-            /* y takes the table slot x just gave up */
-            if (r == FM_OK) r = sr_write("/srm/y.bin", 3000, 32);
-            if (r == FM_OK)
+            /* Deleting it used to succeed, and the handle then had to
+             * be kept away from the file that took its table slot.  Now
+             * the delete is refused while the handle is open (audit V4,
+             * FILE4-03; the same on every backend, see
+             * test/audit_v4_tests.h). */
+            if (r == FM_OK && File_Delete("/srm/x.bin") != FM_ERR_BUSY)
             {
-                if (File_Write(f, junk, sizeof(junk), &n) == FM_OK ||
-                    File_Read(f, b, sizeof(b), &n) == FM_OK)
-                {
-                    r = FM_ERR_EXISTS;
-                }
+                r = FM_ERR_EXISTS;
+            }
+            if (r == FM_OK) r = sr_write("/srm/y.bin", 3000, 32);
+            if (r == FM_OK) r = File_Write(f, junk, sizeof(junk), &n);
+            if (r == FM_OK) r = File_Seek(f, 0, FM_SEEK_SET);
+            if (r == FM_OK) r = File_Read(f, b, sizeof(b), &n);
+            if (r == FM_OK && (n != sizeof(b) ||
+                               memcmp(b, junk, sizeof(junk)) != 0))
+            {
+                r = FM_ERR_CRC;
             }
             if (f != NULL) (void)File_Close(f);
             if (r == FM_OK) r = sr_verify("/srm/y.bin", 3000, 32);
+            if (r == FM_OK) r = File_Delete("/srm/x.bin");
             (void)File_Delete("/srm/y.bin");
         }
         CHECK_RESULT(r, "stale handle");
@@ -20451,6 +20459,7 @@ static void suite_leak_check(const char *suite)
 
 #include "debug_log_tests.h"
 #include "audit_v3_tests.h"
+#include "audit_v4_tests.h"
 
 int main(void)
 {
@@ -20557,8 +20566,12 @@ int main(void)
     RUN_SUITE(test_sync_report);
     RUN_SUITE(test_debug_levels);
     RUN_SUITE(test_audit_v2_file);
+    RUN_SUITE(test_audit_v4_file);
 #if FM_USE_VIDEO && FM_USE_H264
     RUN_SUITE(test_audit_v2_video);
+#endif
+#if FM_USE_VIDEO
+    RUN_SUITE(test_audit_v4_video);
 #endif
 #if FM_USE_VIDEO && FM_USE_MP3
     RUN_SUITE(test_video_mp3_track);
@@ -20588,9 +20601,11 @@ int main(void)
 #endif
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v2_image);
+    RUN_SUITE(test_audit_v4_image);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audit_v2_audio);
+    RUN_SUITE(test_audit_v4_audio);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_save);

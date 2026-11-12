@@ -159,7 +159,7 @@ static void audio_record_video_track_end(void *ctx, const char *path)
 static void audio_record_video_frame(void *ctx, const void *px, uint16_t w,
                            uint16_t h, FM_PixelFormat fmt, size_t bytes)
 {
-    (void)ctx; (void)w; (void)h; (void)fmt; (void)bytes;
+    (void)ctx; (void)px; (void)w; (void)h; (void)fmt; (void)bytes;
     /* Process px here (brightness/mask/edge/feature).  The driver
      * double-buffers, so copy out if you keep it past this call. */
 }

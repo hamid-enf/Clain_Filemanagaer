@@ -764,6 +764,91 @@ FM_Bool FM_File_AnyOpenOnMount(const FM_MountEntry *mount)
     return FM_FALSE;
 }
 
+/* One handle against a path of its mount.  A handle keeps the whole
+ * normalised path; `rel` is the part after the mount point, without a
+ * leading '/'.  With `tree`, a handle below the directory `rel` matches
+ * too.  FAT does not tell upper from lower case, so there (and only
+ * there) the comparison does not either. */
+static FM_Bool file_handle_on_path(const FM_File *f,
+                                   const FM_MountEntry *mount,
+                                   const char *rel, FM_Bool tree,
+                                   FM_Bool nocase)
+{
+    const char *h;
+    size_t i;
+
+    if (!f->used || f->mount != (const void *)mount)
+    {
+        return FM_FALSE;
+    }
+    h = f->resolved;
+    i = strlen(mount->mount_path);
+    if (strlen(h) < i)
+    {
+        return FM_FALSE;
+    }
+    h += i;
+    while (*h == '/')
+    {
+        h++;
+    }
+    for (i = 0u; rel[i] != '\0'; i++)
+    {
+        char a = h[i];
+        char b = rel[i];
+
+        if (nocase)
+        {
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        }
+        if (a != b)
+        {
+            return FM_FALSE;
+        }
+    }
+    if (h[i] == '\0')
+    {
+        return FM_TRUE;
+    }
+    return (tree && h[i] == '/') ? FM_TRUE : FM_FALSE;
+}
+
+/* FM_TRUE while a handle is open on `rel` of this mount (with `tree`:
+ * on it or below it).  Deleting or renaming such a path is refused: the
+ * backends disagree on what the handle does afterwards, and one of them
+ * went on accepting writes for a file that no longer existed.
+ *
+ * Call it with the mount's backend lock held.  File_Open publishes its
+ * handle (under FM_Lock) before it asks the backend, and it asks the
+ * backend under that same backend lock, so an open that has not been
+ * seen here cannot reach the file before the caller is done with it. */
+FM_Bool FM_File_OpenOnPath(const FM_MountEntry *mount, const char *rel,
+                           FM_Bool tree)
+{
+    FM_Bool nocase = (strcmp(mount->fs->name, "FATFS") == 0) ? FM_TRUE
+                                                             : FM_FALSE;
+    FM_Bool found = FM_FALSE;
+    uint32_t i;
+
+    FM_Lock();
+    for (i = 0; i < FM_MAX_OPEN_FILES && !found; i++)
+    {
+        if (file_handle_on_path(&g_pool[i], mount, rel, tree, nocase))
+        {
+            found = FM_TRUE;
+        }
+        else if (g_external_files[i] != NULL &&
+                 file_handle_on_path(g_external_files[i], mount, rel, tree,
+                                     nocase))
+        {
+            found = FM_TRUE;
+        }
+    }
+    FM_Unlock();
+    return found;
+}
+
 void File_PoolUsedSplit(uint32_t *internal, uint32_t *external)
 {
     uint32_t i;
@@ -1507,7 +1592,32 @@ FM_Result File_Delete(const char *path)
     cache_invalidate_path(mount, rel);
     cache_unlock();
 #endif
-    FM_FS_CALL(mount, r, delete_file(mount->fs, rel));
+    /* One answer on every backend (they used to give three):
+     *   - a file that is open is not deleted: FM_ERR_BUSY;
+     *   - a directory is not a file: FM_ERR_IS_DIRECTORY, also when it
+     *     is empty (two adapters removed it and answered FM_OK). */
+    FM_Mount_Lock(mount);
+    if (FM_File_OpenOnPath(mount, rel, FM_FALSE))
+    {
+        r = FM_ERR_BUSY;
+    }
+    else
+    {
+        FM_FileInfo info;
+
+        r = FM_OK;
+        if (mount->fs->ops.stat != NULL &&
+            mount->fs->ops.stat(mount->fs, rel, &info) == FM_OK &&
+            info.type == FM_ITEM_DIR)
+        {
+            r = FM_ERR_IS_DIRECTORY;
+        }
+        if (r == FM_OK)
+        {
+            r = mount->fs->ops.delete_file(mount->fs, rel);
+        }
+    }
+    FM_Mount_Unlock(mount);
     FM_VFS_Unpin(mount);
     if (r == FM_OK)
     {
@@ -1561,7 +1671,21 @@ static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
     cache_invalidate_path(m, to);
     cache_unlock();
 #endif
-    FM_FS_CALL(m, r, rename(m->fs, from, to));
+    /* Neither the old name (a file, or a directory with an open file
+     * below it) nor the name that would be replaced may be open: the
+     * handle would go on writing into a file nobody can find, and one
+     * backend answered FM_OK for every such write. */
+    FM_Mount_Lock(m);
+    if (FM_File_OpenOnPath(m, from, FM_TRUE) ||
+        FM_File_OpenOnPath(m, to, FM_TRUE))
+    {
+        r = FM_ERR_BUSY;
+    }
+    else
+    {
+        r = m->fs->ops.rename(m->fs, from, to);
+    }
+    FM_Mount_Unlock(m);
     return r;
 }
 

@@ -110,6 +110,20 @@ static FM_Result flac_decode(void *ctx, const uint8_t *in, size_t in_size,
             return FM_ERR_TOO_LARGE;
         }
         frames_read = drflac_read_pcm_frames_s16(p, max_frames, out);
+        if (frames_read == max_frames)
+        {
+            /* `out` is full.  When the block holds more, say so and
+             * hand out nothing: returning the first part with FM_OK
+             * made the caller move on to the next block, and the rest
+             * of this one was gone without a word. */
+            drflac_int16 more[8];
+
+            if (ch > 8u || drflac_read_pcm_frames_s16(p, 1, more) != 0)
+            {
+                drflac_close(p);
+                return FM_ERR_TOO_LARGE;
+            }
+        }
         *out_samples = (size_t)(frames_read * ch);
     }
     drflac_close(p);

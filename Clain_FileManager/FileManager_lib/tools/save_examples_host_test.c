@@ -500,6 +500,65 @@ static void seek_print(const SavedVideo *s, const SeekCheck *c)
            (unsigned long)c->old_sound);
 }
 
+/* ---- [7]: what the speaker gets from a clip ---------------------------- */
+static uint32_t heard_samples;
+static uint32_t heard_loud;
+
+static void heard_cb(void *ctx, int16_t *pcm, size_t samples,
+                     uint32_t sample_rate, uint16_t channels)
+{
+    size_t i;
+
+    (void)ctx; (void)sample_rate; (void)channels;
+    for (i = 0; i < samples; i++)
+    {
+        if (pcm[i] > 500 || pcm[i] < -500) heard_loud++;
+    }
+    heard_samples += (uint32_t)samples;
+}
+
+/* Puts one test vector alone into the video folder under `as`, plays it
+ * to its end and counts what reached the sound callback.  Returns the
+ * number of loud samples, or -1 when the clip did not start. */
+static long play_and_listen(const char *vector, const char *as)
+{
+    char dst[96];
+    int loops = 0;
+    int started = 0;
+    FM_Result r;
+
+    (void)Directory_DeleteRecursive(SIMPLE_VIDEO_FOLDER);
+    (void)Directory_Create(SIMPLE_VIDEO_FOLDER);
+    (void)snprintf(dst, sizeof(dst), "%s/%s", SIMPLE_VIDEO_FOLDER, as);
+    if (File_Copy(vector, dst, NULL, NULL) != FM_OK) return -1;
+    heard_samples = 0u;
+    heard_loud = 0u;
+    sim_video_clock(1u);
+    (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
+    (void)SimpleVideo_SetPlayMode(FM_PLAY_MODE_STOP);
+    SimpleVideo_SetFrameCallback(NULL, NULL);
+    SimpleVideo_SetAudioDataCallback(heard_cb, NULL);
+    r = SimpleVideo_Begin();
+    if (r == FM_OK) r = SimpleVideo_Start();
+    if (r != FM_OK)
+    {
+        SimpleVideo_SetAudioDataCallback(NULL, NULL);
+        return -1;
+    }
+    /* Start() takes effect in Poll; at the end of the one clip the
+     * player stops (play mode STOP) */
+    while (loops < 20000)
+    {
+        (void)SimpleVideo_Poll();
+        loops++;
+        if (SimpleVideo_IsRunning()) started = 1;
+        else if (started) break;
+    }
+    (void)SimpleVideo_Stop();
+    SimpleVideo_SetAudioDataCallback(NULL, NULL);
+    return (long)heard_loud;
+}
+
 int main(int argc, char **argv)
 {
     static int16_t got[2 * 64000];
@@ -890,6 +949,14 @@ int main(int argc, char **argv)
         ok("  the sound track is not longer than the picture track",
            snd_frames > 0 &&
            snd_frames <= (long)s.pictures * SRC_SPF + SRC_SPF);
+        /* The sound of the new place starts later than its picture here,
+         * and the cut writes that distance as silence (the branch
+         * "snd_at > pic_at" of save_demo_video_cut).  Without it the
+         * checks above still hold -- the sound simply sits one picture
+         * early: 3 in sync, 3 silent, 32 000 sound frames.  The clock of
+         * this test is simulated, so the figures are exact. */
+        ok("  the sound that starts late is put behind its silence",
+           c.in_sync == 4u && c.silent == 2u && snd_frames == 43392L);
     }
 
     printf("\n[6] SaveDemo_VideoFromCallback (all in one)\n");
@@ -918,6 +985,64 @@ int main(int argc, char **argv)
         ok("max_frames = 5 stops after 5 pictures",
            r == FM_OK && s.pictures == 5u);
         (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
+    }
+    /* ---- 7) the playback side of SimpleVideo ------------------------ */
+    printf("\n[7] SimpleVideo: tracks, containers and the clock\n");
+    {
+        FM_AudioTrackInfo a;
+        long loud;
+
+        /* The tone of every vector is far above 500; silence is 0.  A
+         * second of 8 kHz mono sound is 8000 samples. */
+        loud = play_and_listen("/test/vectors/avi_mp3.avi", "a.avi");
+        ok("an MP3 track in AVI is heard (it was silence)", loud > 4000);
+        loud = play_and_listen("/test/vectors/avi_pcm24.avi", "a.avi");
+        ok("a 24-bit PCM track is heard (it was silence)", loud > 1000);
+        loud = play_and_listen("/test/vectors/mov_pcm_s8.mov", "a.mov");
+        ok("an 8-bit PCM track is heard (the I2S never started)", loud > 1000);
+        loud = play_and_listen("/test/vectors/mov_pcm_s16.mov", "a.mov");
+        ok("a 16-bit PCM track is heard, as before", loud > 1000);
+        /* the folder scan */
+        loud = play_and_listen("/test/vectors/mkv_mp3_delay.mkv", "a.mkv");
+        ok("a folder with only an .mkv plays, with its sound", loud > 1000);
+        loud = play_and_listen("/test/vectors/mkv_vorbis.mkv", "a.webm");
+        ok("a folder with only a .webm is found", loud >= 0);
+
+        /* which tracks the speaker takes: the library's `decodable`
+         * decides, not the width of the samples in the file */
+        memset(&a, 0, sizeof(a));
+        a.codec = FM_VIDEO_AUDIO_MP3; a.decodable = FM_TRUE;
+        ok("MP3, width 0, decodable: played", sv_track_decodes_inline(&a));
+        a.codec = FM_VIDEO_AUDIO_PCM; a.bits_per_sample = 24u;
+        ok("PCM 24 bit, decodable: played", sv_track_decodes_inline(&a));
+        a.bits_per_sample = 12u; a.decodable = FM_FALSE;
+        ok("PCM 12 bit, not decodable: not played",
+           !sv_track_decodes_inline(&a));
+        a.codec = FM_VIDEO_AUDIO_ADPCM; a.bits_per_sample = 16u;
+        ok("ADPCM the library cannot decode: not played",
+           !sv_track_decodes_inline(&a));
+
+        /* where the sound restarts after a seek: 30 s into a 60 s PCM
+         * track of 22050 Hz (1 323 000 packets).  In 32 bits the product
+         * wrapped and the answer was packet 17 369 (0.79 s). */
+        ok("seek: sound packet at 30 s of 60 s, 1 323 000 packets",
+           sv_audio_index_at(30000u, 1323000u, 60000u) == 661500u);
+        ok("seek: 1500 s into a 30 min AVI of 19 380 packets",
+           sv_audio_index_at(1500000u, 19380u, 1800000u) == 16150u);
+        ok("seek: past the end is the last packet",
+           sv_audio_index_at(70000u, 1323000u, 60000u) == 1322999u);
+
+        /* the picture that is due: the exact rate, not the rounded one */
+        ok("29.97 fps: after 30 min picture 53 946 is due, not 54 000",
+           sv_frame_at_ms(1800000u, 30000u, 1001u) == 53946u);
+        ok("12.5 fps: after 60 s picture 750 is due, not 780",
+           sv_frame_at_ms(60000u, 1000000u, 80000u) == 750u);
+        ok("25 fps: unchanged", sv_frame_at_ms(60000u, 25u, 1u) == 1500u);
+        ok("49 days of 60 fps do not wrap",
+           sv_frame_at_ms(0xFFFFFFFFu, 60u, 1u) == 257698037u);
+        ok("the time of a picture is the inverse",
+           sv_ms_of_frame(53946u, 30000u, 1001u) == 1799998u &&
+           sv_ms_of_frame(750u, 1000000u, 80000u) == 60000u);
     }
     halstub_tick_hook = NULL;
 

@@ -328,6 +328,14 @@ done:
 
 /* What a reset or a pulled card leaves behind: the handles are dropped,
  * nothing is finished, what was still in the writer's buffer is gone. */
+/* The checkpoint distance the library was built with (its default lives
+ * in src/fm_video_enc.c; only "0 or not" matters here). */
+#ifdef FM_VIDEO_ENC_SYNC_BYTES
+#define VSV_SYNC_BYTES (FM_VIDEO_ENC_SYNC_BYTES + 0u)
+#else
+#define VSV_SYNC_BYTES 1048576u
+#endif
+
 static void vsv_abandon(FM_VideoFileWriter *w)
 {
     (void)File_Close(&w->file);
@@ -1235,7 +1243,17 @@ static void test_video_save(void)
     TEST("Video save: never closed -> a valid file up to the checkpoint");
     {
         /* 20 pictures of 70 KB: the 1 MB checkpoint falls after the 15th.
-         * Then the "power is lost". */
+         * Then the "power is lost".
+         *
+         * Written through the counting mount (the same folder): a
+         * checkpoint is the header *and* a flush that reaches the file
+         * system; vsv_abandon closes the handle, which would hide a
+         * checkpoint that never flushed.
+         *
+         * With FM_VIDEO_ENC_SYNC_BYTES = 0 there is no checkpoint: no
+         * flush, the header says "0 frames", and the file is what
+         * VideoFile_Repair (next test) is for. */
+        uint32_t flushes = 0u;
         FM_VideoFileWriter w;
         FM_VideoSaveConfig c;
         FM_Video v;
@@ -1260,12 +1278,21 @@ static void test_video_save(void)
         c.fps = 10u;
         c.audio_rate = VSV_RATE;
         c.audio_channels = 1u;
-        r = VideoFileWriter_Open(&w, "/vsv/cut.avi", &c);
+        (void)FS_Unmount("/ram");
+        r = wfs_mount("/ram");
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_Open(&w, "/ram/vsv/cut.avi", &c);
+        }
+        g_wfs_flush_calls = 0u;
         if (r == FM_OK)
         {
             r = vsv_write_big(&w, 20u);
         }
+        flushes = g_wfs_flush_calls;
         vsv_abandon(&w);
+        wfs_unmount("/ram");
+        restore_posix_root();
         (void)File_Exists("/vsv/cut.avi.idx", &idx);
         (void)File_SizeOf("/vsv/cut.avi", &size);
         File_Init(&f);
@@ -1277,6 +1304,16 @@ static void test_video_save(void)
             flags = vsv_rd32(head + 32 + 12);
             counted = vsv_rd32(head + 32 + 16);
         }
+#if VSV_SYNC_BYTES == 0u
+        (void)v;
+        (void)decoded;
+        if (r == FM_OK && idx && counted == 0u && riff == 0u &&
+            flushes == 0u && size >= 19u * VSV_BIG)
+        {
+            PASS();
+        }
+        else
+#else
         /* the library's own reader takes the file as it is */
         if (r == FM_OK)
         {
@@ -1294,22 +1331,25 @@ static void test_video_save(void)
                 (void)Video_Close(&v);
             }
         }
-        (void)raw;
         if (r == FM_OK && idx && counted >= 14u && counted <= 20u &&
             (flags & 0x10u) == 0u && riff >= 14u * VSV_BIG &&
-            (uint64_t)riff + 8u <= size && decoded >= counted)
+            (uint64_t)riff + 8u <= size && decoded >= counted &&
+            flushes >= 1u)
         {
             PASS();
         }
         else
+#endif
         {
             snprintf(msg, sizeof(msg), "r=%d idx=%d counted=%u flags=%x "
-                     "riff=%u size=%lu info=%u read=%u", (int)r, (int)idx,
-                     (unsigned)counted, (unsigned)flags, (unsigned)riff,
-                     (unsigned long)size, (unsigned)vi.frame_count,
-                     (unsigned)decoded);
+                     "riff=%u size=%lu info=%u read=%u flushes=%u", (int)r,
+                     (int)idx, (unsigned)counted, (unsigned)flags,
+                     (unsigned)riff, (unsigned long)size,
+                     (unsigned)vi.frame_count, (unsigned)decoded,
+                     (unsigned)flushes);
             FAIL(msg);
         }
+        (void)raw;
     }
 
     TEST("Video save: VideoFile_Repair completes the file that was cut");

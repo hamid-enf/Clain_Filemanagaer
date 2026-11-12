@@ -442,6 +442,15 @@ videohooks: $(LIBS)
 		test/video_hooks_test.c $(LIBS) -lm -o fm_videohooks
 	@./fm_videohooks
 
+# hwjpegtest — the hardware-JPEG path (hw_jpeg.h, hw_jpeg_video.h)
+# against a stand-in for the peripheral that writes MCU blocks the way
+# the H7 JPEG core does: every pixel of gray / 4:4:4 / 4:2:2 / 4:2:0.
+hwjpegtest: $(LIBS)
+	@$(CC) -Wall -Wextra -std=c99 -DFM_HALSTUB_JPEG_FAKE=1 \
+		-Iinclude -Iexamples -Itools/halstub \
+		test/hw_jpeg_host_test.c $(LIBS) -lm -o fm_hwjpegtest
+	@./fm_hwjpegtest
+
 # audiorecordtest — audio_record_with_tap.h (record + taps + folder copy) against the real
 # library on the host: records a WAV, reopens it, verifies length and
 # level, installs every tap, and copies a nested tree.
@@ -484,7 +493,7 @@ fatfs:
 	@sh test/build_fatfs_host.sh
 
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks audiorecordtest saveexamplestest tapstest asan ports fatfs
+check: test cachetest videohooks hwjpegtest audiorecordtest saveexamplestest tapstest asan ports fatfs
 	@sh tools/check_switch_names.sh
 	@sh tools/check_flag_stamp.sh
 	@sh tools/check_examples.sh
@@ -495,7 +504,7 @@ check: test cachetest videohooks audiorecordtest saveexamplestest tapstest asan 
 clean:
 	rm -rf build-asan
 	rm -f $(FLAGS_STAMP)
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_hwjpegtest fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

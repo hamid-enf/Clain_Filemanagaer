@@ -111,7 +111,8 @@ int main(void)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.ImageWidth = 32; cfg.ImageHeight = 32;
-    cfg.ColorSpace = 0; cfg.ChromaSubsampling = JPEG_420_SUBSAMPLING;
+    cfg.ColorSpace = JPEG_YCBCR_COLORSPACE;
+    cfg.ChromaSubsampling = JPEG_420_SUBSAMPLING;
 
     /* 1. بدون قلاب، مسیر نرم‌افزاری */
     si_color_hw = NULL;
@@ -136,7 +137,7 @@ int main(void)
     ok("DMA2D refuses grayscale instead of showing garbage",
        si_dma2d_convert(&cfg, ycbcr, sizeof(ycbcr), rgb_b,
                         FM_PIXEL_RGB888) == FM_ERR_UNSUPPORTED);
-    cfg.ColorSpace = 0;
+    cfg.ColorSpace = JPEG_YCBCR_COLORSPACE;
 
     /* 5. زیرنمونه‌برداری ناشناخته هم رد می‌شود */
     cfg.ChromaSubsampling = 99u;

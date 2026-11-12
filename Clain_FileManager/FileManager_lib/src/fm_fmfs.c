@@ -172,6 +172,10 @@ typedef struct
     /* a journalled move has begun and is not finished: ctx->move is
      * what the journal on the storage says */
     uint8_t      move_pending;
+    /* RAM only: something was handed to the driver since the last
+     * barrier.  A driver may keep it in a buffer of its own; a flush
+     * has to bring it to the medium (see fmfs_file_flush). */
+    uint8_t      unsynced;
     uint32_t     seq;           /* sequence number of the table in use   */
     uint32_t     jseq;          /* ...and of the last journal record     */
     uint32_t     slot_size;     /* bytes from table A to table B         */
@@ -296,6 +300,7 @@ static FM_Result fmfs_write(FMFS_Context *ctx, uint64_t offset,
     {
         return FM_ERR_NOT_READY;
     }
+    ctx->unsynced = 1u;
     return ctx->storage->write(ctx->storage, offset, data, size);
 }
 
@@ -664,10 +669,19 @@ static FM_Result fmfs_barrier(FMFS_Context *ctx)
 
     if (ctx->storage == NULL || ctx->storage->sync == NULL)
     {
+        ctx->unsynced = 0u;
         return FM_OK;
     }
     r = ctx->storage->sync(ctx->storage);
-    return (r == FM_ERR_UNSUPPORTED) ? FM_OK : r;
+    if (r == FM_ERR_UNSUPPORTED)
+    {
+        r = FM_OK;
+    }
+    if (r == FM_OK)
+    {
+        ctx->unsynced = 0u;
+    }
+    return r;
 }
 
 /* The block that file data is placed in on a version 2 volume: every
@@ -2627,21 +2641,31 @@ static FM_Result fmfs_file_flush(FM_FS *fs, void *fh)
     {
         return FM_ERR_NOT_OPEN;
     }
-    /* Every change is saved when it is made, so there is normally
-     * nothing left to do.  Saving unconditionally rewrote the whole
-     * metadata table on every flush and every close -- including the
-     * close of a file that was only read -- which on NOR flash is pure
-     * wear. */
-    if (!fmfs_ctx(fs)->dirty && !fmfs_ctx(fs)->move_pending)
+    /* The table is saved when it changes, so there is normally nothing
+     * to save here.  Saving unconditionally rewrote the whole metadata
+     * table on every flush and every close -- including the close of a
+     * file that was only read -- which on NOR flash is pure wear. */
     {
-        return FM_OK;
-    }
-    {
-        FM_Result r = fmfs_settle(fmfs_ctx(fs));
+        FMFS_Context *ctx = fmfs_ctx(fs);
+        FM_Result r = FM_OK;
 
-        if (r == FM_OK && fmfs_ctx(fs)->dirty)
+        if (ctx->dirty || ctx->move_pending)
         {
-            r = fmfs_save(fmfs_ctx(fs));
+            r = fmfs_settle(ctx);
+            if (r == FM_OK && ctx->dirty)
+            {
+                r = fmfs_save(ctx);
+            }
+        }
+        /* What File_Flush promises: every byte written before it is on
+         * the medium when it returns.  File data that overwrites bytes
+         * the file already had changes nothing in the table (nothing
+         * is "dirty"), but a driver that buffers may still hold it:
+         * the header patch of a recording was lost at a power cut this
+         * way.  A handle that wrote nothing costs nothing here. */
+        if (r == FM_OK && ctx->unsynced)
+        {
+            r = fmfs_barrier(ctx);
         }
         return r;
     }

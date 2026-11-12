@@ -85,3 +85,4 @@ examples/safe_write
 examples/setup
 examples/text_lines
 fm_tsan.log
+fm_hwjpegtest

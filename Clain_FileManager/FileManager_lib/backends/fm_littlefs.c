@@ -32,6 +32,13 @@
 /* ------------------------------------------------------------------ */
 /* Context and handle layouts                                          */
 /* ------------------------------------------------------------------ */
+#if defined(__GNUC__) || defined(__clang__) || defined(__ARMCC_VERSION) || \
+    defined(__ICCARM__)
+#define LFS_BUF_ALIGN __attribute__((aligned(32)))
+#else
+#define LFS_BUF_ALIGN
+#endif
+
 typedef struct
 {
     FM_Storage *storage;
@@ -42,9 +49,12 @@ typedef struct
     FM_Bool     in_use;
     FM_FS      *owner;          /* the FM_FS it is in use by */
 
-    /* Static buffers handed to littlefs (no heap required). */
-    uint8_t     read_buf[FM_LFS_CACHE_SIZE];
-    uint8_t     prog_buf[FM_LFS_CACHE_SIZE];
+    /* Static buffers handed to littlefs (no heap required).  They go
+     * to the storage driver as they are, so they start on a cache line:
+     * a DMA driver can then use them directly instead of copying every
+     * block through its bounce buffer. */
+    LFS_BUF_ALIGN uint8_t read_buf[FM_LFS_CACHE_SIZE];
+    LFS_BUF_ALIGN uint8_t prog_buf[FM_LFS_CACHE_SIZE];
     uint8_t     lookahead[FM_LFS_LOOKAHEAD_SIZE];
 
     /* Open file pool (indexed by the handle stored in FM_FS_HANDLE_SIZE).
@@ -54,7 +64,7 @@ typedef struct
      * locals of the open function. */
     lfs_file_t  files[FM_MAX_OPEN_FILES];
     uint8_t     file_used[FM_MAX_OPEN_FILES];
-    uint8_t     file_buf[FM_MAX_OPEN_FILES * FM_LFS_CACHE_SIZE];
+    LFS_BUF_ALIGN uint8_t file_buf[FM_MAX_OPEN_FILES * FM_LFS_CACHE_SIZE];
     struct lfs_file_config file_cfg[FM_MAX_OPEN_FILES];
 
     /* Open directory pool. */

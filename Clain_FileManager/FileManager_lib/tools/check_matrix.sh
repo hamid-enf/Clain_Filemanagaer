@@ -186,6 +186,17 @@ if [ "$MODE" != "quick" ]; then
     CFLAGS_EXTRA="-DFM_FMFS_POWER_SAFE=0" run_one "FM_FMFS_POWER_SAFE=0 (version 1 volumes only)"
     CFLAGS_EXTRA="-DFM_FMFS_POWER_SAFE=2" run_one "FM_FMFS_POWER_SAFE=2"
     CFLAGS_EXTRA="-DFM_FMFS_MOVE_STEPS=0xFFFFFFFF" run_one "FM_FMFS_MOVE_STEPS unlimited"
+    # every size of the work buffers (NORMAL is all the runs above).
+    # SMALL made the copy buffer smaller than a flash erase unit once.
+    CFLAGS_EXTRA="-DFM_BUFFERS=SMALL" run_one "FM_BUFFERS=SMALL"
+    CFLAGS_EXTRA="-DFM_BUFFERS=LARGE" run_one "FM_BUFFERS=LARGE"
+    CFLAGS_EXTRA="-DFM_BUFFERS=HUGE"  run_one "FM_BUFFERS=HUGE"
+
+    # The recording checkpoints switched off (documented: "0 = off").  The
+    # "never closed" tests used to demand a checkpoint whatever the switch
+    # said, so this configuration could not pass and nobody ran it.
+    CFLAGS_EXTRA="-DFM_AUDIO_ENC_SYNC_BYTES=0 -DFM_VIDEO_ENC_SYNC_BYTES=0" \
+        run_one "recording checkpoints off (..._ENC_SYNC_BYTES=0)"
     # A "mutex only" sync port (no thread identity): a busy scratch
     # resource is reported as FM_ERR_BUSY instead of being waited for, so
     # the multi-thread suites fail by design -- only the build is checked.

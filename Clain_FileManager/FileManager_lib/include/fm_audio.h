@@ -261,7 +261,9 @@ const char *Audio_FormatExtension(FM_AudioFileFormat format);
  * A recording that is never closed (reset, power loss, card pulled):
  * every FM_AUDIO_ENC_SYNC_BYTES (256 KB; 0 = off) the lengths are
  * brought up to date and the file is synced, so it plays up to the last
- * such point.  Less than that many bytes on the card = an empty file. */
+ * such point.  Less than that many bytes on the card = an empty file.
+ * In time: 1.5 s of 44.1 kHz stereo WAV, 6 s of 44.1 kHz stereo ADPCM,
+ * 64 s of 8 kHz mono ADPCM -- choose a smaller value for low rates. */
 FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
                                FM_AudioFileFormat format,
                                const FM_AudioEncodeConfig *config);

@@ -623,6 +623,15 @@ static FM_Result xfer_raw_locked(FM_Storage *src, uint64_t src_off,
                 chunk = aligned;
             }
         }
+        else if (unit != 0u)
+        {
+            /* The staging buffer is smaller than one unit of the
+             * destination.  The copy is still right, but every unit is
+             * then erased and rewritten once per chunk. */
+            FM_EVENT_LOG("raw copy: FM_TRANSFER_CHUNK (%lu) is smaller than "
+                         "the destination unit (%lu): slow, extra wear",
+                         (unsigned long)chunk, (unsigned long)unit);
+        }
         /* Power-of-two erase units let us clamp to the next boundary
          * cheaply; anything else just uses the plain chunk size. */
         if (unit != 0u && (unit & (unit - 1u)) == 0u)

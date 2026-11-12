@@ -49,11 +49,25 @@ static FM_Bool is_image_path(const char *path)
            ext_is(path, "tiff") || ext_is(path, "webp");
 }
 
+#if FM_USE_VIDEO
+/* Pictures a second, exactly (30000/1001 is not 30).  Only called with
+ * info.fps != 0. */
+static double player_video_rate(const FM_Video *v)
+{
+    if (v->info.fps_num != 0u && v->info.fps_den != 0u)
+    {
+        return (double)v->info.fps_num / (double)v->info.fps_den;
+    }
+    return (double)v->info.fps;
+}
+#endif
+
 static FM_Bool is_video_path(const char *path)
 {
     return ext_is(path, "avi") || ext_is(path, "mp4") ||
            ext_is(path, "m4v") || ext_is(path, "mov") ||
-           ext_is(path, "fmrv");
+           ext_is(path, "mkv") || ext_is(path, "webm") ||
+           ext_is(path, "flv") || ext_is(path, "fmrv");
 }
 
 static FM_Bool kind_wants(FM_PlayerKind kinds, const char *path)
@@ -405,7 +419,7 @@ FM_Result Player_Seek(FM_Player *p, double seconds)
 #if FM_USE_VIDEO
         if (p->video.info.fps != 0)
         {
-            double at = seconds * (double)p->video.info.fps;
+            double at = seconds * player_video_rate(&p->video);
             /* a time past what a frame number can hold is the last frame
              * (converting it would be undefined) */
             uint32_t frame = (at >= 4294967295.0) ? UINT32_MAX : (uint32_t)at;
@@ -458,7 +472,8 @@ double Player_GetPosition(const FM_Player *p)
 #if FM_USE_VIDEO
         if (p->video.info.fps != 0)
         {
-            return (double)p->video.current_frame / (double)p->video.info.fps;
+            return (double)p->video.current_frame /
+                   player_video_rate(&p->video);
         }
 #endif
         return 0.0;
@@ -484,7 +499,7 @@ double Player_GetDuration(const FM_Player *p)
         if (p->video.info.fps != 0)
         {
             return (double)p->video.info.frame_count /
-                   (double)p->video.info.fps;
+                   player_video_rate(&p->video);
         }
 #endif
         return 0.0;

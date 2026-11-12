@@ -47,8 +47,10 @@
 #ifndef FM_VIDEO_ENC_MAX_BYTES
 #define FM_VIDEO_ENC_MAX_BYTES 0x7F000000u
 #endif
+/* One read of decoded sound.  A FLAC block is up to 4608 stereo frames
+ * (18432 bytes) and is handed out whole or not at all. */
 #ifndef FM_VIDEO_CONVERT_AUDIO_BYTES
-#define FM_VIDEO_CONVERT_AUDIO_BYTES 16384u
+#define FM_VIDEO_CONVERT_AUDIO_BYTES 18432u
 #endif
 
 /* Power-loss checkpoint.  Every time the file has grown by this many
@@ -1206,6 +1208,8 @@ FM_Result Video_Convert(const char *src, const char *dst,
     size_t rgb_cap;
     uint64_t audio_frames = 0u;
     uint32_t frame = 0u;
+    uint32_t rate_num;          /* pictures a second = rate_num / rate_den */
+    uint32_t rate_den;
     uint16_t out_w;
     uint16_t out_h;
     FM_Bool audio = FM_FALSE;
@@ -1250,7 +1254,16 @@ FM_Result Video_Convert(const char *src, const char *dst,
 
     out_w = (cfg->width != 0u) ? cfg->width : info.width;
     out_h = (cfg->height != 0u) ? cfg->height : info.height;
-    if (info.width == 0u || info.height == 0u || info.fps == 0u)
+    rate_num = (info.fps_num != 0u && info.fps_den != 0u) ? info.fps_num
+                                                          : info.fps;
+    rate_den = (info.fps_num != 0u && info.fps_den != 0u) ? info.fps_den : 1u;
+    while (rate_num > 1000000u && rate_den > 1u)
+    {
+        rate_num /= 2u;         /* Matroska counts in nanoseconds: keep  */
+        rate_den /= 2u;         /* the header arithmetic inside 32 bits  */
+    }
+    if (info.width == 0u || info.height == 0u || info.fps == 0u ||
+        rate_num == 0u)
     {
         r = FM_ERR_UNSUPPORTED;
         goto done;
@@ -1315,8 +1328,11 @@ FM_Result Video_Convert(const char *src, const char *dst,
             memset(&sc, 0, sizeof(sc));
             sc.width = out_w;
             sc.height = out_h;
-            sc.fps = info.fps;
-            sc.fps_den = 1u;
+            /* the exact rate of the source (29.97, 12.5, ...), not the
+             * rounded figure: the copy would run at another speed than
+             * its sound */
+            sc.fps = rate_num;
+            sc.fps_den = rate_den;
             sc.quality = cfg->quality;
             sc.chroma_full = cfg->chroma_full;
             if (audio)
@@ -1345,7 +1361,8 @@ FM_Result Video_Convert(const char *src, const char *dst,
 
         /* the sound that belongs to the pictures written so far */
         while (audio && !audio_done &&
-               audio_frames < ((uint64_t)frame * ai.sample_rate) / info.fps)
+               audio_frames < ((uint64_t)frame * ai.sample_rate * rate_den) /
+                                  rate_num)
         {
             size_t got = 0;
 

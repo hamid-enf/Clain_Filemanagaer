@@ -138,6 +138,15 @@ extern "C" {
 #endif
 #endif
 
+/* FM_CACHE must be ON or OFF (1 or 0).  Anything else the preprocessor
+ * does not know -- a lower-case `on` was the real case -- counts as 0 in
+ * `#if FM_CACHE` without a word, and the cache was then never switched
+ * on.  This line makes such a value a compile error. */
+#ifdef FM_CACHE
+typedef char fm_cache_flag_must_be_ON_or_OFF
+    [((FM_CACHE) == 0 || (FM_CACHE) == 1) ? 1 : -1];
+#endif
+
 /* خط کش روی Cortex-M7 سی‌ودو بایت است. */
 #ifndef FM_CACHE_LINE
 #define FM_CACHE_LINE 32u

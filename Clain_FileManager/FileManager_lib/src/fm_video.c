@@ -1146,6 +1146,10 @@ static FM_Result avi_parse_header(FM_Video *v, const AviLayout *lay,
     v->info.fps = (us_per_frame != 0)
                       ? ((1000000u + us_per_frame / 2u) / us_per_frame)
                       : 0u;
+    /* ...and the exact rate next to it: scheduling by the rounded one
+     * is 0.1% fast for 29.97 and 4% fast for 12.5 */
+    v->info.fps_num = 1000000u;
+    v->info.fps_den = us_per_frame;
     v->info.frame_count = total_frames;
     v->info.frame_size = 0;
     v->variable = 1;
@@ -1340,7 +1344,10 @@ static FM_Result mp4_box_at(FM_Video *v, uint64_t pos, uint64_t end,
     {
         box->size = end - pos;
     }
-    if (box->data > end || box->size > end - pos)
+    /* A box shorter than its own header (a 64-bit size of 0..15) would
+     * make every walk stand still on it for ever. */
+    if (box->data > end || box->size > end - pos ||
+        box->size < box->data - pos)
     {
         return FM_ERR_CORRUPTED;
     }
@@ -2886,6 +2893,8 @@ static FM_Result mp4_parse(FM_Video *v, FM_VideoPriv *priv)
      * 29, or the video clock runs 3% slow against the audio. */
     v->info.fps = (timescale != 0 && frame_delta != 0)
                       ? ((timescale + frame_delta / 2u) / frame_delta) : 0u;
+    v->info.fps_num = timescale;
+    v->info.fps_den = frame_delta;
     v->info.frame_count = sample_count;
     v->info.frame_size = 0;
     v->variable = 1;
@@ -3869,6 +3878,11 @@ static FM_Result mkv_parse(FM_Video *v, FM_VideoPriv *priv)
     {
         v->info.fps = 25u;
     }
+    else if (def_duration != 0u && def_duration <= 1000000000ULL)
+    {
+        v->info.fps_num = 1000000000u;
+        v->info.fps_den = (uint32_t)def_duration;
+    }
     (void)strcpy(v->info.container, "MKV");
 
     /* Pass 2: index every block.  One flat walk of the segment: a
@@ -4436,6 +4450,11 @@ static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
     if (fps_milli != 0u && fps_milli != UINT32_MAX)
     {
         fps = (fps_milli + 500u) / 1000u;
+        if (fps != 0u)
+        {
+            v->info.fps_num = fps_milli;
+            v->info.fps_den = 1000u;
+        }
     }
     if (fps == 0u && priv->vtail.total > 1u && ts_last > ts_first)
     {
@@ -4443,6 +4462,12 @@ static FM_Result flv_parse(FM_Video *v, FM_VideoPriv *priv)
 
         fps = (uint32_t)(((uint64_t)(priv->vtail.total - 1u) * 1000u +
                           span / 2u) / span);
+        if (fps != 0u && span <= 0xFFFFFFFFu &&
+            priv->vtail.total - 1u <= 0xFFFFFFFFu / 1000u)
+        {
+            v->info.fps_num = (priv->vtail.total - 1u) * 1000u;
+            v->info.fps_den = (uint32_t)span;
+        }
     }
     v->info.fps = (fps != 0u) ? fps : 25u;
     v->info.codec = vcodec;
@@ -4599,6 +4624,14 @@ FM_Result Video_Open(const char *path, FM_Video *v)
             ((FM_VideoPriv *)v->priv)->file_size = size;
             ((FM_VideoPriv *)v->priv)->audio_skip_left =
                 ((FM_VideoPriv *)v->priv)->audio_skip;
+        }
+        /* a whole rate (FMRV), a default, or a fraction that says
+         * nothing: the exact rate is the rounded one */
+        if (v->info.fps == 0u || v->info.fps_num == 0u ||
+            v->info.fps_den == 0u)
+        {
+            v->info.fps_num = v->info.fps;
+            v->info.fps_den = 1u;
         }
         FM_EVENT_LOG("opened %s (%ux%u, %lu fps, %lu frames)", path,
                      (unsigned)v->info.width, (unsigned)v->info.height,
@@ -5924,6 +5957,13 @@ static FM_Result video_audio_decode_packet(FM_Video *v, FM_VideoPriv *priv,
 
     dr = ops->decode(priv->adec_ctx, in, in_len, (int16_t *)buf,
                      out_cap_samples, &out_samples);
+    if (dr == FM_ERR_TOO_LARGE)
+    {
+        /* The packet decodes to more than `cap`.  Nothing was taken and
+         * the packet stays the next one: the caller comes back with a
+         * larger buffer and loses nothing. */
+        return dr;
+    }
     v->audio_frame_index++;
     if ((dr == FM_OK || dr == FM_ERR_EOF) && out_samples > 0u)
     {
@@ -7014,6 +7054,8 @@ FM_Result VideoWriter_Create(const char *path, uint16_t width,
     w->info.width = width;
     w->info.height = height;
     w->info.fps = fps;
+    w->info.fps_num = fps;
+    w->info.fps_den = 1u;
     w->info.frame_count = frame_count;
     w->info.frame_size = frame_size;
     w->info.data_offset = FMRV_HEADER_SIZE;

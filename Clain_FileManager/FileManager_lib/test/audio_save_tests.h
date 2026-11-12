@@ -362,6 +362,14 @@ static int asv_raw_wav(const char *path, AsvWav *w, int cut)
 
 /* What a reset leaves behind: the handle is dropped, nothing is
  * finished, what was still in the encoder's buffer is gone. */
+/* The checkpoint distance the library was built with (its default lives
+ * in src/fm_audio_enc.c; only "0 or not" and the size matter here). */
+#ifdef FM_AUDIO_ENC_SYNC_BYTES
+#define ASV_SYNC_BYTES (FM_AUDIO_ENC_SYNC_BYTES + 0u)
+#else
+#define ASV_SYNC_BYTES 262144u
+#endif
+
 static void asv_abandon(FM_AudioFileWriter *w)
 {
     (void)File_Close(&w->file);
@@ -1224,16 +1232,32 @@ static void test_audio_save(void)
     {
         /* 600 KB of PCM (and of ADPCM, FLAC) go to the writer, then the
          * "power is lost".  The checkpoint is every 256 KB, so at least
-         * 256 KB of each file must be there, with lengths to match. */
+         * 256 KB of each file must be there, with lengths to match.
+         *
+         * The file goes through the counting mount: a checkpoint is the
+         * lengths *and* a flush that reaches the file system, and only
+         * the count shows the second half (asv_abandon closes the handle,
+         * which would hide a checkpoint that never flushed).
+         *
+         * With FM_AUDIO_ENC_SYNC_BYTES = 0 there are no checkpoints: no
+         * flush, the lengths stay 0 -- and the reader plays such a WAV
+         * to the end of the file all the same. */
         static const FM_AudioFileFormat fmts[3] = {
             FM_AUDIO_FILE_WAV, FM_AUDIO_FILE_ADPCM, FM_AUDIO_FILE_FLAC
         };
         static const char *const names[3] = {
-            "/asv/cut.wav", "/asv/cuta.wav", "/asv/cut.flac"
+            "/ram/asv/cut.wav", "/ram/asv/cuta.wav", "/ram/asv/cut.flac"
         };
         int bad = 0;
 
         msg[0] = '\0';
+        (void)FS_Unmount("/ram");
+        r = wfs_mount("/ram");
+        if (r != FM_OK)
+        {
+            bad = 1;
+            snprintf(msg, sizeof(msg), "wfs_mount failed: %d", (int)r);
+        }
         for (i = 0u; i < 3u && !bad; i++)
         {
             FM_AudioFileWriter w;
@@ -1242,12 +1266,15 @@ static void test_audio_save(void)
             uint32_t pass;
             uint32_t passes = (i == 0u) ? 13u : 60u;
             uint32_t fed = 0u;
+            uint32_t flushes;
             int rc = 0;
+            int lengths_ok;
 
             if (!Audio_CanEncode(fmts[i]))
             {
                 continue;
             }
+            g_wfs_flush_calls = 0u;
             memset(&w, 0, sizeof(w));
             memset(&raw, 0, sizeof(raw));
             memset(&cfg, 0, sizeof(cfg));
@@ -1262,6 +1289,7 @@ static void test_audio_save(void)
                                                 NULL);
                 fed += ASV_MAX_FRAMES;
             }
+            flushes = g_wfs_flush_calls;
             asv_abandon(&w);
             (void)File_SizeOf(names[i], &size);
             got = 0u;
@@ -1281,26 +1309,43 @@ static void test_audio_save(void)
                 (void)asv_read(names[i], g_asv_out, ASV_MAX_FRAMES, &got,
                                NULL);
             }
-            if (r != FM_OK || rc != 0 || size < 262144u ||
-                (i == 0u && (raw.data < 262144u - 44u - 16384u ||
-                             raw.data > fed * 4u || (raw.data % 4u) != 0u ||
-                             got != ASV_MAX_FRAMES ||
-                             memcmp(g_asv_in, g_asv_out,
-                                    ASV_MAX_FRAMES * 4u) != 0)) ||
-                (i == 1u && (raw.data < 262144u - 60u - 16384u ||
-                             (raw.data % raw.block_align) != 0u ||
-                             raw.fact != (raw.data / raw.block_align) *
-                                             raw.block_frames ||
-                             raw.fact > fed || got != ASV_MAX_FRAMES)) ||
-                (i == 2u && got != ASV_MAX_FRAMES))
+#if ASV_SYNC_BYTES > 0u && ASV_SYNC_BYTES <= 262144u
+            /* every file here is past two checkpoints of 256 KB (more of
+             * them with a shorter distance) */
+            lengths_ok =
+                flushes >= 2u &&
+                (i != 0u || (raw.data >= 262144u - 44u - 16384u &&
+                             raw.data <= fed * 4u && (raw.data % 4u) == 0u)) &&
+                (i != 1u || (raw.data >= 262144u - 60u - 16384u &&
+                             (raw.data % raw.block_align) == 0u &&
+                             raw.fact == (raw.data / raw.block_align) *
+                                             raw.block_frames &&
+                             raw.fact <= fed));
+#elif ASV_SYNC_BYTES == 0u
+            lengths_ok = (flushes == 0u) &&
+                         (i == 2u || (raw.data == 0u && raw.fact == 0u));
+#else
+            /* a longer distance: whether a checkpoint falls inside these
+             * files is not known here; that they play is checked below */
+            lengths_ok = 1;
+            (void)flushes;
+#endif
+            if (r != FM_OK || rc != 0 || size < 262144u || !lengths_ok ||
+                got != ASV_MAX_FRAMES ||
+                (i == 0u && memcmp(g_asv_in, g_asv_out,
+                                   ASV_MAX_FRAMES * 4u) != 0))
             {
                 bad = 1;
                 snprintf(msg, sizeof(msg), "%s r=%d rule=%d size=%lu "
-                         "data=%u fact=%u fed=%u got=%u", names[i], (int)r,
-                         rc, (unsigned long)size, (unsigned)raw.data,
-                         (unsigned)raw.fact, (unsigned)fed, (unsigned)got);
+                         "data=%u fact=%u fed=%u got=%u flushes=%u",
+                         names[i], (int)r, rc, (unsigned long)size,
+                         (unsigned)raw.data, (unsigned)raw.fact,
+                         (unsigned)fed, (unsigned)got, (unsigned)flushes);
             }
+            (void)File_Delete(names[i]);
         }
+        wfs_unmount("/ram");
+        restore_posix_root();
         if (!bad)
         {
             PASS();

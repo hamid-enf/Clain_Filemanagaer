@@ -238,9 +238,11 @@ static inline HAL_StatusTypeDef HAL_I2S_DMAStop(I2S_HandleTypeDef *h) { (void)h;
 #define DMA_PDATAALIGN_HALFWORD      1u
 #define DMA_PDATAALIGN_WORD          2u
 
-#define JPEG_420_SUBSAMPLING         0u
-#define JPEG_422_SUBSAMPLING         1u
-#define JPEG_444_SUBSAMPLING         2u
+/* the values of stm32h7xx_hal_jpeg.h: a zeroed JPEG_ConfTypeDef is a
+ * grayscale 4:4:4 picture there, and so it is here */
+#define JPEG_444_SUBSAMPLING         0u
+#define JPEG_420_SUBSAMPLING         1u
+#define JPEG_422_SUBSAMPLING         2u
 #define QSPI_DDR_HHC_ANALOG_DELAY    0u
 #define QSPI_DDR_HHC_HALF_CLK_DELAY  1u
 #define QSPI_MATCH_MODE_AND          0u
@@ -248,9 +250,9 @@ static inline HAL_StatusTypeDef HAL_I2S_DMAStop(I2S_HandleTypeDef *h) { (void)h;
 #define JPEG_CHROMA_SAMPLING_420     0u
 #define JPEG_CHROMA_SAMPLING_422     1u
 #define JPEG_CHROMA_SAMPLING_444     2u
-#define JPEG_YCBCR_COLORSPACE        0u
-#define JPEG_GRAYSCALE_COLORSPACE    1u
-#define JPEG_CMYK_COLORSPACE         2u
+#define JPEG_GRAYSCALE_COLORSPACE    0x00u
+#define JPEG_YCBCR_COLORSPACE        0x10u
+#define JPEG_CMYK_COLORSPACE         0x30u
 
 #define SPI_CFG1_TXDMAEN     (1u << 15)
 #define SPI_CFG1_RXDMAEN     (1u << 14)
@@ -352,11 +354,19 @@ static inline HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *h,
 
 static inline HAL_StatusTypeDef HAL_JPEG_ConfigEncoding(JPEG_HandleTypeDef *h,
     JPEG_ConfTypeDef *c) { (void)h; (void)c; return HAL_OK; }
+#ifdef FM_HALSTUB_JPEG_FAKE
+/* a test supplies the peripheral (test/hw_jpeg_host_test.c) */
+HAL_StatusTypeDef HAL_JPEG_GetInfo(JPEG_HandleTypeDef *h, JPEG_ConfTypeDef *c);
+HAL_StatusTypeDef HAL_JPEG_Decode(JPEG_HandleTypeDef *h, uint8_t *in,
+                                  uint32_t inlen, uint8_t *out,
+                                  uint32_t outlen, uint32_t t);
+#else
 static inline HAL_StatusTypeDef HAL_JPEG_GetInfo(JPEG_HandleTypeDef *h,
     JPEG_ConfTypeDef *c) { (void)h; (void)c; return HAL_OK; }
 static inline HAL_StatusTypeDef HAL_JPEG_Decode(JPEG_HandleTypeDef *h,
     uint8_t *in, uint32_t inlen, uint8_t *out, uint32_t outlen, uint32_t t)
 { (void)h; (void)in; (void)inlen; (void)out; (void)outlen; (void)t; return HAL_OK; }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* MPU — enough of it to syntax-check a board MPU_Config()             */

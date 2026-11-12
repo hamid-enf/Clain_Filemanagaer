@@ -55,44 +55,17 @@ static FM_Result sv_hw_mjpeg_decode(void *ctx, const void *compressed,
                                     size_t frame_cap)
 {
     JPEG_ConfTypeDef cfg;
-    FM_ImageInfo inf;
-    size_t ysz;
-    HAL_StatusTypeDef hs;
+    size_t ysz = 0;
     FM_Result r;
 
     (void)ctx;
-    if (si_hjpeg == NULL)
-    {
-        return FM_ERR_NOT_READY;
-    }
-    r = Image_ProbeJPEG(compressed, size, &inf);
+    /* the same sizing and the same header reading as a still picture:
+     * a 4:4:4 or 4:2:2 MJPEG frame gets the buffer it needs */
+    r = si_hw_jpeg_to_mcus((const uint8_t *)compressed, size, frame_cap, 0,
+                           &cfg, &ysz);
     if (r != FM_OK)
     {
         return r;
-    }
-    if ((size_t)inf.width * inf.height * 3u > frame_cap)
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    ysz = (size_t)inf.width * inf.height * 2u + 384u;
-    if (ysz > sizeof(si_hw_ycbcr))
-    {
-        return FM_ERR_TOO_LARGE;
-    }
-    hs = HAL_JPEG_Decode(si_hjpeg, (uint8_t *)(uintptr_t)compressed,
-                         (uint32_t)size, si_hw_ycbcr, (uint32_t)ysz,
-                         SIMPLE_IMAGE_HW_JPEG_TIMEOUT_MS);
-    if (hs != HAL_OK)
-    {
-        return FM_ERR_IO;
-    }
-    memset(&cfg, 0, sizeof(cfg));
-    if (HAL_JPEG_GetInfo(si_hjpeg, &cfg) != HAL_OK || cfg.ImageWidth == 0u)
-    {
-        cfg.ImageWidth = inf.width;
-        cfg.ImageHeight = inf.height;
-        cfg.ColorSpace = JPEG_YCBCR_COLORSPACE;
-        cfg.ChromaSubsampling = JPEG_420_SUBSAMPLING;
     }
     /* pump audio DMA once per frame even on the fast path */
     FM_Idle();

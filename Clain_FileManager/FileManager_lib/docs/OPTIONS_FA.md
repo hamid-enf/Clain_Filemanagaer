@@ -161,8 +161,8 @@ CubeIDE ببینید. ستون‌های RAM و SDRAM اندازهٔ آرایه�
 همان فایل، بخش‌های ۱ و ۴. این‌ها رفتار سخت‌افزار را عوض می‌کنند، نه حجم
 را؛ مقدارهای فعلی همان‌هایی هستند که روی برد شما کار کرده‌اند:
 
-`FM_CACHE` (on)، `FM_CACHE_SD` (OFF)، `FM_CACHE_LCD` / `_AUDIO` / `_JPEG` /
-`_DMA2D`، `FM_SD_DISKIO` (CUBEMX)، `FM_AUDIO_I2S_SHARED` (۱)،
+`FM_CACHE` (ON)، `FM_CACHE_SD` (OFF)، `FM_CACHE_LCD` / `_AUDIO` / `_JPEG` /
+`_DMA2D` (این چهار تا فعلاً رزروند و اثری ندارند)، `FM_SD_DISKIO` (CUBEMX)، `FM_AUDIO_I2S_SHARED` (۱)،
 `FM_QSPI_*`، و پوشه‌ها: `SIMPLE_VIDEO_FOLDER`، `SIMPLE_IMAGE_FOLDER`،
 `SIMPLE_AUDIO_FOLDER`.
 
@@ -174,7 +174,7 @@ CubeIDE ببینید. ستون‌های RAM و SDRAM اندازهٔ آرایه�
 | گزینه | پیش‌فرض | کار |
 |---|---|---|
 | `FM_AUDIO_ENC_OUT_BYTES` | 16384 | بافر خروجی انکودر صدا (از `FM_Alloc`، تا بسته‌شدن فایل) |
-| `FM_AUDIO_ENC_SYNC_BYTES` | 262144 | هر چند بایت یک‌بار طول‌های فایل صدا به‌روز و فایل روی کارت sync شود؛ فایلی که بسته نشده (قطع برق) تا همان نقطه پخش می‌شود. `0` = خاموش |
+| `FM_AUDIO_ENC_SYNC_BYTES` | 262144 | هر چند بایت یک‌بار طول‌های فایل صدا به‌روز و فایل روی کارت sync شود؛ فایلی که بسته نشده (قطع برق) تا همان نقطه پخش می‌شود. `0` = خاموش. به زمان: WAV استریوی ۴۴٫۱k ≈ ۱٫۵ ثانیه، ADPCM مونوی ۸k ≈ ۶۴ ثانیه؛ برای نرخ پایین کوچک‌ترش کنید |
 | `FM_FLAC_ENC_BLOCK` | 4096 | نمونه در هر بلوک FLAC؛ کوچک‌تر = RAM کمتر، فشرده‌سازی کمی کمتر |
 | `FM_AUDIO_CONVERT_SAMPLES` | 4096 | اندازهٔ بلوک `Audio_Convert` |
 | `FM_JPEG_QUALITY` | 85 | کیفیت `Image_Save("x.jpg")` |
