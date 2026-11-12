@@ -8840,8 +8840,8 @@ static void test_audio_dma_options(void)
      * so end + the next track's start are observed. */
     if (r == FM_OK)
     {
-        AudioDma_SetTrackStart(&x, audio_dma_test_track_start, NULL);
-        AudioDma_SetTrackEnd(&x, audio_dma_test_track_end, NULL);
+        AudioDma_SetTrackStartCallback(&x, audio_dma_test_track_start, NULL);
+        AudioDma_SetTrackEndCallback(&x, audio_dma_test_track_end, NULL);
         if (audio_dma_track.start_calls != 1u || audio_dma_track.start_path[0] == '\0')
         {
             r = FM_ERR_INTERNAL;

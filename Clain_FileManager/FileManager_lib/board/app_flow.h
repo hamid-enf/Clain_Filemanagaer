@@ -364,12 +364,11 @@ APP_STEP App_PlayersBegin(void)
     if (music_activated == 1)
     {
         app_banner("simple_audio");
+        Music_InstallTaps();        /* کالبک‌ها: یک‌بار، ماندگار */
         if (SimpleAudio_Begin() != FM_OK)
         {
             printf("SimpleAudio_Begin() != FM_OK \n");
         }
-        /* بعد از Begin: Begin حالت را پاک می‌کند و قلاب قبلی می‌افتد. */
-        Music_InstallTaps();
     }
 
     app_banner("SimpleImage_Begin");
@@ -453,6 +452,7 @@ APP_STEP App_MusicCommandPoll(void)
     if (c == 1u)
     {
         SimpleVideo_Stop();         /* I2S را آزاد می‌کند */
+        Music_InstallTaps();        /* نرمالایزر از صفر؛ کالبک‌ها سر جایشان */
         if (SimpleAudio_Begin() != FM_OK)
         {
             /* دابل-start: Begin وقتی پخش فعال است BUSY می‌دهد. پخش را
@@ -463,7 +463,6 @@ APP_STEP App_MusicCommandPoll(void)
                 printf("SimpleAudio_Begin() failed twice\n");
             }
         }
-        Music_InstallTaps();        /* بعد از هر Begin */
         tap_peak = 0;
         tap_calls = 0;
     }
@@ -513,7 +512,7 @@ APP_STEP App_VideoCommandPoll(void)
         SimpleVideo_SetPresent(App_LcdBlitVideo);
         SimpleVideo_SetOutputSize(320, 240);
         /* همان نرمالایزر موزیک (tap1) روی صدای ویدیو */
-        SimpleVideo_SetPrePcmTap(app_audio_pre_tap, NULL);
+        SimpleVideo_SetAudioDataCallback(app_audio_pre_tap, NULL);
         printf("SimpleVideo_Begin \n");
         app_video_begin();
     }

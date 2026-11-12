@@ -54,17 +54,17 @@ static FM_AudioTrackInfo stub_track_info;
 static FM_Bool stub_have_track;
 
 /* the extracted block references these; provide host-side fakes */
-static void SimpleAudio_SetPrePcmTap(TapFn fn, void *ctx)
+static void SimpleAudio_SetDataCallback(TapFn fn, void *ctx)
 { (void)ctx; stub_pre_tap = fn; }
-static void SimpleAudio_SetPcmTap(TapFn fn, void *ctx)
+static void SimpleAudio_SetMonitorCallback(TapFn fn, void *ctx)
 { (void)ctx; stub_post_tap = fn; }
 /* track lifecycle callbacks (this branch); record last values for assertions */
 typedef void (*StubTrackFn)(void *ctx, const char *path,
                             const FM_AudioInfo *info);
 static StubTrackFn stub_track_start_cb, stub_track_end_cb;
-static void SimpleAudio_SetTrackStart(StubTrackFn fn, void *ctx)
+static void SimpleAudio_SetTrackStartCallback(StubTrackFn fn, void *ctx)
 { (void)ctx; stub_track_start_cb = fn; }
-static void SimpleAudio_SetTrackEnd(StubTrackFn fn, void *ctx)
+static void SimpleAudio_SetTrackEndCallback(StubTrackFn fn, void *ctx)
 { (void)ctx; stub_track_end_cb = fn; }
 static FM_Bool SimpleAudio_IsRunning(void) { return stub_running; }
 static FM_Result SimpleAudio_RecStart(const char *dest, uint32_t rate,
@@ -102,8 +102,12 @@ static int      stub_img_begin_calls;
 static FM_Result stub_img_begin_ret = FM_OK;
 static FM_Result SimpleVideo_SetVolume(uint8_t pct)
 { stub_sv_volume = pct; stub_sv_volume_calls++; return FM_OK; }
-static void SimpleVideo_EnableAudio(uint8_t en)
-{ stub_sv_audio_en = en; stub_sv_audio_calls++; }
+static FM_Result SimpleVideo_SetAudioOutput(FM_AudioOutput out)
+{
+    stub_sv_audio_en = (out != FM_AUDIO_OUT_NONE) ? 1u : 0u;
+    stub_sv_audio_calls++;
+    return FM_OK;
+}
 static void SimpleVideo_SetPresent(SimpleVideo_PresentFn fn)
 { stub_sv_present = fn; stub_present_calls++; }
 static void SimpleImage_SetOutputSize(int w, int h) { (void)w; (void)h; }

@@ -1,0 +1,611 @@
+# FileManager — راهنمای کتابخانه
+
+کتابخانهٔ C برای STM32H7: فایل، حافظه، موزیک، ویدیو و تصویر، هر کدام با چند
+تابع ساده.
+
+| | |
+|---|---|
+| سخت‌افزار مرجع | STM32H743، کارت SD، فلش QSPI، SDRAM، خروجی I2S، TFT با SPI |
+| محیط | STM32CubeIDE (HAL) |
+| زبان | C11، بدون RTOS (حلقهٔ اصلی) |
+| آزمون | بیش از ۵۰۰ تست خودکار روی PC با `make check` |
+
+---
+
+## ۱. چه کارهایی می‌کند
+
+- **یک API برای همهٔ حافظه‌ها.** کارت SD (FAT32)، فلش QSPI، فلش SPI،
+  EEPROM و RAM disk. همان `File_...` روی همه کار می‌کند؛ فقط مسیر فرق دارد.
+- **فایل و پوشه.** خواندن، نوشتن، کپی، انتقال، تغییر نام، فهرست، کپی کل
+  پوشه از یک حافظه به حافظهٔ دیگر.
+- **متن، JSON، لاگر داده، نوشتن امن** در برابر قطع برق.
+- **موزیک.** WAV، MP3، FLAC، Ogg Vorbis و Opus روی I2S با DMA. بعدی، قبلی،
+  پرش، مکث، ولوم تا ۲۰۰٪، چهار حالت تکرار.
+- **ویدیو.** AVI، MP4 و MOV با MJPEG یا H.264، صدا و تصویر هماهنگ.
+- **تصویر.** BMP، JPEG و PNG. اسلایدشو، چرخش، برعکس، تغییر اندازه، افکت،
+  ذخیره.
+- **دادهٔ خام در دست شما.** نمونه‌های صدا و فریم‌های تصویر با یک کالبک به
+  برنامه می‌رسند، با پخش یا بدون پخش.
+- **USB.** کارت SD مثل یک فلش‌مموری روی کامپیوتر دیده می‌شود.
+- **فقط آنچه لازم دارید.** هر بخش با یک خط خاموش می‌شود و از فلش بیرون
+  می‌رود.
+
+---
+
+## ۲. شروع سریع
+
+### ۲.۱ جای فایل‌ها
+
+| پوشه | محتوا |
+|---|---|
+| `FileManager_lib/include` | هدرهای کتابخانه و تنظیمات (`fm_board_config.h`) |
+| `FileManager_lib/src`، `backends`، `third_party` | کد کتابخانه و کدک‌ها |
+| `FileManager_lib/top_api` | لایهٔ ساده: `simple_audio.h`، `simple_video.h`، `simple_image.h`، حافظه‌ها |
+| `FileManager_lib/board` | کد همین برد: نمایشگر، دستورهای UART، ترتیب اجرا |
+| `Core/Src/main.c` | ترتیب راه‌اندازی و حلقهٔ اصلی |
+
+هدرهای `top_api` فقط یک‌بار و فقط در `main.c` شامل می‌شوند (از راه
+`Core/Src/defines.h`).
+
+### ۲.۲ کمترین برنامه
+
+```c
+/* بعد از MX_..._Init ها */
+FM_Log_UseHalUart(&huart1);     /* لاگ روی UART */
+FM_SD_Hal_Attach(&hsd1);        /* درایور کارت SD */
+UsbSd_FatRoot();                /* "/" = کارت SD */
+FileManager_Init();             /* خود کتابخانه */
+
+File_WriteText("/hello.txt", "salam");
+
+SimpleAudio_Begin();            /* پخش پوشهٔ /music */
+
+while (1)
+{
+    SimpleAudio_Poll();         /* هر پلیر یک Poll در حلقه */
+}
+```
+
+### ۲.۳ سه قاعده
+
+1. **همهٔ توابع `FM_Result` برمی‌گردانند.** `FM_OK` (صفر) یعنی موفق؛ عدد
+   منفی یعنی خطا. متن خطا: `File_GetErrorString(r)`.
+2. **مسیرها با `/` شروع می‌شوند** و حافظه را مشخص می‌کنند: `/music/a.mp3`
+   روی SD، `/qspi/config.json` روی فلش QSPI.
+3. **پلیرها در حلقهٔ اصلی کار می‌کنند.** `Begin` یک‌بار، `Poll` در هر دور
+   حلقه. توابع کنترلی (Next، Pause، ...) فقط درخواست ثبت می‌کنند و از هر
+   جایی قابل صدا زدن‌اند.
+
+```c
+FM_Result r = File_WriteText("/a.txt", "x");
+if (r != FM_OK)
+{
+    printf("error: %s\n", File_GetErrorString(r));
+}
+```
+
+---
+
+## ۳. روشن و خاموش کردن بخش‌ها
+
+همه در یک فایل: **`include/fm_board_config.h`**، بلوک «قابلیت‌ها» در ابتدای
+فایل. هر خط با `//` شروع شده است:
+
+```c
+//#define FM_USE_OPUS  0      /* روشن (پیش‌فرض) */
+#define FM_USE_OPUS  0        /* خاموش: «//» را بردارید */
+```
+
+بعد از تغییر: **Clean** و **Build**.
+
+| خط | چه چیزی خاموش می‌شود | فلش آزادشده (تقریبی) |
+|---|---|---:|
+| `FM_USE_AUDIO 0` | کل صدا | ۲۹۱ KB |
+| `FM_USE_VIDEO 0` | کل ویدیو | ۱۵۱ KB |
+| `FM_USE_IMAGE 0` | کل تصویر | ۳۱ KB |
+| `FM_USE_OPUS 0` | Opus | ۱۶۰ KB |
+| `FM_USE_H264 0` | H.264 | ۸۱ KB |
+| `FM_USE_VORBIS 0` | Ogg Vorbis | ۴۴ KB |
+| `FM_USE_FLAC 0` | FLAC | ۳۷ KB |
+| `FM_USE_MP3 0` | MP3 | ۳۵ KB |
+| `FM_USE_JSON 0` | JSON | ۱۴ KB |
+| `FM_USE_PNG 0` / `FM_USE_JPEG 0` | PNG / JPEG | ۱۰ KB هر کدام |
+| `FM_USE_DATA_LOGGER 0` | لاگر داده | ۸ KB |
+| `FM_USE_TEXT 0` | ویرایش خط‌به‌خط متن | ۴ KB |
+| `FM_USE_SAFE_WRITE 0` | نوشتن امن | ۲ KB |
+
+بخش خاموش کامپایل نمی‌شود. با خاموش کردن صدا، ویدیو یا تصویر، `main.c`
+بدون تغییر ساخته می‌شود؛ توابع `SimpleVideo_...` در این حالت
+`FM_ERR_UNSUPPORTED` برمی‌گردانند.
+
+اجرای دموها و پلیرها با خط‌های `App_...` در `main.c` و پرچم‌های
+`Core/Src/defines.h` کنترل می‌شود. جزئیات کامل، اندازهٔ بافرها و کش:
+[`OPTIONS_FA.md`](OPTIONS_FA.md).
+
+---
+
+## ۴. حافظه‌ها
+
+| حافظه | مسیر | راه‌اندازی | پایان |
+|---|---|---|---|
+| کارت SD (FAT32) | `/` | `UsbSd_FatRoot()` | – |
+| فلش QSPI (W25Q...) | `/qspi` | `QspiFlash_Begin()` | `QspiFlash_End()` |
+| فلش SPI | `/flash` | `SpiFlash_Begin(...)` | `SpiFlash_End()` |
+| EEPROM روی I2C | آدرس بایت | `EepromSimple_Begin(...)` | `EepromSimple_End()` |
+
+مدل فلش از روی JEDEC ID خودکار شناخته می‌شود.
+
+**کارت SD روی کامپیوتر (USB):**
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `UsbSd_ShowToPc()` | کارت را به کامپیوتر می‌دهد | – | کارت از دست برنامه خارج می‌شود |
+| `UsbSd_TakeBack()` | کارت را پس می‌گیرد و مونت می‌کند | – | `/` دوباره در دسترس |
+| `UsbSd_IsWithPc()` | کارت الان دست کامپیوتر است؟ | – | `FM_TRUE` / `FM_FALSE` |
+| `UsbSd_Poll()` | سرویس USB | در حلقهٔ اصلی | – |
+| `UsbSd_CopyFromQspi(src, dst)` | یک فایل را از QSPI به SD می‌آورد | مسیر روی `/qspi` | فایل روی SD |
+
+قبل از `UsbSd_ShowToPc()` پخش را متوقف کنید؛ قبل از `UsbSd_TakeBack()` در
+ویندوز Eject بزنید.
+
+**EEPROM** (بعد از `EepromSimple_Begin`، شیء آماده `g_ee` است):
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `EEPROM_Read(&g_ee, addr, buf, len)` | خواندن | آدرس در EEPROM | `buf` |
+| `EEPROM_Write(&g_ee, addr, buf, len)` | نوشتن | `buf` | EEPROM |
+| `EEPROM_Update(&g_ee, addr, buf, len)` | فقط بایت‌های عوض‌شده را می‌نویسد (عمر بیشتر) | `buf` | EEPROM |
+
+---
+
+## ۵. فایل و پوشه
+
+### ۵.۱ یک‌خطی‌ها (بدون باز و بسته کردن)
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `File_WriteText(path, text)` | فایل را با متن می‌سازد یا جایگزین می‌کند | رشته | فایل |
+| `File_AppendText(path, text)` | متن را به آخر فایل اضافه می‌کند | رشته | فایل |
+| `File_ReadText(path, buf, size, &n)` | کل فایل را به‌صورت رشته می‌خواند | فایل | `buf` |
+| `File_WriteAll(path, data, size)` | دادهٔ باینری را می‌نویسد | بافر | فایل |
+| `File_AppendAll(path, data, size)` | دادهٔ باینری را اضافه می‌کند | بافر | فایل |
+| `File_ReadAll(path, buf, size, &n)` | کل فایل را می‌خواند | فایل | `buf` |
+| `File_Copy(src, dst, NULL, NULL)` | کپی، حتی بین دو حافظه | فایل مبدأ | فایل مقصد |
+| `File_Move(src, dst, NULL, NULL)` | انتقال | فایل مبدأ | فایل مقصد |
+| `File_Rename(old, new)` | تغییر نام | – | – |
+| `File_Delete(path)` | حذف | – | – |
+| `File_Exists(path, &yes)` | هست یا نه | – | `yes` |
+| `File_SizeOf(path, &size)` | اندازه به بایت | – | `size` |
+
+```c
+char text[64];
+size_t n;
+
+File_WriteText("/note.txt", "line 1\n");
+File_AppendText("/note.txt", "line 2\n");
+File_ReadText("/note.txt", text, sizeof(text), &n);
+File_Copy("/note.txt", "/qspi/note.txt", NULL, NULL);   /* SD -> QSPI */
+```
+
+### ۵.۲ کار با دستهٔ فایل (فایل بزرگ، تکه‌تکه)
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `File_Open(path, mode)` | باز می‌کند | مسیر + حالت | `FM_File *` (یا `NULL`) |
+| `File_Read(f, buf, len, &n)` | می‌خواند | فایل | `buf` |
+| `File_Write(f, buf, len, &n)` | می‌نویسد | `buf` | فایل |
+| `File_Seek(f, offset, origin)` | جابه‌جایی در فایل | – | – |
+| `File_Tell(f, &pos)` / `File_Size(f, &size)` | موقعیت / اندازه | – | عدد |
+| `File_Flush(f)` | داده را روی حافظه می‌نشاند | – | – |
+| `File_Close(f)` | می‌بندد | – | – |
+
+حالت‌ها: `FM_OPEN_READ`، `FM_OPEN_WRITE`، `FM_OPEN_CREATE`،
+`FM_OPEN_APPEND`، `FM_OPEN_TRUNCATE` (با `|` ترکیب می‌شوند).
+
+```c
+uint8_t  block[512];
+uint32_t n;
+FM_File *f = File_Open("/data.bin", FM_OPEN_READ);
+
+if (f != NULL)
+{
+    while (File_Read(f, block, sizeof(block), &n) == FM_OK && n > 0)
+    {
+        /* block[0..n) */
+    }
+    File_Close(f);
+}
+```
+
+### ۵.۳ پوشه
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `Directory_Create(path)` | پوشه می‌سازد (با پوشه‌های میانی) | – | – |
+| `Directory_Delete(path)` | پوشهٔ خالی را حذف می‌کند | – | – |
+| `Directory_DeleteRecursive(path)` | پوشه و هرچه در آن است | – | – |
+| `Directory_Exists(path, &yes)` | هست یا نه | – | `yes` |
+| `Directory_List(path, filter, cb, user)` | برای هر مورد `cb` را صدا می‌زند | پوشه | کالبک شما |
+| `Directory_Count(path, type, &count)` | تعداد موارد | پوشه | `count` |
+| `Directory_Size(path, &bytes)` | حجم کل | پوشه | `bytes` |
+| `Directory_Copy(src, dst, NULL, NULL)` | کپی کل پوشه، حتی بین دو حافظه | پوشهٔ مبدأ | پوشهٔ مقصد |
+| `Directory_Move(src, dst, NULL, NULL)` | انتقال کل پوشه | پوشهٔ مبدأ | پوشهٔ مقصد |
+
+```c
+static FM_Result show(const FM_FileInfo *info, void *user)
+{
+    (void)user;
+    printf("%s  %lu bytes\n", info->name, (unsigned long)info->size);
+    return FM_OK;                 /* FM_ERR_CANCELLED = کافی است */
+}
+
+Directory_List("/music", NULL, show, NULL);
+Directory_Copy("/qspi/project", "/backup/project", NULL, NULL);
+```
+
+---
+
+## ۶. متن، JSON، لاگر، نوشتن امن
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `Text_AppendLine(path, line)` | یک خط به آخر فایل | رشته | فایل |
+| `Text_ReadLine(f, line, size, &n)` | خط بعدی فایلِ باز | فایل | `line` |
+| `Text_CountLines(path, &count)` | تعداد خط‌ها | فایل | `count` |
+| `Text_Find(path, text, &line)` | اولین خطی که متن را دارد | فایل | شمارهٔ خط |
+| `Text_Replace(path, old, new)` | جایگزینی متن در کل فایل | فایل | همان فایل |
+| `Text_InsertLine(path, at, line)` / `Text_DeleteLine(path, at)` | افزودن / حذف یک خط | فایل | همان فایل |
+| `Json_LoadFile(path, &doc, text, size, tokens, size)` | فایل JSON را باز می‌کند | فایل | `doc` |
+| `Json_ReadInt / ReadFloat / ReadBool(&doc, key, &out)` | مقدار یک کلید | `doc` | `out` |
+| `Json_ReadString(&doc, key, out, size)` | مقدار متنی یک کلید | `doc` | `out` |
+| `JsonWriter_...` | JSON می‌سازد | مقدارها | بافر متن |
+| `Logger_Init / Start / Write / Stop` | لاگر CSV با چرخش فایل | آرایهٔ `float` | فایل‌های پوشهٔ لاگ |
+| `File_SafeReplace(path, data, size)` | جایگزینی امن: با قطع برق، یا فایل قدیم می‌ماند یا جدید | بافر | فایل |
+| `File_Recover(path)` | بعد از قطع برق، فایل موقتِ جامانده را پاک می‌کند | – | – |
+
+```c
+/* خواندن تنظیمات */
+FM_Json  doc;
+char     text[256];
+uint32_t tokens[FM_JSON_TOKEN_BUFFER_SIZE / 4];
+int32_t  baud;
+
+Json_LoadFile("/config.json", &doc, text, sizeof(text), tokens, sizeof(tokens));
+Json_ReadInt(&doc, "baudrate", &baud);
+```
+
+```c
+/* لاگ سه سنسور */
+FM_Logger lg;
+float     v[3] = { 23.5f, 24.1f, 22.8f };
+
+Directory_Create("/logs");
+Logger_Init(&lg, "/logs", "sensor", FM_LOG_FORMAT_CSV, NULL);
+Logger_Start(&lg);
+Logger_Write(&lg, HAL_GetTick(), v, 3);
+Logger_Stop(&lg);
+```
+
+---
+
+## ۷. موزیک — `SimpleAudio`
+
+پوشهٔ پیش‌فرض: `/music`. فرمت‌ها: WAV، MP3، FLAC، Ogg Vorbis، Opus. فایل
+مونو خودکار استریو پخش می‌شود.
+
+### ۷.۱ کنترل پخش
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleAudio_Begin()` | پوشه را فهرست می‌کند و اولین ترک را پخش می‌کند | `/music` | I2S |
+| `SimpleAudio_Poll()` | پخش را زنده نگه می‌دارد | در حلقهٔ اصلی | – |
+| `SimpleAudio_Stop()` | توقف کامل | – | – |
+| `SimpleAudio_Start()` | اگر مکث است ادامه، اگر متوقف است شروع | – | – |
+| `SimpleAudio_Play(path)` | یک فایل مشخص | مسیر فایل | I2S |
+| `SimpleAudio_Next()` / `Prev()` | ترک بعدی / قبلی | – | – |
+| `SimpleAudio_Pause()` / `Resume()` / `TogglePause()` | مکث / ادامه | – | – |
+| `SimpleAudio_SeekTo(sec)` / `SeekBy(sec)` | پرش به ثانیه / جلو و عقب | ثانیه | – |
+| `SimpleAudio_SetVolume(pct)` / `GetVolume()` | ولوم ۰ تا ۲۰۰ (۱۰۰ = بدون تغییر) | درصد | – |
+| `SimpleAudio_SetPlayMode(mode)` / `GetPlayMode()` | رفتار آخر ترک | جدول ۷.۴ | – |
+| `SimpleAudio_IsRunning()` / `IsPaused()` | وضعیت | – | `FM_TRUE` / `FM_FALSE` |
+| `SimpleAudio_Info(&info)` | نام، کدک، نرخ، طول، موقعیت، ولوم، حالت | – | `info` |
+
+```c
+SimpleAudio_SetVolume(80);
+SimpleAudio_Begin();
+
+while (1)
+{
+    SimpleAudio_Poll();
+    if (key_next())  SimpleAudio_Next();
+    if (key_pause()) SimpleAudio_TogglePause();
+}
+```
+
+### ۷.۲ صدا کجا برود؟
+
+```
+فایل → دیکد → [کالبک داده] → ولوم → [کالبک مانیتور] → I2S (بلندگو)
+```
+
+یک تابع مسیر را تعیین می‌کند:
+
+| دستور | بلندگو | کالبک‌ها | کاربرد |
+|---|:---:|:---:|---|
+| `SimpleAudio_SetOutput(FM_AUDIO_OUT_SPEAKER)` | ✔ | ✘ | فقط پخش |
+| `SimpleAudio_SetOutput(FM_AUDIO_OUT_CALLBACK)` | ✘ | ✔ | فقط محاسبه روی داده، بدون صدا |
+| `SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH)` | ✔ | ✔ | پخش و محاسبه با هم (پیش‌فرض) |
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleAudio_SetDataCallback(fn, ctx)` | دادهٔ دیکدشده را قبل از ولوم می‌دهد؛ تغییر شما شنیده می‌شود | دیکدر | تابع شما، بعد بلندگو |
+| `SimpleAudio_SetMonitorCallback(fn, ctx)` | همان چیزی که به بلندگو می‌رود (بعد از ولوم) | خروجی نهایی | تابع شما |
+| `SimpleAudio_SetTrackStartCallback(fn, ctx)` | شروع هر ترک را خبر می‌دهد | – | مسیر + مشخصات ترک |
+| `SimpleAudio_SetTrackEndCallback(fn, ctx)` | پایان هر ترک را خبر می‌دهد | – | مسیر ترک |
+
+- همهٔ این تنظیم‌ها **ماندگارند**: یک‌بار، قبل یا بعد از `Begin`. با
+  `Stop` و `Begin` دوباره پاک نمی‌شوند.
+- `NULL` به‌جای `fn` یعنی برداشتن کالبک.
+- در حالت «فقط کالبک» داده با همان سرعت واقعی پخش می‌رسد.
+- کالبک داده و مانیتور باید **کوتاه** باشند: فقط محاسبه یا کپی. داخلشان
+  فایل باز نکنید و `printf` نزنید؛ صدا تق‌تق می‌کند.
+
+```c
+/* بلندترین نمونه را پیدا کن؛ صدا هم پخش شود */
+static int16_t peak;
+
+static void my_data(void *ctx, int16_t *pcm, size_t samples,
+                    uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)rate; (void)channels;
+    for (size_t i = 0; i < samples; i++)       /* L,R,L,R,... */
+    {
+        if (pcm[i] > peak) peak = pcm[i];
+    }
+}
+
+SimpleAudio_SetDataCallback(my_data, NULL);
+SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);      /* یا _CALLBACK: بدون صدا */
+SimpleAudio_Begin();
+```
+
+### ۷.۳ خواندن و ضبط
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleAudio_DataRead(buf, frames, &n)` | نمونهٔ استریو را مستقیم می‌خواند | ترکِ در حال پخش | `buf` |
+| `SimpleAudio_DataReadMono(buf, n, &got)` | همان، مونو | ترکِ در حال پخش | `buf` |
+| `SimpleAudio_RecStart(dest, rate, ch)` | فایل WAV باز می‌کند | پوشه یا مسیر `.wav` | فایل |
+| `SimpleAudio_RecWrite(pcm, frames)` | نمونه اضافه می‌کند | بافر شما | فایل |
+| `SimpleAudio_RecStop()` | فایل را می‌بندد | – | WAV کامل |
+| `SimpleAudio_RecPath()` | مسیر فایل ضبط‌شده | – | رشته |
+
+`DataRead` از همان ترکِ در حال پخش برمی‌دارد: آنچه بخوانید دیگر پخش
+نمی‌شود. برای دادهٔ هم‌زمان با پخش، کالبک بخش ۷.۲ را استفاده کنید.
+
+### ۷.۴ حالت‌های پخش (مشترک با ویدیو)
+
+| مقدار | آخر ترک چه می‌شود |
+|---|---|
+| `FM_PLAY_MODE_STOP` | توقف |
+| `FM_PLAY_MODE_NEXT` | بعدی؛ آخر فهرست توقف |
+| `FM_PLAY_MODE_REPEAT_ONE` | همان ترک دوباره |
+| `FM_PLAY_MODE_REPEAT_ALL` | بعدی؛ آخر فهرست برمی‌گردد به اول |
+
+پیش‌فرض موزیک `REPEAT_ALL` و پیش‌فرض ویدیو `STOP` است.
+
+---
+
+## ۸. ویدیو — `SimpleVideo`
+
+پوشهٔ پیش‌فرض: `/videos`. فرمت‌ها: AVI، MP4 و MOV با MJPEG یا H.264
+Baseline. خروجی تصویر تابعی است که شما می‌دهید (نمایشگر مال برنامه است).
+
+### ۸.۱ کنترل پخش
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleVideo_SetPresent(fn)` | تابع نمایش را معرفی می‌کند | – | هر فریم به `fn` |
+| `SimpleVideo_SetOutputSize(w, h)` | اندازهٔ خروجی (`0,0` = اندازهٔ فایل) | – | – |
+| `SimpleVideo_SetOutputFormat(fmt)` | فرمت پیکسل (پیش‌فرض RGB565) | – | – |
+| `SimpleVideo_Begin()` | پوشه را فهرست می‌کند | `/videos` | – |
+| `SimpleVideo_Start()` | پخش مورد فعلی را شروع می‌کند | – | نمایشگر + I2S |
+| `SimpleVideo_Poll()` | دیکد و نمایش | در حلقهٔ اصلی | – |
+| `SimpleVideo_Stop()` | توقف کامل | – | – |
+| `SimpleVideo_Play(path)` | یک فایل مشخص | مسیر فایل | نمایشگر + I2S |
+| `SimpleVideo_Next()` / `Prev()` | بعدی / قبلی | – | – |
+| `SimpleVideo_Pause()` / `Resume()` / `TogglePause()` | مکث / ادامه | – | – |
+| `SimpleVideo_SeekTo(sec)` / `SeekBy(sec)` | پرش | ثانیه | – |
+| `SimpleVideo_SetVolume(pct)` / `GetVolume()` | ولوم ۰ تا ۲۰۰ | درصد | – |
+| `SimpleVideo_SetPlayMode(mode)` / `GetPlayMode()` | رفتار آخر ویدیو | جدول ۷.۴ | – |
+| `SimpleVideo_SetAutoPlay(1)` | `Begin` خودش پخش را شروع کند و پوشه تکرار شود | – | – |
+| `SimpleVideo_IsRunning()` / `IsPaused()` | وضعیت | – | `FM_TRUE` / `FM_FALSE` |
+| `SimpleVideo_Info(&info)` | نام، ابعاد، fps، موقعیت، ولوم | – | `info` |
+
+```c
+static void lcd_show(const void *px, uint16_t w, uint16_t h,
+                     FM_PixelFormat fmt, size_t bytes)
+{
+    /* px را به نمایشگر بفرست */
+}
+
+SimpleVideo_SetPresent(lcd_show);
+SimpleVideo_SetOutputSize(320, 240);
+SimpleVideo_Begin();
+SimpleVideo_Start();
+
+while (1)
+{
+    SimpleVideo_Poll();
+}
+```
+
+### ۸.۲ صدای ویدیو کجا برود؟
+
+همان مدل موزیک، با همان نوع کالبک (یک تابع را می‌توان به هر دو داد):
+
+| دستور | بلندگو | کالبک‌ها | توضیح |
+|---|:---:|:---:|---|
+| `SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_NONE)` | ✘ | ✘ | صدا اصلاً خوانده نمی‌شود (فقط تصویر، سبک‌تر) |
+| `SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_SPEAKER)` | ✔ | ✘ | فقط پخش |
+| `SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_CALLBACK)` | ✘ | ✔ | فقط محاسبه |
+| `SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH)` | ✔ | ✔ | هر دو (پیش‌فرض) |
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleVideo_SetAudioDataCallback(fn, ctx)` | صدای ویدیو قبل از ولوم | ترک صدای ویدیو | تابع شما، بعد بلندگو |
+| `SimpleVideo_SetAudioMonitorCallback(fn, ctx)` | صدای ویدیو بعد از ولوم | خروجی نهایی | تابع شما |
+| `SimpleVideo_GetAudioInfo(&info)` | نرخ، کانال و کدک صدای ویدیو | – | `info` |
+
+`NONE` از ویدیوی بعدی کامل اثر می‌کند (ترک صدا هنگام شروع هر ویدیو باز
+می‌شود)؛ روی ویدیوی در حال پخش بلافاصله ساکت می‌کند.
+
+### ۸.۳ تصویر در دست شما
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleVideo_SetFrameCallback(fn, ctx)` | هر فریم دیکدشده را می‌دهد، حتی بدون نمایشگر | دیکدر | تابع شما |
+| `SimpleVideo_SetTrackStartCallback(fn, ctx)` | شروع هر ویدیو | – | مسیر، ابعاد، fps |
+| `SimpleVideo_SetTrackEndCallback(fn, ctx)` | پایان هر ویدیو | – | مسیر |
+| `SimpleVideo_GetFrame(&w, &h)` | آخرین فریم به‌صورت RGB888 | – | اشاره‌گر به پیکسل‌ها |
+| `SimpleVideo_SaveFrame(path)` | آخرین فریم را عکس می‌کند (`NULL` = BMP شماره‌دار در `/photos`) | فریم فعلی | فایل BMP / PNG / JPEG |
+
+```c
+/* فقط داده: نه نمایش، نه صدا */
+SimpleVideo_SetPresent(NULL);
+SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_NONE);
+SimpleVideo_SetFrameCallback(my_frame, NULL);
+SimpleVideo_Begin();
+SimpleVideo_Start();
+```
+
+---
+
+## ۹. تصویر — `SimpleImage`
+
+پوشهٔ پیش‌فرض: `/photos`. خواندن: BMP، JPEG، PNG (از روی محتوا، نه پسوند).
+عکس بزرگ‌تر از بافر خودکار کوچک می‌شود.
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleImage_SetPresent(fn)` | تابع نمایش را معرفی می‌کند | – | هر عکس به `fn` |
+| `SimpleImage_SetOutputSize(w, h)` | اندازهٔ خروجی | – | – |
+| `SimpleImage_SetFormat(fmt)` | فرمت پیکسل (پیش‌فرض RGB565) | – | – |
+| `SimpleImage_Begin()` | پوشه را فهرست و اولین عکس را نشان می‌دهد | `/photos` | نمایشگر |
+| `SimpleImage_Poll()` | اجرای درخواست‌ها و اسلایدشو | در حلقهٔ اصلی | – |
+| `SimpleImage_Stop()` | پایان | – | – |
+| `SimpleImage_Show(path)` | یک عکس مشخص | مسیر فایل | نمایشگر |
+| `SimpleImage_Next()` / `Prev()` | عکس بعدی / قبلی | – | نمایشگر |
+| `SimpleImage_SetSlideshow(ms)` | هر `ms` میلی‌ثانیه عکس بعدی (`0` = خاموش)؛ بعد از `Begin` | – | – |
+| `SimpleImage_Rotate(deg)` | چرخش ۹۰ / ۱۸۰ / ۲۷۰ | عکس فعلی | نمایشگر |
+| `SimpleImage_FlipH()` / `FlipV()` | برعکس افقی / عمودی | عکس فعلی | نمایشگر |
+| `SimpleImage_Resize(w, h)` | تغییر اندازه | عکس فعلی | نمایشگر |
+| `SimpleImage_Effect(effect, amount)` | نگاتیو، سیاه‌وسفید، سپیا، روشنایی، کنتراست | عکس فعلی | نمایشگر |
+| `SimpleImage_Save(path)` | عکس فعلی را ذخیره می‌کند (فرمت از پسوند) | عکس فعلی | فایل BMP / PNG / JPEG |
+| `SimpleImage_Data(&w, &h, ...)` | پیکسل‌های عکس فعلی | – | اشاره‌گر به پیکسل‌ها |
+| `SimpleImage_Info(&info)` | نام، ابعاد، فرمت، شمارهٔ عکس | – | `info` |
+
+```c
+SimpleImage_SetPresent(lcd_show);
+SimpleImage_SetOutputSize(320, 240);
+SimpleImage_Begin();
+SimpleImage_SetSlideshow(3000);          /* هر ۳ ثانیه؛ بعد از Begin */
+
+while (1)
+{
+    SimpleImage_Poll();
+    if (key_rotate()) SimpleImage_Rotate(90);
+}
+```
+
+---
+
+## ۱۰. کار مستقیم با فایل رسانه (بدون پلیر)
+
+وقتی فقط داده می‌خواهید و پخش لازم نیست.
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `Audio_Open(path, &a)` / `Audio_Close(&a)` | فایل صدا را باز / بسته می‌کند | فایل | `a` |
+| `Audio_GetInfo(&a, &info)` | کدک، نرخ، کانال، طول | `a` | `info` |
+| `Audio_ReadStereo(&a, buf, frames, &n)` | نمونهٔ استریو | فایل | `buf` |
+| `Audio_ReadMono(&a, buf, count, &n)` | نمونهٔ مونو | فایل | `buf` |
+| `Audio_Seek(&a, sec)` | پرش به ثانیه | – | – |
+| `AudioWriter_Create / Write / Close` | نوشتن WAV | بافر | فایل WAV |
+| `Image_Load(path, &img, buf, cap)` | عکس را دیکد می‌کند | فایل | پیکسل در `buf` |
+| `Image_Save(path, &img)` | عکس را ذخیره می‌کند | `img` | فایل |
+| `Image_ResizeFile(src, dst, w, h, mode)` | فایل عکس را با اندازهٔ جدید می‌سازد | فایل | فایل |
+| `Video_Open(path, &v)` / `Video_Close(&v)` | فایل ویدیو را باز / بسته می‌کند | فایل | `v` |
+| `Video_GetInfo(&v, &info)` | ابعاد، fps، تعداد فریم | `v` | `info` |
+| `Video_DecodeFrame(&v, buf, cap)` | فریم بعدی را دیکد می‌کند | فایل | پیکسل در `buf` |
+
+```c
+FM_Audio a;
+int16_t  pcm[2 * 256];
+size_t   n;
+
+if (Audio_Open("/music/a.mp3", &a) == FM_OK)
+{
+    while (Audio_ReadStereo(&a, pcm, 256, &n) == FM_OK && n > 0)
+    {
+        /* n فریم استریو در pcm */
+    }
+    Audio_Close(&a);
+}
+```
+
+---
+
+## ۱۱. موزیک و ویدیو کنار هم
+
+| کار | موزیک | ویدیو |
+|---|---|---|
+| شروع / حلقه / توقف | `Begin` `Poll` `Stop` `Start` | `Begin` `Poll` `Stop` `Start` |
+| فایل مشخص، بعدی، قبلی | `Play` `Next` `Prev` | `Play` `Next` `Prev` |
+| مکث | `Pause` `Resume` `TogglePause` | `Pause` `Resume` `TogglePause` |
+| پرش | `SeekTo` `SeekBy` | `SeekTo` `SeekBy` |
+| ولوم ۰ تا ۲۰۰ | `SetVolume` `GetVolume` | `SetVolume` `GetVolume` |
+| آخر فایل | `SetPlayMode` `GetPlayMode` | `SetPlayMode` `GetPlayMode` |
+| وضعیت | `IsRunning` `IsPaused` `Info` | `IsRunning` `IsPaused` `Info` |
+| مسیر صدا | `SetOutput` `GetOutput` | `SetAudioOutput` `GetAudioOutput` |
+| دادهٔ صدا | `SetDataCallback` `SetMonitorCallback` | `SetAudioDataCallback` `SetAudioMonitorCallback` |
+| شروع و پایان | `SetTrackStartCallback` `SetTrackEndCallback` | `SetTrackStartCallback` `SetTrackEndCallback` |
+
+موزیک و ویدیو از یک خروجی I2S استفاده می‌کنند: هر کدام شروع شود، دیگری را
+متوقف کنید (`SimpleAudio_Stop()` قبل از `SimpleVideo_Begin()` و برعکس).
+
+---
+
+## ۱۲. خطاهای پرتکرار
+
+| کد | معنی | معمولاً یعنی |
+|---|---|---|
+| `FM_ERR_NOT_FOUND` (‎-3) | پیدا نشد | مسیر اشتباه یا پوشه خالی است |
+| `FM_ERR_BUSY` (‎-8) | مشغول | پلیر در حال کار است؛ اول `Stop` |
+| `FM_ERR_UNSUPPORTED` (‎-11) | پشتیبانی نمی‌شود | فرمت ناشناخته، یا بخش خاموش است |
+| `FM_ERR_NOT_MOUNTED` (‎-13) | حافظه مونت نیست | `UsbSd_FatRoot()` یا `QspiFlash_Begin()` صدا زده نشده |
+| `FM_ERR_NO_MEMORY` (‎-14) | جا نیست | فایل‌های بازمانده را ببندید؛ اندازهٔ بافرها در `fm_board_config.h` |
+| `FM_ERR_EOF` (‎-15) | آخر فایل | عادی است |
+
+---
+
+## ۱۳. محدودیت‌ها
+
+- H.264 فقط پروفایل Baseline و نرم‌افزاری است: حدود ۱ تا ۳ فریم در ثانیه.
+  برای ویدیوی روان MJPEG با ابعاد ۳۲۰×۲۴۰ بسازید.
+- JPEG نرم‌افزاری CMYK را باز نمی‌کند.
+- FLAC بالاتر از ۲۴ بیت و WAV بالای ۱۶ بیت پشتیبانی نمی‌شود.
+- AAC فقط با دیکدری که خودتان ثبت کنید پخش می‌شود.
+- پلیرها برای حلقهٔ اصلی نوشته شده‌اند؛ `Poll` را از وقفه صدا نزنید.
+
+---
+
+## ۱۴. سندهای دیگر
+
+| سند | موضوع |
+|---|---|
+| [`OPTIONS_FA.md`](OPTIONS_FA.md) | همهٔ گزینه‌ها، اندازهٔ بافرها، کش |
+| [`../board/README.md`](../board/README.md) | کد برد، دستورهای UART، تست‌ها |
+| [`DSP_PROCESSING_BUDGET.md`](DSP_PROCESSING_BUDGET.md) | زمان مجاز پردازش داخل کالبک‌ها |
+| [`OPUS_CUBEIDE.md`](OPUS_CUBEIDE.md) | ساخت Opus در CubeIDE |
+| [`../README.md`](../README.md) | مرجع کامل API (انگلیسی) |

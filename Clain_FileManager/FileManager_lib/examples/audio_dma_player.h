@@ -114,25 +114,22 @@ typedef struct
     AudioDma_CacheCleanFn clean_cache; /* optional if D-Cache is off */
 } AudioDma_Port;
 
-/* Live tap on the PCM that is about to be played.
+/* PCM callbacks (type FM_AudioDataFn, fm_player.h).
  *
- * Called from the refill path with exactly the samples that will reach
- * the speaker (after volume is applied), before the DMA sends them.
- * Use it to record while playing, drive a VU meter, run an FFT, or
- * apply an effect -- the buffer is writable, so edits are heard.
+ *   file -> decoder -> DATA callback -> volume -> MONITOR callback -> DMA
+ *
+ *   data     the decoded samples, before the volume; what it writes back
+ *            is what goes on (effect, equaliser, your own processing)
+ *   monitor  after the volume: exactly what the speaker gets (level
+ *            meter, recording)
+ *
+ * AudioDma_SetOutput() says where the sound goes: FM_AUDIO_OUT_SPEAKER
+ * skips both callbacks, FM_AUDIO_OUT_CALLBACK calls them and sends
+ * silence to the DMA, FM_AUDIO_OUT_BOTH (default) does both.
  *
  * `samples` counts int16_t channel samples, so a stereo frame is two.
- *
- * Treat it like an ISR: copy into your own ring buffer and return.
- * File I/O here will starve the DMA and click the audio.
- *
- * Deliberately NOT a field of AudioDma_Options: existing callers
- * declare that struct on the stack and assign only the fields they know
- * about, so a new member there would be read as garbage and called as a
- * function pointer.  Install it with AudioDma_SetPcmTap() instead. */
-typedef void (*AudioDma_PcmTapFn)(void *context, int16_t *pcm,
-                                      size_t samples, uint32_t sample_rate,
-                                      uint16_t channels);
+ * Treat a callback like an ISR: copy into your own buffer and return.
+ * File I/O here will starve the DMA and click the audio. */
 
 /* Track lifecycle callbacks: on_track_start fires once when a track begins
  * playing; on_track_end fires when that same track has finished (its data
@@ -140,8 +137,7 @@ typedef void (*AudioDma_PcmTapFn)(void *context, int16_t *pcm,
  * info so the application knows exactly which music/audio the DSP is (or
  * was) processing. The end callback is called from the super-loop, NOT an
  * ISR, so light work (marking/flag) is fine. Install via
- * AudioDma_SetTrackStart/SetTrackEnd; keep them out of the Options
- * struct for the same reason as the PCM taps. */
+ * AudioDma_SetTrackStartCallback/SetTrackEndCallback. */
 typedef void (*AudioDma_TrackFn)(void *context, const char *path,
                                      const FM_AudioInfo *info);
 
@@ -153,6 +149,26 @@ typedef struct
     /* Initial gain, 0..32767 (32767 = 100% / unchanged). */
     int16_t volume;
 } AudioDma_Options;
+
+/* Everything the application chooses, in one place. Hand it to
+ * AudioDma_StartConfig() and the very first buffer already uses it —
+ * nothing has to be installed again after a start. Fill it with
+ * AudioDma_ConfigDefaults() first. */
+typedef struct
+{
+    FM_Bool        force_stereo;  /* mono files are played as L=R        */
+    int32_t        volume;        /* 0..65534; 32767 = 100 %, above = boost */
+    FM_PlayMode    play_mode;     /* what happens at the end of a track  */
+    FM_AudioOutput output;        /* speaker / callback / both           */
+    FM_AudioDataFn data_cb;       /* before the volume                   */
+    void          *data_ctx;
+    FM_AudioDataFn monitor_cb;    /* after the volume                    */
+    void          *monitor_ctx;
+    AudioDma_TrackFn track_start_cb;
+    void          *track_start_ctx;
+    AudioDma_TrackFn track_end_cb;
+    void          *track_end_ctx;
+} AudioDma_Config;
 
 typedef struct
 {
@@ -168,18 +184,23 @@ typedef struct
 
     /* Options (see AudioDma_Options): when force_stereo is set the
      * sink always receives interleaved stereo (mono sources are upmixed);
-     * volume is a 0..32767 gain applied to every sample during refill
-     * (32767 = unchanged). Both are applied on the next fill. */
+     * volume is a Q15 gain applied to every sample during refill
+     * (32767 = unchanged, up to 65534 = 200 % with saturation). Both are
+     * applied on the next fill. */
     FM_Bool force_stereo;
-    int16_t volume;
-    AudioDma_PcmTapFn pcm_tap;
+    int32_t volume;
+    /* Where the sound goes (speaker / callback / both). */
+    FM_AudioOutput output;
+    FM_AudioDataFn pcm_tap;
     void *pcm_tap_context;
-    /* Pre-gain tap: raw decoded PCM before volume, editable. Post (pcm_tap) is after volume. */
-    AudioDma_PcmTapFn pcm_tap_pre;
+    /* Data callback: decoded PCM before the volume, editable.  pcm_tap
+     * above is the monitor callback, after the volume. */
+    FM_AudioDataFn pcm_tap_pre;
     void *pcm_tap_pre_context;
 
     /* Track lifecycle callbacks (start = a track begins; end = it finishes).
-     * See AudioDma_SetTrackStart/SetTrackEnd. The end callback reports
+     * See AudioDma_SetTrackStartCallback/SetTrackEndCallback. The end
+     * callback reports
      * the SAME path/info that the start callback reported. */
     AudioDma_TrackFn on_track_start;
     void *track_start_context;
@@ -319,7 +340,8 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
         /* Pre-gain tap: raw decoded PCM, editable before volume/DSP.
          * It has to run here, above the gain: placed after it, as it
          * was, the "pre" tap saw the samples already scaled. */
-        if (state->pcm_tap_pre != NULL && filled > prev)
+        if (state->pcm_tap_pre != NULL && filled > prev &&
+            ((unsigned)state->output & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
         {
             state->pcm_tap_pre(state->pcm_tap_pre_context, dst + prev,
                                filled - prev, state->sample_rate,
@@ -327,7 +349,7 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
                                                    : state->channels);
         }
 
-        if (state->volume != (int16_t)0x7FFF)
+        if (state->volume != 0x7FFF)
         {
 #if defined(__ARM_ARCH_7EM__) || defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_FEATURE_DSP)
             /* SIMD fast path: dual 16-bit MAC via SMLAD, 2 samples per loop.
@@ -337,8 +359,8 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
             size_t i = prev;
             static uint32_t lfsr = 1u;
             for (; i + 1u < filled; i += 2u) {
-                int32_t a0 = (int32_t)dst[i] * (int32_t)state->volume;
-                int32_t a1 = (int32_t)dst[i+1] * (int32_t)state->volume;
+                int32_t a0 = (int32_t)dst[i] * state->volume;
+                int32_t a1 = (int32_t)dst[i+1] * state->volume;
                 a0 += 16384; a1 += 16384;
                 lfsr = lfsr * 1664525u + 1013904223u;
                 a0 += (int32_t)((lfsr >> 16) & 1u) - (int32_t)((lfsr >> 17) & 1u);
@@ -351,7 +373,7 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
             }
             for (; i < filled; i++)
             {
-                int32_t acc = (int32_t)dst[i] * (int32_t)state->volume;
+                int32_t acc = (int32_t)dst[i] * state->volume;
                 acc += 16384;
                 lfsr = lfsr * 1664525u + 1013904223u;
                 acc += (int32_t)((lfsr >> 16) & 1u) -
@@ -370,7 +392,7 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
 
             for (i = prev; i < filled; i++)
             {
-                int32_t acc = (int32_t)dst[i] * (int32_t)state->volume;
+                int32_t acc = (int32_t)dst[i] * state->volume;
 
                 acc += 16384;
                 lfsr = lfsr * 1664525u + 1013904223u;
@@ -393,12 +415,22 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
         /* Live tap: exactly what the speaker will get.  After the gain so
          * it matches what is heard, and before audio_dma_clean_half()
          * so a tap that edits the samples still reaches the DMA. */
-        if (state->pcm_tap != NULL && filled > prev)
+        if (state->pcm_tap != NULL && filled > prev &&
+            ((unsigned)state->output & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
         {
             state->pcm_tap(state->pcm_tap_context, dst + prev,
                            filled - prev, state->sample_rate,
                            state->force_stereo ? (uint16_t)2u
                                                : state->channels);
+        }
+
+        /* Callback-only (or no) output: the callbacks have had the data,
+         * the DMA plays silence.  The transfer keeps running, so the
+         * callbacks are still paced by the real sample clock. */
+        if (((unsigned)state->output & (unsigned)FM_AUDIO_OUT_SPEAKER) == 0u &&
+            filled > prev)
+        {
+            memset(dst + prev, 0, (filled - prev) * sizeof(int16_t));
         }
 
         if (r == FM_OK)
@@ -606,19 +638,32 @@ static inline FM_Result audio_dma_start_next(AudioDma *state)
     return audio_dma_play_from(state, first);
 }
 
-/* Build the playlist, open the first playable item, prefill both DMA halves,
- * then invoke port->start(). SD/FatFS must already be mounted.
- *
- * `options` may be NULL (native channels, full volume) or carry
- * force_stereo / initial volume. The state is reset, so set options here —
- * not on a previously used state. */
-static inline FM_Result AudioDma_StartEx(AudioDma *state,
+/* Defaults of a configuration: native channels, 100 %, loop the folder,
+ * speaker + callbacks, no callback installed. */
+static inline void AudioDma_ConfigDefaults(AudioDma_Config *config)
+{
+    if (config == NULL)
+    {
+        return;
+    }
+    memset(config, 0, sizeof(*config));
+    config->volume = 0x7FFF;
+    config->play_mode = FM_PLAY_MODE_REPEAT_ALL;
+    config->output = FM_AUDIO_OUT_BOTH;
+}
+
+/* Scan `folder` and start playing its first track with `config`.
+ * The state is reset first, then the whole configuration is applied
+ * before the first buffer is filled: callbacks see the first sample and
+ * the track-start callback reports the first track. `config` may be NULL
+ * (the defaults above). */
+static inline FM_Result AudioDma_StartConfig(AudioDma *state,
                                              const char *folder,
                                              const AudioDma_Port *port,
                                              void *port_context,
                                              int16_t *dma_buffer,
                                              size_t half_samples,
-                                             const AudioDma_Options *options)
+                                             const AudioDma_Config *config)
 {
     FM_Result r;
 
@@ -639,16 +684,35 @@ static inline FM_Result AudioDma_StartEx(AudioDma *state,
     state->half_samples = half_samples;
     state->volume = 0x7FFF;
     state->play_mode = FM_PLAY_MODE_REPEAT_ALL; /* پیش‌فرض: لوپ پوشه (قدیم) */
-    if (options != NULL)
+    state->output = FM_AUDIO_OUT_BOTH;
+    if (config != NULL)
     {
-        int16_t vol = options->volume; /* max 32767 by int16_t range */
+        int32_t vol = config->volume;
 
-        state->force_stereo = options->force_stereo;
         if (vol < 0)
         {
             vol = 0;
         }
+        if (vol > 65534)
+        {
+            vol = 65534;
+        }
+        state->force_stereo = config->force_stereo;
         state->volume = vol;
+        if ((int)config->play_mode >= (int)FM_PLAY_MODE_STOP &&
+            (int)config->play_mode <= (int)FM_PLAY_MODE_REPEAT_ALL)
+        {
+            state->play_mode = config->play_mode;
+        }
+        state->output = (FM_AudioOutput)((unsigned)config->output & 3u);
+        state->pcm_tap_pre = config->data_cb;
+        state->pcm_tap_pre_context = config->data_ctx;
+        state->pcm_tap = config->monitor_cb;
+        state->pcm_tap_context = config->monitor_ctx;
+        state->on_track_start = config->track_start_cb;
+        state->track_start_context = config->track_start_ctx;
+        state->on_track_end = config->track_end_cb;
+        state->track_end_context = config->track_end_ctx;
     }
 
     r = Player_Init(&state->player);
@@ -675,6 +739,29 @@ static inline FM_Result AudioDma_StartEx(AudioDma *state,
     return r;
 }
 
+/* The short form: `options` may be NULL (native channels, full volume) or
+ * carry force_stereo / initial volume. Everything else starts at its
+ * default and can be changed with the setters below. */
+static inline FM_Result AudioDma_StartEx(AudioDma *state,
+                                             const char *folder,
+                                             const AudioDma_Port *port,
+                                             void *port_context,
+                                             int16_t *dma_buffer,
+                                             size_t half_samples,
+                                             const AudioDma_Options *options)
+{
+    AudioDma_Config config;
+
+    AudioDma_ConfigDefaults(&config);
+    if (options != NULL)
+    {
+        config.force_stereo = options->force_stereo;
+        config.volume = (options->volume < 0) ? 0 : (int32_t)options->volume;
+    }
+    return AudioDma_StartConfig(state, folder, port, port_context,
+                                dma_buffer, half_samples, &config);
+}
+
 static inline FM_Result AudioDma_Start(AudioDma *state,
                                            const char *folder,
                                            const AudioDma_Port *port,
@@ -686,11 +773,42 @@ static inline FM_Result AudioDma_Start(AudioDma *state,
                                 dma_buffer, half_samples, NULL);
 }
 
-/* Install (or remove, with NULL) the live PCM tap.  Safe to call before
- * or during playback; takes effect on the next refill. */
-static inline void AudioDma_SetPcmTap(AudioDma *state,
-                                          AudioDma_PcmTapFn fn,
-                                          void *context)
+/* Where the sound goes: FM_AUDIO_OUT_SPEAKER / _CALLBACK / _BOTH (default).
+ * Safe before or during playback; takes effect on the next refill. */
+static inline void AudioDma_SetOutput(AudioDma *state, FM_AudioOutput output)
+{
+    if (state == NULL)
+    {
+        return;
+    }
+    state->output = (FM_AudioOutput)((unsigned)output & 3u);
+}
+
+static inline FM_AudioOutput AudioDma_GetOutput(const AudioDma *state)
+{
+    return (state == NULL) ? FM_AUDIO_OUT_NONE : state->output;
+}
+
+/* Install (or remove, with NULL) the data callback: decoded PCM before
+ * the volume, editable.  Safe to call before or during playback; takes
+ * effect on the next refill. */
+static inline void AudioDma_SetDataCallback(AudioDma *state,
+                                            FM_AudioDataFn fn,
+                                            void *context)
+{
+    if (state == NULL)
+    {
+        return;
+    }
+    state->pcm_tap_pre_context = context;
+    state->pcm_tap_pre = fn;  /* last, so context is valid when it fires */
+}
+
+/* Install (or remove, with NULL) the monitor callback: after the volume,
+ * exactly what the speaker gets. */
+static inline void AudioDma_SetMonitorCallback(AudioDma *state,
+                                               FM_AudioDataFn fn,
+                                               void *context)
 {
     if (state == NULL)
     {
@@ -698,22 +816,6 @@ static inline void AudioDma_SetPcmTap(AudioDma *state,
     }
     state->pcm_tap_context = context;
     state->pcm_tap = fn;      /* last, so context is valid when it fires */
-}
-
-static inline void AudioDma_SetPrePcmTap(AudioDma *state,
-                                             AudioDma_PcmTapFn fn,
-                                             void *context)
-{
-    if (state == NULL) return;
-    state->pcm_tap_pre_context = context;
-    state->pcm_tap_pre = fn;
-}
-
-static inline void AudioDma_SetPostPcmTap(AudioDma *state,
-                                              AudioDma_PcmTapFn fn,
-                                              void *context)
-{
-    AudioDma_SetPcmTap(state, fn, context);
 }
 
 /* Snapshot the current track (path + info) and fire the start callback. */
@@ -760,19 +862,23 @@ static inline void audio_dma_notify_track_end(AudioDma *state)
 
 /* Install the track-start callback. Fired once when a track begins playing
  * (on the super-loop). If a track is ALREADY playing when the hook is
- * installed (e.g. after SimpleAudio_Begin, which resets the player), the
- * current track is reported immediately so the DSP never misses it. */
-static inline void AudioDma_SetTrackStart(AudioDma *state,
-                                              AudioDma_TrackFn fn,
-                                              void *context)
+ * installed, the current track is reported immediately so the DSP never
+ * misses it. */
+static inline void AudioDma_SetTrackStartCallback(AudioDma *state,
+                                                  AudioDma_TrackFn fn,
+                                                  void *context)
 {
     if (state == NULL)
     {
         return;
     }
+    if (state->on_track_start == fn && state->track_start_context == context)
+    {
+        return;                 /* already installed: no second report */
+    }
     state->on_track_start = fn;
     state->track_start_context = context;
-    if (state->running)
+    if (state->running && fn != NULL)
     {
         audio_dma_notify_track_start(state);
     }
@@ -780,9 +886,9 @@ static inline void AudioDma_SetTrackStart(AudioDma *state,
 
 /* Install the track-end callback (fired when the current track has finished
  * playing, on the super-loop). `context` is passed to the callback. */
-static inline void AudioDma_SetTrackEnd(AudioDma *state,
-                                            AudioDma_TrackFn fn,
-                                            void *context)
+static inline void AudioDma_SetTrackEndCallback(AudioDma *state,
+                                                AudioDma_TrackFn fn,
+                                                void *context)
 {
     if (state == NULL)
     {
@@ -793,8 +899,9 @@ static inline void AudioDma_SetTrackEnd(AudioDma *state,
 }
 
 /* Change the software gain while running; takes effect on the next fill
- * (at most one half-buffer later). gain: 0..32767 (32767 = 100%). */
-static inline void AudioDma_SetVolume(AudioDma *state, int16_t gain)
+ * (at most one half-buffer later). gain: 0..65534 (32767 = 100 %,
+ * 65534 = 200 % with saturation). */
+static inline void AudioDma_SetVolume(AudioDma *state, int32_t gain)
 {
     if (state == NULL)
     {
@@ -804,7 +911,11 @@ static inline void AudioDma_SetVolume(AudioDma *state, int16_t gain)
     {
         gain = 0;
     }
-    state->volume = gain; /* max 32767 by int16_t range */
+    if (gain > 65534)
+    {
+        gain = 65534;
+    }
+    state->volume = gain;
 }
 
 /* Playback persistence: what happens at track end. */

@@ -1769,7 +1769,7 @@ static void av2_stream_cb(const int16_t *samples, size_t count, void *user)
     (void)samples; (void)count; (void)user;
 }
 
-/* ---- DMA example (F13, F25) ---- */
+/* ---- DMA example (F13, F25, F30..F33) ---- */
 static int16_t g_av2_tap_pre_first;
 static int16_t g_av2_tap_post_first;
 static int     g_av2_tap_pre_calls;
@@ -1779,6 +1779,25 @@ static void av2_tap_pre(void *ctx, int16_t *pcm, size_t samples,
 {
     (void)ctx; (void)rate; (void)channels;
     if (samples > 0u && g_av2_tap_pre_calls++ == 0) g_av2_tap_pre_first = pcm[0];
+}
+
+/* a data callback that makes the first sample loud (saturation test) */
+static void av2_tap_loud(void *ctx, int16_t *pcm, size_t samples,
+                         uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)rate; (void)channels;
+    if (samples > 1u) { pcm[0] = 30000; pcm[1] = -30000; }
+}
+
+static int  g_av2_track_starts;
+static char g_av2_track_path[64];
+static void av2_track_start(void *ctx, const char *path,
+                            const FM_AudioInfo *info)
+{
+    (void)ctx; (void)info;
+    g_av2_track_starts++;
+    (void)snprintf(g_av2_track_path, sizeof(g_av2_track_path), "%s",
+                   (path != NULL) ? path : "");
 }
 
 static void av2_tap_post(void *ctx, int16_t *pcm, size_t samples,
@@ -2928,8 +2947,8 @@ static void test_audit_v2_audio(void)
         if (r == FM_OK)
         {
             AudioDma_SetVolume(&x, 16383);
-            AudioDma_SetPrePcmTap(&x, av2_tap_pre, NULL);
-            AudioDma_SetPostPcmTap(&x, av2_tap_post, NULL);
+            AudioDma_SetDataCallback(&x, av2_tap_pre, NULL);
+            AudioDma_SetMonitorCallback(&x, av2_tap_post, NULL);
             AudioDma_HalfCallback(&x);          /* refill half 0 */
             r = AudioDma_Poll(&x);
         }
@@ -2939,6 +2958,136 @@ static void test_audit_v2_audio(void)
         AV2_RESULT(r == FM_OK && g_av2_tap_pre_first == 2048 &&
                    g_av2_tap_post_first >= 1022 && g_av2_tap_post_first <= 1025,
                    r, msg);
+        (void)AudioDma_Stop(&x);
+    }
+
+    TEST("F30: DMA player, a configuration is in place before the first buffer");
+    {
+        static AudioDma x;
+        static int16_t dma[2 * 256] __attribute__((aligned(32)));
+        AudioDma_Config cfg;
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        g_av2_tap_pre_calls = 0;
+        g_av2_tap_pre_first = -1;
+        g_av2_track_starts = 0;
+        g_av2_track_path[0] = '\0';
+        AudioDma_ConfigDefaults(&cfg);
+        cfg.data_cb = av2_tap_pre;
+        cfg.track_start_cb = av2_track_start;
+        cfg.play_mode = FM_PLAY_MODE_STOP;
+        if (r == FM_OK)
+        {
+            r = AudioDma_StartConfig(&x, "/av2dma", &audio_dma_test_port,
+                                     NULL, dma, 256, &cfg);
+        }
+        (void)snprintf(msg, sizeof(msg),
+                       "%d data calls, first %d, %d starts '%s', mode %d",
+                       g_av2_tap_pre_calls, g_av2_tap_pre_first,
+                       g_av2_track_starts, g_av2_track_path,
+                       (int)AudioDma_GetPlayMode(&x));
+        AV2_RESULT(r == FM_OK && g_av2_tap_pre_calls >= 1 &&
+                   g_av2_tap_pre_first == 0 && g_av2_track_starts == 1 &&
+                   strcmp(g_av2_track_path, "/av2dma/ramp.wav") == 0 &&
+                   AudioDma_GetPlayMode(&x) == FM_PLAY_MODE_STOP, r, msg);
+        /* the same callback again is not a second "start" */
+        AudioDma_SetTrackStartCallback(&x, av2_track_start, NULL);
+        TEST("F30: installing the same start callback again reports nothing");
+        (void)snprintf(msg, sizeof(msg), "%d starts", g_av2_track_starts);
+        AV2_RESULT(g_av2_track_starts == 1, FM_OK, msg);
+        (void)AudioDma_Stop(&x);
+    }
+
+    TEST("F31: DMA player, output = speaker does not call the callbacks");
+    {
+        static AudioDma x;
+        static int16_t dma[2 * 256] __attribute__((aligned(32)));
+        AudioDma_Config cfg;
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        g_av2_tap_pre_calls = 0;
+        memset(dma, 0x55, sizeof(dma));
+        AudioDma_ConfigDefaults(&cfg);
+        cfg.data_cb = av2_tap_pre;
+        cfg.monitor_cb = av2_tap_pre;
+        cfg.output = FM_AUDIO_OUT_SPEAKER;
+        if (r == FM_OK)
+        {
+            r = AudioDma_StartConfig(&x, "/av2dma", &audio_dma_test_port,
+                                     NULL, dma, 256, &cfg);
+        }
+        (void)snprintf(msg, sizeof(msg), "%d calls, dma[10] %d, dma[300] %d",
+                       g_av2_tap_pre_calls, dma[10], dma[300]);
+        AV2_RESULT(r == FM_OK && g_av2_tap_pre_calls == 0 && dma[10] == 40 &&
+                   dma[300] == 1200, r, msg);
+        (void)AudioDma_Stop(&x);
+    }
+
+    TEST("F32: DMA player, output = callback feeds the callback and plays silence");
+    {
+        static AudioDma x;
+        static int16_t dma[2 * 256] __attribute__((aligned(32)));
+        AudioDma_Config cfg;
+        int silent = 1;
+        size_t k;
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        g_av2_tap_pre_calls = 0;
+        g_av2_tap_pre_first = -1;
+        memset(dma, 0x55, sizeof(dma));
+        AudioDma_ConfigDefaults(&cfg);
+        cfg.data_cb = av2_tap_pre;
+        cfg.output = FM_AUDIO_OUT_CALLBACK;
+        if (r == FM_OK)
+        {
+            r = AudioDma_StartConfig(&x, "/av2dma", &audio_dma_test_port,
+                                     NULL, dma, 256, &cfg);
+        }
+        for (k = 0; k < 2u * 256u; k++)
+        {
+            if (dma[k] != 0) silent = 0;
+        }
+        (void)snprintf(msg, sizeof(msg), "%d calls, first %d, silent %d",
+                       g_av2_tap_pre_calls, g_av2_tap_pre_first, silent);
+        AV2_RESULT(r == FM_OK && g_av2_tap_pre_calls >= 1 &&
+                   g_av2_tap_pre_first == 0 && silent, r, msg);
+
+        TEST("F32: back to speaker + callback, the next half is audible");
+        if (r == FM_OK)
+        {
+            AudioDma_SetOutput(&x, FM_AUDIO_OUT_BOTH);
+            AudioDma_HalfCallback(&x);          /* refill half 0 */
+            r = AudioDma_Poll(&x);
+        }
+        (void)snprintf(msg, sizeof(msg), "dma[0] %d, output %d", dma[0],
+                       (int)AudioDma_GetOutput(&x));
+        AV2_RESULT(r == FM_OK && dma[0] == 2048 &&
+                   AudioDma_GetOutput(&x) == FM_AUDIO_OUT_BOTH, r, msg);
+        (void)AudioDma_Stop(&x);
+    }
+
+    TEST("F33: DMA player, a volume above 100 % boosts and saturates");
+    {
+        static AudioDma x;
+        static int16_t dma[2 * 256] __attribute__((aligned(32)));
+
+        r = av2_write_ramp_wav("/av2dma", "/av2dma/ramp.wav", 4000);
+        if (r == FM_OK)
+        {
+            r = AudioDma_StartEx(&x, "/av2dma", &audio_dma_test_port, NULL,
+                                 dma, 256, NULL);
+        }
+        if (r == FM_OK)
+        {
+            AudioDma_SetVolume(&x, 2 * 0x7FFF);
+            AudioDma_SetDataCallback(&x, av2_tap_loud, NULL);
+            AudioDma_HalfCallback(&x);          /* refill half 0 */
+            r = AudioDma_Poll(&x);
+        }
+        /* samples 512.. of the ramp: 2056 at index 2 becomes about 4112 */
+        (void)snprintf(msg, sizeof(msg), "%d %d %d", dma[0], dma[1], dma[2]);
+        AV2_RESULT(r == FM_OK && dma[0] == 32767 && dma[1] == -32768 &&
+                   dma[2] >= 4110 && dma[2] <= 4112, r, msg);
         (void)AudioDma_Stop(&x);
         (void)Directory_DeleteRecursive("/av2dma");
     }

@@ -44,6 +44,31 @@ typedef enum
     FM_PLAY_MODE_REPEAT_ALL  = 3  /* تمام شد → بعدی و آخر → اول (لوپ پوشه) */
 } FM_PlayMode;
 
+/* Where the decoded sound goes — one switch, the same for music
+ * (SimpleAudio_SetOutput) and for the sound of a video
+ * (SimpleVideo_SetAudioOutput).
+ *
+ *   NONE      nowhere: not decoded for a video; silence for music
+ *   SPEAKER   I2S only; your callbacks are not called
+ *   CALLBACK  your callbacks only; I2S plays silence (still in real time)
+ *   BOTH      your callbacks first, then I2S — what you change is heard
+ *             (default; with no callback installed this is just SPEAKER) */
+typedef enum
+{
+    FM_AUDIO_OUT_NONE     = 0,
+    FM_AUDIO_OUT_SPEAKER  = 1,
+    FM_AUDIO_OUT_CALLBACK = 2,
+    FM_AUDIO_OUT_BOTH     = 3
+} FM_AudioOutput;
+
+/* The one PCM callback type of both players.
+ *   pcm       signed 16-bit samples, interleaved (L,R,L,R...); writable
+ *   samples   number of int16_t values (a stereo frame is two)
+ * It runs on the buffer-refill path: copy or process and return. No file
+ * I/O and no printf in here. */
+typedef void (*FM_AudioDataFn)(void *ctx, int16_t *pcm, size_t samples,
+                               uint32_t sample_rate, uint16_t channels);
+
 typedef struct
 {
     char         path[FM_PATH_MAX];

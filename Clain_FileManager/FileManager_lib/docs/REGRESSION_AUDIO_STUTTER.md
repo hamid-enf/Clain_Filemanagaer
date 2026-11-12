@@ -174,7 +174,7 @@ raises `sv_rgb 900 KiB`, `sv_frame 2×1.2 MiB` — fits H7 32 MiB SDRAM, makes 7
 **New on this branch since f13faf1:**
 
 * **Audio pre/post PCM tap:** `include/simple_audio.h` + `examples/audio_dma_player.h` — `SimpleAudio_SetPreTap()` قبل از gain (MyPCM Tab style، قابل ویرایش بعد میره I2S) + `SetPostTap` برای مانیتورینگ. Volume اکنون SIMD دو نمونه/حلقه با TPDF.
-* **Video صدا+تصویر همزمان:** `SimpleVideo_EnableAudio(0/1)` فلگ سراسری برای اسکیپ کامل دیکود صدای ویدیو (موزیک مستقل)، `SimpleVideo_ReadAudio()` / `Video_ReadAudioFrame()` + `GetFrame` بدون مصرف، تپ صدای ویدیو.
+* **Video صدا+تصویر همزمان:** `SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_NONE/BOTH)` فلگ سراسری برای اسکیپ کامل دیکود صدای ویدیو (موزیک مستقل)، `SimpleVideo_AudioDataRead()` / `Video_ReadAudioFrame()` + `GetFrame` بدون مصرف، تپ صدای ویدیو.
 * **پوشه بازگشتی:** `Directory_Copy` (تا `FM_DIR_MAX_DEPTH`) با rollback و مسیر سریع same-volume. (`Directory_CopyTree` و واریانت‌های QSPI برداشته شد؛ فقط `File_Copy` و `Directory_Copy` می‌ماند.)
 * **FLAC داخلی:** `third_party/dr_flac` + `src/fm_flac.c` (`drflac_open_memory + read_s16`)، `FM_Flac_Init()` auto در `FileManager_Init()`، ویدیو MKV `CodecPrivate 0x63A2` + MP4 `dfLa` capture و سنتز `fLaC+STREAMINFO+frame` در `Video_ReadAudioFrame` → PCM16 واقعی برای MKV/MP4 FLAC.
 * **Vorbis داخلی:** `third_party/stb/stb_vorbis.c` + `src/fm_vorbis.c` (`stb_vorbis_open_memory + get_samples_short_interleaved`)، `FM_Vorbis_Init()` auto — Ogg Vorbis فایل مستقیم به I2S، ویدیو `A_VORBIS` فعلاً raw fallback (هدر سه‌تکه Matroska نیاز به Ogg page سنتز دارد).
@@ -234,7 +234,7 @@ raises `sv_rgb 900 KiB`, `sv_frame 2×1.2 MiB` — fits H7 32 MiB SDRAM, makes 7
 * `examples/ltdc_present.h` نیاز به `SIMPLE_VIDEO_FRAME_COUNT=2` دارد (تک‌بافر پاره می‌شود) و در `test/video_hooks_test.c` با 17 تست `PASS` شد: `YCbCr`, `RGB565`, `LTDC present`, `swap16`, `vertical blanking` و fallback. `Ltdc_Present` فقط `CleanForDma` + `HAL_LTDC_SetAddress/SetPixelFormat + Reload(VBLANK)` می‌زند؛ هیچ کپی‌ای ندارد و با `Video_ReadAudioFrame` جدید (FLAC/Vorbis/Opus) هم‌زمان کار می‌کند چون صدای ویدیو از حلقه جدا است.
 
 **مثال‌ها:**
-* `examples/audio_record_with_tap.h` اکنون MyPCM-style قبل از gain (قابل ویرایش) + بعد از gain (مانیتور)، `SimpleVideo_EnableAudio` سراسری، و کپی پوشهٔ `Directory_Copy` بازگشتی (QSPI <-> SD) را در یک فایل با کامنت فارسی/انگلیسی و `static inline` demo نشان می‌دهد. `examples/ltdc_present.h` و `dma2d_ycbcr.h` هم با توضیح SPI vs LTDC (37ms vs 0ms present) به‌روز شد. تست `examples_run` برای همه 11 مثال روی هاست بدون کرش پاس شد.
+* `examples/audio_record_with_tap.h` اکنون MyPCM-style قبل از gain (قابل ویرایش) + بعد از gain (مانیتور)، `SimpleVideo_SetAudioOutput` سراسری، و کپی پوشهٔ `Directory_Copy` بازگشتی (QSPI <-> SD) را در یک فایل با کامنت فارسی/انگلیسی و `static inline` demo نشان می‌دهد. `examples/ltdc_present.h` و `dma2d_ycbcr.h` هم با توضیح SPI vs LTDC (37ms vs 0ms present) به‌روز شد. تست `examples_run` برای همه 11 مثال روی هاست بدون کرش پاس شد.
 
 **بهینه‌سازی برای سایر سری‌ها:**
 * `make ports` برای هر 8 پورت (F1/F4/F7/G0/G4/L4/H7/GENERIC) با `SMALL/NORMAL/LARGE` بافر و `FM_PORT_TIER` مربوطه `40/40` فایل را کامپایل کرد. `F1` اکنون بدون `SDRAM` و بدون `h264bsd` (5MB) لینک می‌شود؛ `H7` با `LARGE` می‌تواند `800×480` native شود بدون scale.

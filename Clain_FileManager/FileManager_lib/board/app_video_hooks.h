@@ -55,7 +55,7 @@ static void app_video_frame_cb(void *ctx, const void *px, uint16_t w,
      * دوبل است و تا فراخوانی بعدی معتبر است. */
 }
 
-/* نصب هر سه قلاب ویدیو (بعد از هر Begin) */
+/* نصب هر سه قلاب ویدیو. ماندگارند؛ اینجا شمارندهٔ فریم هم صفر می‌شود. */
 static void Music_InstallVideoHooks(void)
 {
     video_frames = 0u;
@@ -64,16 +64,16 @@ static void Music_InstallVideoHooks(void)
     SimpleVideo_SetFrameCallback(app_video_frame_cb, NULL);
 }
 
-/* vmut: صدای ویدیو را خاموش (مسیر پردازش، نیاز به صدا نیست).
- * vunmut: روشن. اختصارِ دستور: حالا فقط از EnableAudio استفاده شود. */
+/* vmut: بلندگو ساکت، ولی دادهٔ صدا همچنان به کالبک می‌رسد (فقط پردازش).
+ * vunmut: بلندگو + کالبک. */
 static void Music_VideoMute(void)
 {
-    SimpleVideo_EnableAudio(0u);
-    printf("vmut: صدای ویدیو خاموش شد (پردازش فقط داده)\n");
+    (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_CALLBACK);
+    printf("vmut: صدای ویدیو فقط به کالبک می‌رود (بلندگو ساکت)\n");
 }
 static void Music_VideoUnmute(void)
 {
-    SimpleVideo_EnableAudio(1u);
+    (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
     printf("vunmut: صدای ویدیو روشن شد\n");
 }
 

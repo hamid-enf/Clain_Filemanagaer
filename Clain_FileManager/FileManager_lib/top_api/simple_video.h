@@ -11,7 +11,20 @@
  *   while (1) { LcdSpiDma_Poll(); SimpleVideo_Poll(); }
  *   SimpleVideo_Next(); SimpleVideo_SeekBy(+10);  — اعمال در Poll
  *   SimpleVideo_Pause(); SimpleVideo_Resume();    — Pause مثل صدا
- *   SimpleVideo_SetVolume(50);                    — صدای نرم‌افزاری 0..100
+ *   SimpleVideo_SetVolume(50);                    — ولوم 0..200 (100 = بی‌تغییر)
+ *   SimpleVideo_IsRunning(); SimpleVideo_IsPaused();
+ *
+ * صدای ویدیو کجا برود؟ — همان مدل SimpleAudio:
+ *
+ *   ترک صدا → دیکد → [کالبک داده] → ولوم → [کالبک مانیتور] → I2S
+ *
+ *   SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_NONE)      صدا اصلاً دیکد نمی‌شود
+ *   SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_SPEAKER)   فقط بلندگو
+ *   SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_CALLBACK)  فقط کالبک (I2S ساکت)
+ *   SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH)      هر دو (پیش‌فرض)
+ *   SimpleVideo_SetAudioDataCallback(fn, ctx)          قبل از ولوم، قابل‌ویرایش
+ *   SimpleVideo_SetAudioMonitorCallback(fn, ctx)       بعد از ولوم
+ *   نوع کالبک همان FM_AudioDataFn موزیک است: یک تابع را می‌توان به هر دو داد.
  *
  * FPS — پخش async روی SPI (پیشنهادشده):
  *   اگر blit شما LcdSpiDma_Send بلاک‌شونده است، هر فریم حدود زمان SPI
@@ -77,7 +90,7 @@
  *       (void)SimpleVideo_Poll();        — غیرفعال NOT_READY می‌دهد
  *   }
  *
- * اگر SIMPLE_VIDEO_I2S=0 بماند، PCM را با SimpleVideo_AudioRead به
+ * اگر SIMPLE_VIDEO_I2S=0 بماند، PCM را با SimpleVideo_AudioDataRead به
  * DAC خودتان بدهید.
  *
  * پخش خودکار (پیش‌فرض خاموش):
@@ -162,8 +175,6 @@ typedef void (*SimpleVideo_TrackEndFn)(void *ctx, const char *path);
 typedef void (*SimpleVideo_FrameFn)(void *ctx, const void *pixels,
                                     uint16_t width, uint16_t height,
                                     FM_PixelFormat format, size_t bytes);
-typedef void (*SimpleVideo_PcmTapFn)(void *ctx, int16_t *pcm, size_t samples,
-                                     uint32_t rate, uint16_t channels);
 typedef struct
 {
     char     name[FM_PATH_MAX];
@@ -176,6 +187,7 @@ typedef struct
     double   position;
     double   duration;
     uint8_t  paused;
+    uint8_t  running;
     uint8_t  has_audio;
     uint8_t  volume_pct;
     uint32_t audio_rate;
@@ -203,31 +215,25 @@ FM_Result SimpleVideo_SetPlayMode(FM_PlayMode mode)
 { (void)mode; return FM_ERR_UNSUPPORTED; }
 FM_PlayMode SimpleVideo_GetPlayMode(void)
 { return FM_PLAY_MODE_STOP; }
-void SimpleVideo_SetRepeatMode(int mode)
-{ (void)mode; }
-FM_PlayMode SimpleVideo_GetRepeatMode(void)
-{ return FM_PLAY_MODE_STOP; }
+FM_Bool SimpleVideo_IsRunning(void)
+{ return FM_FALSE; }
+FM_Bool SimpleVideo_IsPaused(void)
+{ return FM_FALSE; }
 FM_Result SimpleVideo_SetVolume(uint8_t percent)
 { (void)percent; return FM_ERR_UNSUPPORTED; }
 uint8_t SimpleVideo_GetVolume(void)
 { return 0u; }
-void SimpleVideo_EnableAudio(uint8_t enable)
-{ (void)enable; }
-uint8_t SimpleVideo_IsAudioEnabled(void)
-{ return 0u; }
-void SimpleVideo_SetAudioEnabled(uint8_t enable)
-{ (void)enable; }
-void SimpleVideo_SetPrePcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+FM_Result SimpleVideo_SetAudioOutput(FM_AudioOutput output)
+{ (void)output; return FM_ERR_UNSUPPORTED; }
+FM_AudioOutput SimpleVideo_GetAudioOutput(void)
+{ return FM_AUDIO_OUT_NONE; }
+void SimpleVideo_SetAudioDataCallback(FM_AudioDataFn fn, void *ctx)
 { (void)fn; (void)ctx; }
-void SimpleVideo_SetPostPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
-{ (void)fn; (void)ctx; }
-void SimpleVideo_SetPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
-{ (void)fn; (void)ctx; }
-void SimpleVideo_SetAudioPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+void SimpleVideo_SetAudioMonitorCallback(FM_AudioDataFn fn, void *ctx)
 { (void)fn; (void)ctx; }
 const void *SimpleVideo_GetFrame(uint16_t *w, uint16_t *h)
 { (void)w; (void)h; return NULL; }
-FM_Result SimpleVideo_ReadAudio(int16_t *pcm,
+FM_Result SimpleVideo_AudioDataRead(int16_t *pcm,
         size_t frames,
         size_t *got_frames)
 { (void)pcm; (void)frames; (void)got_frames; return FM_ERR_UNSUPPORTED; }
@@ -263,8 +269,6 @@ FM_Result SimpleVideo_SetOutputFormat(FM_PixelFormat format)
 { (void)format; return FM_ERR_UNSUPPORTED; }
 void SimpleVideo_SetSwap16(int8_t swap)
 { (void)swap; }
-FM_Result SimpleVideo_AudioRead(uint8_t *buf, size_t cap, size_t *got)
-{ (void)buf; (void)cap; (void)got; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_SaveFrame(const char *path)
 { (void)path; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_RecStart(const char *path,
@@ -511,8 +515,9 @@ typedef struct
     double   position;
     double   duration;
     uint8_t  paused;
+    uint8_t  running;
     uint8_t  has_audio;
-    uint8_t  volume_pct; /* I2S software gain 0..100 (SimpleVideo_SetVolume) */
+    uint8_t  volume_pct; /* I2S software gain 0..200 (SimpleVideo_SetVolume) */
     uint32_t audio_rate;
     uint16_t audio_channels;
     uint32_t playlist_count;
@@ -614,21 +619,22 @@ static int8_t sv_autoplay = -1;
  * برای پرزنت: NEXT یا STOP بذار تا خودش نپره؛ برای کیوسک REPEAT_ALL. */
 static FM_PlayMode sv_play_mode = (FM_PlayMode)(SIMPLE_VIDEO_AUTO_PLAY ? FM_PLAY_MODE_REPEAT_ALL : FM_PLAY_MODE_STOP);
 static uint8_t sv_play_mode_explicit = 0u; /* 1 = app called SetPlayMode, ignore autoplay */
-/* Software I2S gain, 0..100.  Lives outside `sv` so Begin() memset
- * does not reset a volume the app already set. */
+/* Software I2S gain, 0..200 (100 = unchanged).  Lives outside `sv` so
+ * Begin() memset does not reset a volume the app already set. */
 static uint8_t sv_volume_pct = 100u;
-/* Video-audio global enable: 1 = decode+play video audio via I2S, 0 = keep I2S silent
- * and skip Video_ReadAudioFrame in the refill path (saves CPU/SD when you only
- * need the pictures). Music (SimpleAudio) is not affected. */
-static uint8_t sv_audio_enabled = 1u;
-/* Pre/post PCM taps for video audio — same signature as SimpleAudio.
- * Pre is raw decoded PCM before volume/fade, Post is after volume/fade;
- * both are editable before DMA. NULL = disabled. */
-typedef void (*SimpleVideo_PcmTapFn)(void *ctx, int16_t *pcm, size_t samples,
-                                     uint32_t rate, uint16_t channels);
-static SimpleVideo_PcmTapFn sv_pcm_tap_pre = NULL;
+/* Where the sound of the video goes (SimpleVideo_SetAudioOutput):
+ * NONE = the audio track is not read at all (saves SD time and CPU when
+ * only the pictures matter), SPEAKER = I2S only, CALLBACK = callbacks
+ * only with I2S silent, BOTH = callbacks then I2S (default).
+ * Music (SimpleAudio) is not affected. */
+static FM_AudioOutput sv_audio_out = FM_AUDIO_OUT_BOTH;
+/* PCM callbacks of the video sound — the FM_AudioDataFn of SimpleAudio.
+ * "pre" is the data callback (decoded PCM before volume/fade), "post" the
+ * monitor callback (after volume/fade); both may edit the samples.
+ * NULL = none. */
+static FM_AudioDataFn sv_pcm_tap_pre = NULL;
 static void *sv_pcm_tap_pre_ctx = NULL;
-static SimpleVideo_PcmTapFn sv_pcm_tap_post = NULL;
+static FM_AudioDataFn sv_pcm_tap_post = NULL;
 static void *sv_pcm_tap_post_ctx = NULL;
 /* Auto-generated snapshot counter for SaveFrame(NULL). */
 static uint32_t sv_save_seq;
@@ -1067,7 +1073,7 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
     int16_t *dst = sv_i2s_buf + (size_t)half * SIMPLE_VIDEO_HALF_SAMPLES;
     size_t filled = 0;
 
-    if (!sv.audio_pcm || !sv_audio_enabled)
+    if (!sv.audio_pcm)
     {
         memset(dst, 0, SIMPLE_VIDEO_HALF_SAMPLES * sizeof(int16_t));
         return FM_OK;
@@ -1173,8 +1179,9 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
             sv_pcm_off = sv_pcm_len;
         }
     }
-    /* Pre-gain tap: raw decoded PCM before volume/fade, editable. */
-    if (sv_pcm_tap_pre != NULL && filled > 0u)
+    /* Data callback: raw decoded PCM before volume/fade, editable. */
+    if (sv_pcm_tap_pre != NULL && filled > 0u &&
+        ((unsigned)sv_audio_out & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
     {
         sv_pcm_tap_pre(sv_pcm_tap_pre_ctx, dst, filled,
                        sv.audio.sample_rate, sv.audio.channels);
@@ -1289,8 +1296,10 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
         sv_i2s_last_l = l;
         sv_i2s_last_r = r;
     }
-    /* Post-gain tap: after volume+fade, exactly what speaker will get, editable. */
-    if (sv_pcm_tap_post != NULL && filled > 0u)
+    /* Monitor callback: after volume+fade, exactly what the speaker will
+     * get, editable. */
+    if (sv_pcm_tap_post != NULL && filled > 0u &&
+        ((unsigned)sv_audio_out & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
     {
         sv_pcm_tap_post(sv_pcm_tap_post_ctx, dst, filled,
                         sv.audio.sample_rate, sv.audio.channels);
@@ -1302,6 +1311,17 @@ static FM_Result sv_i2s_fill_half(uint8_t half)
 {
     FM_Result r = sv_i2s_fill_half_inner(half);
 
+    /* Output without the speaker (callback only, or none): the callbacks
+     * have had the data, the DMA plays silence.  The track is still read
+     * and the ring keeps running, so the picture stays on the audio
+     * clock. */
+    if (((unsigned)sv_audio_out & (unsigned)FM_AUDIO_OUT_SPEAKER) == 0u)
+    {
+        memset(sv_i2s_buf + (size_t)half * SIMPLE_VIDEO_HALF_SAMPLES, 0,
+               SIMPLE_VIDEO_HALF_SAMPLES * sizeof(int16_t));
+        sv_i2s_last_l = 0;
+        sv_i2s_last_r = 0;
+    }
     sv_i2s_cache_clean(sv_i2s_buf + (size_t)half * SIMPLE_VIDEO_HALF_SAMPLES,
                        SIMPLE_VIDEO_HALF_SAMPLES * sizeof(int16_t));
     return r;
@@ -2050,7 +2070,8 @@ static FM_Result simple_video_prime_item(uint32_t index)
     sv.has_audio = FM_FALSE;
     sv.audio_pcm = FM_FALSE;
     memset(&sv.audio, 0, sizeof(sv.audio));
-    if (sv_audio_enabled && Video_HasAudio(&sv.player.video, &has) == FM_OK && has)
+    if (sv_audio_out != FM_AUDIO_OUT_NONE &&
+        Video_HasAudio(&sv.player.video, &has) == FM_OK && has)
     {
         if (Video_GetAudioInfo(&sv.player.video, &sv.audio) == FM_OK)
         {
@@ -3092,15 +3113,23 @@ FM_PlayMode SimpleVideo_GetPlayMode(void)
 {
     return sv_effective_play_mode();
 }
-void SimpleVideo_SetRepeatMode(int mode) { (void)SimpleVideo_SetPlayMode((FM_PlayMode)mode); } /* compat */
-FM_PlayMode SimpleVideo_GetRepeatMode(void) { return SimpleVideo_GetPlayMode(); }
 
-/* Software I2S volume 0..100.  Takes effect on the next ring half
- * (~tens of ms).  100 = unchanged PCM.  Same idea as SimpleAudio_SetVolume. */
+/* FM_TRUE while an item is playing or paused. */
+FM_Bool SimpleVideo_IsRunning(void)
+{
+    return sv.running ? FM_TRUE : FM_FALSE;
+}
+
+FM_Bool SimpleVideo_IsPaused(void)
+{
+    return sv.paused ? FM_TRUE : FM_FALSE;
+}
+
+/* Software I2S volume 0..200.  Takes effect on the next ring half
+ * (~tens of ms).  100 = unchanged PCM, above = boost with saturation (up
+ * to +6 dB), 0 = silence.  Same range as SimpleAudio_SetVolume. */
 FM_Result SimpleVideo_SetVolume(uint8_t percent)
 {
-    /* تا ۲۰۰٪ مجاز: صدای ترک‌های برخی ویدیوها آرام‌تر از موزیک است؛
-     * ۱۰۰ = بی‌تغییر، ۱۰۱..۲۰۰ = تقویت با اشباع (تا +۶dB). */
     if (percent > 200u)
     {
         percent = 200u;
@@ -3114,54 +3143,66 @@ uint8_t SimpleVideo_GetVolume(void)
     return sv_volume_pct;
 }
 
-/* Global video-audio enable. 1 = video audio is demuxed/decoded and played
- * via I2S (when the clip has an audio track). 0 = I2S for video stays silent
- * and Video_ReadAudioFrame is never called in the refill path — saves
- * SD bandwidth and CPU when you only need pictures. SimpleAudio (music)
- * is not affected. Takes effect on next clip or next half-refill. */
-void SimpleVideo_EnableAudio(uint8_t enable)
+/* Where the sound of the video goes — the same switch as
+ * SimpleAudio_SetOutput:
+ *
+ *   FM_AUDIO_OUT_NONE      the audio track is not read at all: I2S silent,
+ *                          no callback, no SD time or CPU spent on sound
+ *   FM_AUDIO_OUT_SPEAKER   I2S only; the callbacks are not called
+ *   FM_AUDIO_OUT_CALLBACK  callbacks only; I2S plays silence
+ *   FM_AUDIO_OUT_BOTH      callbacks, then I2S (default)
+ *
+ * Every change is heard on the next half buffer.  NONE in the middle of
+ * a clip is silent at once and stops reading the track from the next
+ * clip on; leaving NONE brings the sound back with the next clip (the
+ * track is opened when a clip starts).  Kept across Stop()/Begin(). */
+FM_Result SimpleVideo_SetAudioOutput(FM_AudioOutput output)
 {
-    sv_audio_enabled = (enable != 0u) ? 1u : 0u;
+    if ((unsigned)output > (unsigned)FM_AUDIO_OUT_BOTH)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    sv_audio_out = output;
+    return FM_OK;
 }
-uint8_t SimpleVideo_IsAudioEnabled(void)
-{
-    return sv_audio_enabled;
-}
-void SimpleVideo_SetAudioEnabled(uint8_t enable) { SimpleVideo_EnableAudio(enable); }
 
-/* Pre/post PCM taps for video audio. Pre is raw decoded PCM before volume/fade,
- * Post is after volume/fade — both editable before DMA. NULL disables.
- * Signature matches SimpleAudio: (ctx, pcm, samples, rate, channels).
- * samples is interleaved int16 count. Keep it very short. */
-void SimpleVideo_SetPrePcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
+FM_AudioOutput SimpleVideo_GetAudioOutput(void)
 {
-    sv_pcm_tap_pre = fn;
+    return sv_audio_out;
+}
+
+/* PCM callbacks of the video sound; type and rules are those of
+ * SimpleAudio (FM_AudioDataFn: ctx, pcm, samples, rate, channels), so one
+ * function can serve both players.  Data = decoded PCM before the volume,
+ * monitor = after volume and fade, exactly what the speaker gets.  Both
+ * may edit the samples.  NULL removes a callback.  Keep them short. */
+void SimpleVideo_SetAudioDataCallback(FM_AudioDataFn fn, void *ctx)
+{
     sv_pcm_tap_pre_ctx = ctx;
-}
-void SimpleVideo_SetPostPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
-{
-    sv_pcm_tap_post = fn;
-    sv_pcm_tap_post_ctx = ctx;
-}
-void SimpleVideo_SetPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
-{
-    SimpleVideo_SetPostPcmTap(fn, ctx);
-}
-void SimpleVideo_SetAudioPcmTap(SimpleVideo_PcmTapFn fn, void *ctx)
-{
-    SimpleVideo_SetPostPcmTap(fn, ctx);
+    sv_pcm_tap_pre = fn;
 }
 
-/* Direct access to decoded video frame (RGB888) and to decoded video
- * audio PCM. Both are safe to call from the main loop when
- * SimpleVideo_IsRunning(). For DSP/image pipelines. */
+void SimpleVideo_SetAudioMonitorCallback(FM_AudioDataFn fn, void *ctx)
+{
+    sv_pcm_tap_post_ctx = ctx;
+    sv_pcm_tap_post = fn;
+}
+
+/* Direct access to the decoded video frame (RGB888) and to the decoded
+ * PCM of the video. Both are safe to call from the main loop when
+ * SimpleVideo_IsRunning(). For DSP/image pipelines.
+ *
+ * SimpleVideo_AudioDataRead reads straight from the audio track of the
+ * playing clip (stereo frames); what is read here is no longer played.
+ * With SIMPLE_VIDEO_I2S=0 it is the way to get the sound; with I2S on,
+ * prefer SimpleVideo_SetAudioDataCallback. */
 const void *SimpleVideo_GetFrame(uint16_t *w, uint16_t *h)
 {
     if (w != NULL) *w = sv.player.video.info.width;
     if (h != NULL) *h = sv.player.video.info.height;
     return sv_rgb;
 }
-FM_Result SimpleVideo_ReadAudio(int16_t *pcm, size_t frames, size_t *got_frames)
+FM_Result SimpleVideo_AudioDataRead(int16_t *pcm, size_t frames, size_t *got_frames)
 {
     uint8_t *tmp = (uint8_t *)pcm;
     size_t cap = frames * 2u * sizeof(int16_t);
@@ -3170,7 +3211,7 @@ FM_Result SimpleVideo_ReadAudio(int16_t *pcm, size_t frames, size_t *got_frames)
     if (pcm == NULL || got_frames == NULL) return FM_ERR_INVALID_ARGUMENT;
     *got_frames = 0;
     if (!sv.running || !sv.has_audio) return FM_ERR_NOT_READY;
-    if (!sv_audio_enabled) return FM_ERR_NOT_READY;
+    if (sv_audio_out == FM_AUDIO_OUT_NONE) return FM_ERR_NOT_READY;
     r = Video_ReadAudioFrame(&sv.player.video, tmp, cap, &got);
     if (r != FM_OK) return r;
     *got_frames = got / (sv.audio.channels * sizeof(int16_t));
@@ -3360,15 +3401,6 @@ void SimpleVideo_SetSwap16(int8_t swap)
     sv_swap16_override = (swap < 0) ? -1 : (swap ? 1 : 0);
 }
 
-FM_Result SimpleVideo_AudioRead(uint8_t *buf, size_t cap, size_t *got)
-{
-    if (!sv.running || !sv.has_audio)
-    {
-        return FM_ERR_NOT_READY;
-    }
-    return Video_ReadAudioFrame(&sv.player.video, buf, cap, got);
-}
-
 /* Save the most recently decoded frame.  path == NULL stores an
  * auto-numbered BMP in SIMPLE_VIDEO_SAVE_FOLDER (created on demand);
  * an explicit path keeps its extension-chosen format
@@ -3451,6 +3483,7 @@ void SimpleVideo_Info(SimpleVideoInfo *out)
     out->playlist_count = Player_Count(&sv.player);
     out->playlist_index = Player_Current(&sv.player);
     out->paused = sv.paused ? 1u : 0u;
+    out->running = sv.running ? 1u : 0u;
     out->format = sv.format;
     out->volume_pct = sv_volume_pct;
     if (!sv.running)

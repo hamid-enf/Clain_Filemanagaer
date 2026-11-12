@@ -186,9 +186,10 @@ WAV در `FM_AudioInfo.block_align` نگه‌داری می‌شود.
 کامپایل و **اجرا** می‌کند و در زنجیرهٔ `make check` هم هست:
 
 ```
-  SimpleAudio_SetPrePcmTap/PostPcmTap installed   PASS   (۲۲ تست)
+  SimpleAudio_SetDataCallback/SetMonitorCallback  PASS
   my_pre_dsp: +6 dB with saturation              PASS
-  SimpleVideo taps + GetFrame/ReadAudio idle     PASS
+  SimpleVideo callbacks + GetFrame/AudioDataRead  PASS
+  خروجی فقط بلندگو / فقط کالبک / هر دو، ماندگاری بعد از Stop/Begin  PASS
   SimpleAudio_RecStart→RecWrite→RecStop          PASS
   بازگشایی WAV ضبط‌شده: 16000Hz/1ch، ۴۸۰۰ فریم، پیک > 9000  PASS
   Directory_Copy تودرتو + محتوای فایل‌ها     PASS
@@ -248,15 +249,25 @@ tone vectors) پس سه تله‌متری صادقانه اضافه شد تا ر
 DMA → I2S → بلندگو
 ```
 
-نصب هر دو قلاب با `Music_InstallTaps()` بعد از «هر» `SimpleAudio_Begin()`
-انجام می‌شود (چون Begin حالت را پاک می‌کند). اسلات نرمالایزر بلندی هم
-دقیقاً داخل `app_audio_pre_tap` با کامنت فارسی مشخص است.
+نصب هر دو با `Music_InstallTaps()` انجام می‌شود: `SimpleAudio_SetDataCallback`
+(قبل از ولوم) و `SimpleAudio_SetMonitorCallback` (بعد از ولوم). کالبک‌ها
+ماندگارند؛ یک‌بار کافی است و با `Stop`/`Begin` پاک نمی‌شوند. اسلات نرمالایزر
+بلندی داخل `app_audio_pre_tap` است.
+
+مسیر صدا با یک تابع انتخاب می‌شود:
+
+| دستور UART | تابع | نتیجه |
+|---|---|---|
+| `aout1` | `SimpleAudio_SetOutput(FM_AUDIO_OUT_SPEAKER)` | فقط بلندگو؛ کالبک‌ها صدا زده نمی‌شوند |
+| `aout2` | `SimpleAudio_SetOutput(FM_AUDIO_OUT_CALLBACK)` | فقط کالبک؛ بلندگو ساکت |
+| `aout3` | `SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH)` | هر دو (پیش‌فرض) |
+| `vout0` … `vout3` | `SimpleVideo_SetAudioOutput(...)` | همان برای صدای ویدیو؛ `vout0` = صدا اصلاً خوانده نشود |
 
 ### قلاب‌های شروع/پایان (DSP می‌داند چه چیزی پردازش می‌شود)
 
 برای پردازش، لایهٔ DSP باید بداند «کدام موزیک/ویدیو» در حال پردازش است:
 
-- **آهنگ:** `SimpleAudio_SetTrackStart` / `SetTrackEnd` — شروع: مسیر +
+- **آهنگ:** `SimpleAudio_SetTrackStartCallback` / `SetTrackEndCallback` — شروع: مسیر +
   کدک/نرخ/کانال؛ پایان: همان مسیر وقتی ترک تمام/قطع شود. در
   `Music_InstallTaps()` نصب می‌شوند و با `app_audio_track_start/end` چاپ می‌شوند.
 - **ویدیو:** `SimpleVideo_SetTrackStartCallback` / `SetTrackEndCallback` —
@@ -265,7 +276,7 @@ DMA → I2S → بلندگو
   به `sv.format`، پیش‌فرض RGB565) را تحویل می‌دهد؛ **حتی وقتی `SetPresent(NULL)`
   است** (حالت فقط-داده). این همان مسیرِ «۶۰٪ مواقع فقط داده می‌خواهیم» است؛
   بافر دوبل است، پس اگر داده را تا فراخوانی بعدی نگه می‌دارید در بافر خودتان کپی کنید.
-  نصب با `Music_InstallVideoHooks()` بعد از هر `SimpleVideo_Begin()`.
+  نصب با `Music_InstallVideoHooks()`؛ این‌ها هم ماندگارند.
 
 بعدیِ دستی ویدیو (`SimpleVideo_SetPlayMode(FM_PLAY_MODE_STOP)` + `SimpleVideo_Next()`)
 همان «فیلم بعدی دست خودم باشه» است: ویدیو سر EOF می‌ایستد و فقط وقتی خودتان
@@ -281,8 +292,8 @@ DMA → I2S → بلندگو
 | `pools` | دیاگ خطای −۱۴: هندل‌های باز + `FM_Alloc` شکست‌ها + SDRAM آزاد |
 | `vvol2` | ولوم ویدیو = ۲۰۰٪ (تقویت نرم‌افزاری، اجازهٔ بالای ۱۰۰) |
 | `istart` | اسلایدشو تصویر از حلقهٔ اصلی (همان `SimpleImage_Begin` بوت، بدون ری‌ست) |
-| `EnableAudio` | صدای ویدیو خاموش/روشن (تست ایزولهٔ تصویر) |
-| `vmut` / `vunmut` | صدای ویدیو خاموش / روشن در مسیر پردازش (فقط داده می‌خواهیم، نه صدا) |
+| `EnableAudio` | صدای ویدیو خاموش/روشن (تست ایزولهٔ تصویر): `FM_AUDIO_OUT_NONE` / `_BOTH` |
+| `vmut` / `vunmut` | بلندگو ساکت ولی داده به کالبک می‌رسد (`FM_AUDIO_OUT_CALLBACK`) / هر دو |
 | `vnopres` | **تست A/B کراکل**: نمایش LCD ویدیو خاموش/روشن؛ دیکد و صدا ادامه دارد. اگر بدون LCD صدا تمیز شد ⇒ ریشهٔ کراکل رقابت DMA ارائهٔ LCD با I2S است |
 
 `rectest` این‌طور کار می‌کند: قلاب فقط در حافظه کپی می‌کند (سبک)؛

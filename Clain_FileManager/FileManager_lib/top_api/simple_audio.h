@@ -1,80 +1,79 @@
 /*
- * simple_audio.h — SimpleAudio: «صدا ساده» — پخش + داده + ضبط در یک دست
+ * simple_audio.h — SimpleAudio: پخش موزیک، دادهٔ صدا و ضبط در یک فایل
  *
- * هدف: کار با صدا را به ساده‌ترین شکل ممکن بیاورد — مثل مثال‌های فایل.
- * این header را در main.c include کنید. با SimpleVideo (simple_video.h) هم
- * می‌تواند در یک فایل باشد: callbackهای HAL_I2S مشترک‌اند؛ Begin یکی
- * Stop دیگری را می‌زند اگر همان hi2s1 را داشته باشد.
+ * این header را یک‌بار و فقط در main.c include کنید. با SimpleVideo
+ * (simple_video.h) هم‌زمان می‌تواند باشد: هر دو از همان I2S استفاده می‌کنند و
+ * هر کدام شروع شود دیگری را متوقف می‌کند.
  *
- * جعبه‌سیاه پخش — شما فقط دکمه‌ها را صدا می‌زنید:
+ * ── پخش ────────────────────────────────────────────────────────────────
+ *   SimpleAudio_Begin()               اسکن پوشه و شروع پخش اولین فایل
+ *   SimpleAudio_Poll()                داخل while(1) — همهٔ کار اینجاست
+ *   SimpleAudio_Stop()                توقف کامل
+ *   SimpleAudio_Start()               ادامه اگر Pause، شروع اگر متوقف
+ *   SimpleAudio_Play("/music/a.mp3")  پخش یک فایل مشخص
+ *   SimpleAudio_Next() / Prev()       ترک بعدی / قبلی
+ *   SimpleAudio_Pause() / Resume() / TogglePause()
+ *   SimpleAudio_SeekTo(30.0)          پرش به ثانیهٔ ۳۰
+ *   SimpleAudio_SeekBy(-10.0)         ده ثانیه عقب (مثبت = جلو)
+ *   SimpleAudio_SetVolume(80)         ولوم ۰ تا ۲۰۰ (۱۰۰ = بدون تغییر)
+ *   SimpleAudio_GetVolume()
+ *   SimpleAudio_SetPlayMode(mode)     آخر ترک: توقف / بعدی / تکرار یکی / تکرار همه
+ *   SimpleAudio_GetPlayMode()
+ *   SimpleAudio_IsRunning() / IsPaused()
+ *   SimpleAudio_Info(&info)           نام، کدک، نرخ، طول، موقعیت، ولوم
  *
- *   ┌────────────────────────────────────────────────────────────────┐
- *   │ پخش (WAV/MP3، mono/stereo — خودکار از هدر تشخیص می‌دهد)      │
- *   │   SimpleAudio_Begin()                    شروع پخش پوشه         │
- *   │   SimpleAudio_Poll()                     داخل while(1) — همه‌چیز │
- *   │   SimpleAudio_Stop()                     ⏹                    │
- *   │   SimpleAudio_IsRunning()                آیا پخش است؟          │
- *   │   SimpleAudio_Next()                     ⏭ بعدی (فوری)        │
- *   │   SimpleAudio_Prev()                     ⏮ قبلی (فوری)        │
- *   │   SimpleAudio_Play("/music/x.mp3")       پخش فایل مشخصی        │
- *   │   SimpleAudio_SeekTo(30.0)               ⏩ پرش به ثانیه        │
- *   │   SimpleAudio_SeekBy(-10.0)              ⏪ عقب/جلو (منفی=عقب)  │
- *   │   SimpleAudio_SetVolume(50)              🔊 صدای نرم‌افزاری %0-100│
- *   │   SimpleAudio_Info(&info)                اسم/کدک/فرکانس/دورانی  │
- *   │                                                          طول/موقعیت│
- *   ├────────────────────────────────────────────────────────────────┤
- *   │ «دیتای موزیک در دست شما» (همان استریمی که بلندگو پخش می‌کند) │
- *   │   SimpleAudio_DataRead(buf, frames, &got)     داده استریو (L,R) │
- *   │   SimpleAudio_DataReadMono(buf, n, &got)      داده مونو (میانگین)│
- *   ├────────────────────────────────────────────────────────────────┤
- *   │ ضبط — «تابهٔ صدا»: داده بده، خودش حفظ می‌کند                  │
- *   │   SimpleAudio_RecStart("/rec", rate, ch)    (یا آدرس دقیق .wav) │
- *   │   SimpleAudio_RecWrite(pcm, frames)         هر چقدر data داری   │
- *   │   SimpleAudio_RecStop()                     پایان + درج هدر     │
- *   │   SimpleAudio_RecPath()                     آدرس فایل ذخیره‌شده │
- *   └────────────────────────────────────────────────────────────────┘
+ * ── صدا کجا برود؟ ───────────────────────────────────────────────────────
  *
- * تفاوت‌های مهم با adapter قدیمی (test_audio_player.h):
- *   - فایل mono دیگر «پاس» نمی‌شود: با force_stereo خودکار روی I2S
- *     استریو پخش می‌شود (L=R).
- *   - Next/Prev/Seek «فوری»اند: DMA متوقف، بافرها پر، DMA شروع —
- *     بلافاصله صدا می‌شنوید (نه بعد از تمام‌شدن بافر ۱.۴ ثانیه‌ای).
- *   - همهٔ منطق‌های restart/خطا/آمار درون Poll(); main.c فقط دکمه‌ها.
+ *   فایل → دیکد → [کالبک داده] → ولوم → [کالبک مانیتور] → I2S
  *
- * نمونهٔ استفاده در main.c:
+ *   SimpleAudio_SetOutput(FM_AUDIO_OUT_SPEAKER)    فقط بلندگو
+ *   SimpleAudio_SetOutput(FM_AUDIO_OUT_CALLBACK)   فقط کالبک شما (I2S ساکت)
+ *   SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH)       هر دو (پیش‌فرض)
  *
- *   #include "simple_audio.h"      // یک‌بار، فقط در main.c
+ *   SimpleAudio_SetDataCallback(fn, ctx)      دادهٔ دیکدشده، قبل از ولوم؛
+ *                                             هر تغییری بدهید شنیده می‌شود
+ *   SimpleAudio_SetMonitorCallback(fn, ctx)   بعد از ولوم: دقیقاً همان که
+ *                                             به بلندگو می‌رود (VU، ضبط)
+ *   SimpleAudio_SetTrackStartCallback(fn, ctx) / SetTrackEndCallback(fn, ctx)
  *
- *   int main(void)
+ *   همهٔ این تنظیم‌ها (خروجی، کالبک‌ها، ولوم، حالت پخش) ماندگارند: یک‌بار،
+ *   قبل یا بعد از Begin؛ با Stop و Begin دوباره پاک نمی‌شوند.
+ *
+ *   static void my_data(void *ctx, int16_t *pcm, size_t samples,
+ *                       uint32_t rate, uint16_t channels)
  *   {
- *       ... SystemClock_Config(); SdCard_Begin(); ...
- *       if (SimpleAudio_Begin() != FM_OK) { ... }
+ *       // samples = تعداد int16 (استریو: L,R,L,R). فقط کار سبک.
+ *   }
+ *   SimpleAudio_SetDataCallback(my_data, NULL);
  *
- *       while (1)
- *       {
- *           SimpleAudio_Poll();               // نگه‌داری صدا — حتماً
+ * ── خواندن مستقیم (بدون کالبک) ─────────────────────────────────────────
+ *   SimpleAudio_DataRead(buf, frames, &got)      استریو (L,R)
+ *   SimpleAudio_DataReadMono(buf, n, &got)       مونو
+ *   این دو از همان دیکدرِ در حال پخش می‌خوانند: آنچه بخوانید دیگر پخش
+ *   نمی‌شود. برای دادهٔ هم‌زمان با پخش، کالبک بالا را استفاده کنید.
  *
- *           if (Key_Pressed(KEY_NEXT))  SimpleAudio_Next();
- *           if (Key_Pressed(KEY_PREV))  SimpleAudio_Prev();
- *           if (Key_Pressed(KEY_PAUSE)) SimpleAudio_TogglePause();
- *           if (Key_Pressed(KEY_FWD))   SimpleAudio_SeekBy(+10.0);
- *           if (Key_Pressed(KEY_BACK))  SimpleAudio_SeekBy(-10.0);
- *           if (Key_Pressed(KEY_VOLP))  { SimpleAudioInfo i;
- *                                         SimpleAudio_Info(&i);
- *                                         SimpleAudio_SetVolume(i.volume_pct + 5); }
+ * ── ضبط WAV ─────────────────────────────────────────────────────────────
+ *   SimpleAudio_RecStart("/rec", rate, channels)   یا مسیر کامل یک .wav
+ *   SimpleAudio_RecWrite(pcm, frames)
+ *   SimpleAudio_RecStop()
+ *   SimpleAudio_RecPath() / RecActive()
  *
- *           // ضبط از میکروفون (هر منبعی): data را به تابه بده:
- *           // SimpleAudio_RecStart("/rec", 16000, 1);
- *           // while (mic has data) SimpleAudio_RecWrite(buf, frames);
- *           // SimpleAudio_RecStop();  // -> /rec/rec_000001.wav
- *       }
+ * نمونه:
+ *
+ *   #include "simple_audio.h"
+ *
+ *   SdCard_Begin();                       // کارت باید مونت باشد
+ *   SimpleAudio_SetVolume(80);
+ *   SimpleAudio_Begin();                  // پوشهٔ /music
+ *   while (1)
+ *   {
+ *       SimpleAudio_Poll();
+ *       if (Key_Pressed(KEY_NEXT)) SimpleAudio_Next();
  *   }
  *
- * بافر DMA: 2 * SIMPLE_AUDIO_HALF_SAMPLES * 2 بایت (پیش‌فرض ~128KB) —
+ * بافر DMA: 2 * SIMPLE_AUDIO_HALF_SAMPLES * 2 بایت (پیش‌فرض حدود 128KB) —
  * سکشن .dma_buffer را در linker به RAM قابل دسترسی DMA (AXI-SRAM/
- * SRAM1/2) بگذارید (همان linker script فعلی‌تان، بدون تغییر).
- *
- * پیش‌نیاز: مونت SD (SdCard_Begin یا معادلش) قبل از Begin().
+ * SRAM1/2) بگذارید.
  *
  * تنظیمات (پیش از include یا در preprocessor کل پروژه):
  *   SIMPLE_AUDIO_FOLDER           پوشهٔ لیست پخش (پیش‌فرض "/music")
@@ -391,7 +390,6 @@ typedef struct
 {
     AudioDma dma;        /* موتور پخش (audio_dma_player.h)          */
 
-    uint8_t volume_pct;       /* صدای فعلی (0..100)              */
     uint32_t restart_count;   /* underrun‌های خودکارِ restart    */
 
     /* آمار refill (بدون اسپم کنسول) */
@@ -523,11 +521,113 @@ typedef struct
     uint16_t bits;              /* همیشه 16 (خروجی decode)          */
     double   duration;          /* طول کل (ثانیه؛ 0 = ناشناخته/VBR) */
     double   position;          /* موقعیت فعلی (ثانیه)              */
-    uint8_t  volume_pct;        /* صدای فعلی (0..100)               */
+    uint8_t  volume_pct;        /* ولوم فعلی (0..200؛ 100 = بی‌تغییر) */
     uint32_t playlist_count;    /* تعداد فایل‌های پوشه             */
     uint32_t playlist_index;    /* شاخص ترک فعلی در لیست            */
     uint8_t  paused;            /* 1 = Pause (صدا قطع، ترک باز)     */
+    uint8_t  running;           /* 1 = در حال پخش یا Pause          */
+    FM_PlayMode    play_mode;   /* رفتار آخر ترک                    */
+    FM_AudioOutput output;      /* بلندگو / کالبک / هر دو           */
 } SimpleAudioInfo;
+
+/* ------------------------------------------------------------------------ */
+/* صدا کجا برود؟ خروجی و کالبک‌ها                                           */
+/* ------------------------------------------------------------------------ */
+/*
+ *   فایل → دیکد → [کالبک داده] → ولوم → [کالبک مانیتور] → I2S
+ *
+ * SimpleAudio_SetOutput() تنها سوئیچ مسیر است:
+ *
+ *   FM_AUDIO_OUT_SPEAKER    فقط بلندگو؛ کالبک‌ها صدا زده نمی‌شوند
+ *   FM_AUDIO_OUT_CALLBACK   فقط کالبک‌ها؛ I2S سکوت پخش می‌کند. انتقال DMA
+ *                           ادامه دارد، پس داده با همان سرعت واقعی پخش
+ *                           به دست شما می‌رسد
+ *   FM_AUDIO_OUT_BOTH       کالبک‌ها و بعد بلندگو (پیش‌فرض). اگر کالبکی
+ *                           نصب نشده باشد همان «فقط بلندگو» است
+ *
+ * کالبک داده برای پردازش است (افکت، اکولایزر، FFT)؛ بافر قابل نوشتن است.
+ * کالبک مانیتور برای دیدن خروجی نهایی است (VU متر، ضبط هم‌زمان با پخش).
+ *
+ * هر دو روی مسیر پرکردن بافر DMA اجرا می‌شوند: فقط کپی یا محاسبهٔ سبک.
+ * بازکردن و نوشتن فایل یا printf داخلشان باعث تق‌تق صدا می‌شود؛ داده را
+ * در بافر خودتان کپی کنید و فایل را در حلقهٔ اصلی بنویسید.
+ *
+ * این تنظیم‌ها بیرون از حالت پخش نگه‌داری می‌شوند: قبل یا بعد از Begin
+ * قابل‌تغییرند و با Stop()/Begin() از بین نمی‌روند.
+ */
+static AudioDma_Config sa_cfg;
+static uint8_t sa_cfg_ready;
+static uint8_t sa_volume_pct = 100u;
+
+static AudioDma_Config *simple_audio_cfg(void)
+{
+    if (sa_cfg_ready == 0u)
+    {
+        AudioDma_ConfigDefaults(&sa_cfg);
+        sa_cfg.force_stereo = FM_TRUE;   /* mono -> استریو، خودکار */
+        sa_cfg_ready = 1u;
+    }
+    return &sa_cfg;
+}
+
+FM_Result SimpleAudio_SetOutput(FM_AudioOutput output)
+{
+    if ((unsigned)output > (unsigned)FM_AUDIO_OUT_BOTH)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    simple_audio_cfg()->output = output;
+    AudioDma_SetOutput(&sa.dma, output);
+    return FM_OK;
+}
+
+FM_AudioOutput SimpleAudio_GetOutput(void)
+{
+    return simple_audio_cfg()->output;
+}
+
+/* دادهٔ دیکدشده، قبل از ولوم. NULL = برداشتن کالبک. */
+void SimpleAudio_SetDataCallback(FM_AudioDataFn fn, void *ctx)
+{
+    AudioDma_Config *cfg = simple_audio_cfg();
+
+    cfg->data_ctx = ctx;
+    cfg->data_cb = fn;
+    AudioDma_SetDataCallback(&sa.dma, fn, ctx);
+}
+
+/* بعد از ولوم: همان نمونه‌هایی که به بلندگو می‌رود. NULL = برداشتن. */
+void SimpleAudio_SetMonitorCallback(FM_AudioDataFn fn, void *ctx)
+{
+    AudioDma_Config *cfg = simple_audio_cfg();
+
+    cfg->monitor_ctx = ctx;
+    cfg->monitor_cb = fn;
+    AudioDma_SetMonitorCallback(&sa.dma, fn, ctx);
+}
+
+typedef AudioDma_TrackFn SimpleAudio_TrackFn;
+
+/* شروع و پایان هر ترک: مسیر فایل و مشخصات آن (FM_AudioInfo). از حلقهٔ
+ * اصلی صدا زده می‌شوند، نه از وقفه. اگر هنگام نصبِ «شروع» ترکی در حال
+ * پخش باشد، همان لحظه گزارش می‌شود. */
+void SimpleAudio_SetTrackStartCallback(SimpleAudio_TrackFn fn, void *ctx)
+{
+    AudioDma_Config *cfg = simple_audio_cfg();
+
+    cfg->track_start_cb = fn;
+    cfg->track_start_ctx = ctx;
+    AudioDma_SetTrackStartCallback(&sa.dma, fn, ctx);
+}
+
+void SimpleAudio_SetTrackEndCallback(SimpleAudio_TrackFn fn, void *ctx)
+{
+    AudioDma_Config *cfg = simple_audio_cfg();
+
+    cfg->track_end_cb = fn;
+    cfg->track_end_ctx = ctx;
+    AudioDma_SetTrackEndCallback(&sa.dma, fn, ctx);
+}
 
 /* ------------------------------------------------------------------------ */
 /* پخش                                                                        */
@@ -536,84 +636,11 @@ typedef struct
 /*
  * شروع: اسکن پوشه، پخش اولین فایل قابل‌پخش، پرکردن بافرها، شروع DMA.
  * WAV/MP3 و mono/stereo — همه خودکار؛ فایل‌های خراب/ناپشتیبانی رد می‌شوند.
+ * خروجی، کالبک‌ها، ولوم و حالت پخشِ تنظیم‌شده از همان اولین بافر اعمال
+ * می‌شوند.
  */
-/* ------------------------------------------------------------------------ */
-/* دسترسی زندهٔ به دادهٔ صدا در حین پخش                                      */
-/* ------------------------------------------------------------------------ */
-/*
- * SimpleAudio_DataRead() بالا استریم را جلو می‌برد، پس برای «شنیدن همان
- * چیزی که پخش می‌شود» مناسب نیست. این قلاب دقیقاً همان نمونه‌هایی را
- * می‌دهد که لحظهٔ بعد از بلندگو بیرون می‌آید — بعد از اعمال ولوم.
- *
- * کاربرد: ضبط همزمان با پخش، VU meter، FFT، یا هر افکتی (بافر قابل
- * نوشتن است؛ اگر تغییرش دهید همان تغییر شنیده می‌شود).
- *
- *     static int16_t ring[8192];
- *     static volatile size_t ring_len;
- *
- *     static void my_tap(void *ctx, int16_t *pcm, size_t samples,
- *                        uint32_t rate, uint16_t ch)
- *     {
- *         (void)ctx; (void)rate; (void)ch;
- *         // فقط کپی کن و برو — اینجا عملاً داخل وقفه هستید.
- *         if (samples > 8192u) { samples = 8192u; }
- *         memcpy(ring, pcm, samples * sizeof(int16_t));
- *         ring_len = samples;
- *     }
- *
- *     SimpleAudio_SetPcmTap(my_tap, NULL);
- *
- *     // و در حلقهٔ اصلی، جایی که I/O امن است:
- *     if (ring_len) { SimpleAudio_RecWrite(ring, ring_len / 2u); ring_len = 0; }
- *
- * هشدار: این تابع روی مسیر پرکردن DMA صدا زده می‌شود. کار سنگین یا
- * نوشتن مستقیم فایل داخلش باعث گرسنگی DMA و تق‌تق صدا می‌شود.
- */
-typedef AudioDma_PcmTapFn SimpleAudio_PcmTapFn;
-
-void SimpleAudio_SetPcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
-{
-    AudioDma_SetPcmTap(&sa.dma, fn, ctx);
-}
-
-/* Pre-I2S tap: raw decoded PCM before volume/gain, editable.
- * Called in the refill path with the samples that were just decoded.
- * You may modify pcm[] in place; the modified data will then be volume-scaled
- * and sent to I2S. Keep it very short (memcpy/DSP only) — heavy work will
- * starve DMA. */
-void SimpleAudio_SetPrePcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
-{
-    AudioDma_SetPrePcmTap(&sa.dma, fn, ctx);
-}
-
-/* Post-gain tap (same as SetPcmTap): after volume, exactly what speaker gets.
- * Also editable before cache clean. Provided as explicit alias. */
-void SimpleAudio_SetPostPcmTap(SimpleAudio_PcmTapFn fn, void *ctx)
-{
-    AudioDma_SetPostPcmTap(&sa.dma, fn, ctx);
-}
-
-typedef AudioDma_TrackFn SimpleAudio_TrackFn;
-
-/* Track lifecycle callbacks: on_track_start fires once when a track begins
- * playing; on_track_end fires when it has finished (data fully consumed).
- * Both report the same path + decoded FM_AudioInfo so the DSP knows exactly
- * which music/audio is being processed. Install AFTER SimpleAudio_Begin()
- * (Begin resets the player), same as the PCM taps. They run on the
- * super-loop, not an ISR. */
-void SimpleAudio_SetTrackStart(SimpleAudio_TrackFn fn, void *ctx)
-{
-    AudioDma_SetTrackStart(&sa.dma, fn, ctx);
-}
-
-void SimpleAudio_SetTrackEnd(SimpleAudio_TrackFn fn, void *ctx)
-{
-    AudioDma_SetTrackEnd(&sa.dma, fn, ctx);
-}
-
 FM_Result SimpleAudio_Begin(void)
 {
-    AudioDma_Options opts;
     FM_Result r;
 
     if (sa.dma.running || sa.rec_active)
@@ -625,11 +652,7 @@ FM_Result SimpleAudio_Begin(void)
                    simple_audio_i2s_err, SimpleAudio_Stop);
 
     memset(&sa, 0, sizeof(sa));
-    sa.volume_pct = 100u;
     sa_refill_log_left = 3u;
-
-    opts.force_stereo = FM_TRUE; /* mono -> استریو، خودکار           */
-    opts.volume = (int16_t)(((uint32_t)sa.volume_pct * 0x7FFFu) / 100u);
 
     /* دیباگ: آدرس/آلایمن بافر DMA — اگر start با invalid-argument رد
      * شود، این خط نشان می‌دهد بافر کجا قرار گرفته است. */
@@ -638,9 +661,9 @@ FM_Result SimpleAudio_Begin(void)
            (((uintptr_t)simple_audio_dma_buf & 0x3u) == 0u) ? 1 : 0,
            (unsigned long)SIMPLE_AUDIO_HALF_SAMPLES, SIMPLE_AUDIO_FOLDER);
 
-    r = AudioDma_StartEx(
+    r = AudioDma_StartConfig(
         &sa.dma, SIMPLE_AUDIO_FOLDER, &simple_audio_port, &hi2s1,
-        simple_audio_dma_buf, SIMPLE_AUDIO_HALF_SAMPLES, &opts);
+        simple_audio_dma_buf, SIMPLE_AUDIO_HALF_SAMPLES, simple_audio_cfg());
     if (r != FM_OK)
     {
         FM_Log("SimpleAudio: start failed: %s (%d)\n",
@@ -1149,7 +1172,25 @@ FM_Result SimpleAudio_Poll(void)
     return r;
 }
 
-/* ⏹ توقف کامل (DMA + لیست پخش). برای شروع دوباره: SimpleAudio_Begin(). */
+/* شروع یا ادامه: اگر Pause است ادامه می‌دهد، اگر متوقف است Begin می‌کند،
+ * اگر در حال پخش است کاری نمی‌کند. همتای SimpleVideo_Start. */
+FM_Result SimpleAudio_Resume(void);
+
+FM_Result SimpleAudio_Start(void)
+{
+    if (sa.paused != 0u)
+    {
+        return SimpleAudio_Resume();
+    }
+    if (AudioDma_IsRunning(&sa.dma))
+    {
+        return FM_OK;
+    }
+    return SimpleAudio_Begin();
+}
+
+/* توقف کامل (DMA + لیست پخش). برای شروع دوباره: SimpleAudio_Begin() یا
+ * SimpleAudio_Start(). تنظیم‌ها (خروجی، کالبک‌ها، ولوم) می‌مانند. */
 FM_Result SimpleAudio_Stop(void)
 {
     FM_Result r;
@@ -1373,36 +1414,48 @@ FM_Result SimpleAudio_SeekBy(double seconds)
     return SimpleAudio_SeekTo(target);
 }
 
-/* 🔊 صدای نرم‌افزاری: 0..100 (در refill اعمال می‌شود — بلافاصله). */
+/* ولوم نرم‌افزاری 0..200: 100 = بدون تغییر، بالاتر = تقویت با اشباع (تا
+ * +6dB)، 0 = سکوت. از بافر بعدی اعمال می‌شود. همان بازهٔ
+ * SimpleVideo_SetVolume. */
 FM_Result SimpleAudio_SetVolume(uint8_t percent)
 {
-    if (percent > 100u)
+    int32_t gain;
+
+    if (percent > 200u)
     {
-        percent = 100u;
+        percent = 200u;
     }
-    sa.volume_pct = percent;
-    AudioDma_SetVolume(
-        &sa.dma, (int16_t)(((uint32_t)percent * 0x7FFFu) / 100u));
+    gain = (int32_t)(((uint32_t)percent * 0x7FFFu) / 100u);
+    sa_volume_pct = percent;
+    simple_audio_cfg()->volume = gain;
+    AudioDma_SetVolume(&sa.dma, gain);
     return FM_OK;
+}
+
+uint8_t SimpleAudio_GetVolume(void)
+{
+    return sa_volume_pct;
 }
 
 /* حالت ماندگاری پخش — چی شد وقتی آهنگ تمام شد؟
  * FM_PLAY_MODE_STOP       : تمام شد → توقف (pause، نرو بعدی)
  * FM_PLAY_MODE_NEXT       : تمام شد → بعدی، آخر لیست → توقف
  * FM_PLAY_MODE_REPEAT_ONE : تمام شد → همین آهنگ دوباره (تکرار یک)
- * FM_PLAY_MODE_REPEAT_ALL : تمام شد → بعدی، آخر → اول (لوپ پوشه) — پیش‌فرض قدیمی
+ * FM_PLAY_MODE_REPEAT_ALL : تمام شد → بعدی، آخر → اول (لوپ پوشه) — پیش‌فرض
  * برای پرزنت: STOP یا NEXT بذار تا خودش نپره؛ برای موزیک پس‌زمینه REPEAT_ALL. */
 FM_Result SimpleAudio_SetPlayMode(FM_PlayMode mode)
 {
     if ((int)mode < FM_PLAY_MODE_STOP || (int)mode > FM_PLAY_MODE_REPEAT_ALL) return FM_ERR_INVALID_ARGUMENT;
+    simple_audio_cfg()->play_mode = mode;
     AudioDma_SetPlayMode(&sa.dma, mode);
     FM_Log("SimpleAudio: SetPlayMode(%d) %s\n", (int)mode,
            mode==FM_PLAY_MODE_STOP?"STOP":mode==FM_PLAY_MODE_NEXT?"NEXT":mode==FM_PLAY_MODE_REPEAT_ONE?"REPEAT_ONE":"REPEAT_ALL");
     return FM_OK;
 }
-FM_PlayMode SimpleAudio_GetPlayMode(void) { return AudioDma_GetPlayMode(&sa.dma); }
-void SimpleAudio_SetRepeatMode(int mode) { (void)SimpleAudio_SetPlayMode((FM_PlayMode)mode); } /* compat */
-uint8_t SimpleAudio_IsRepeatOne(void) { return (SimpleAudio_GetPlayMode()==FM_PLAY_MODE_REPEAT_ONE)?1u:0u; }
+FM_PlayMode SimpleAudio_GetPlayMode(void)
+{
+    return simple_audio_cfg()->play_mode;
+}
 
 /*
  * «اسم موزیک و تنظیم صدا» — همهٔ اطلاعات استریم فعلی در یک struct.
@@ -1418,8 +1471,11 @@ void SimpleAudio_Info(SimpleAudioInfo *out)
     }
     memset(out, 0, sizeof(*out));
     out->bits = 16;
-    out->volume_pct = sa.volume_pct;
+    out->volume_pct = sa_volume_pct;
     out->paused = sa.paused;
+    out->running = (sa.dma.running || sa.paused) ? 1u : 0u;
+    out->play_mode = simple_audio_cfg()->play_mode;
+    out->output = simple_audio_cfg()->output;
 
     if (!sa.dma.running && !sa.paused)
     {
@@ -1445,11 +1501,11 @@ void SimpleAudio_Info(SimpleAudioInfo *out)
 }
 
 /*
- * «دیتای موزیک در دست شما» — استریو نرمال‌شده (جفت L,R).
+ * خواندن مستقیم از دیکدرِ ترکِ در حال پخش — استریو (جفت L,R).
  *
- * نکته: این همان استریمی است که بلندگو می‌پخشد؛ خواندن یعنی جلو بردن
- * موقعیت پخش (آنچه می‌خوانید همان‌طور که پخش شد می‌آید). اگر استریم
- * مستقل می‌خواهید (بدون اثر بر پخش)، خودتان فایل را باز کنید:
+ * این تابع استریم پخش را جلو می‌برد: آنچه اینجا بخوانید دیگر به بلندگو
+ * نمی‌رسد. برای «همان صدایی که پخش می‌شود» SimpleAudio_SetDataCallback را
+ * استفاده کنید. برای خواندن یک فایل بدون پخش، خودتان بازش کنید:
  *
  *     FM_Audio a;
  *     Audio_Open("/music/x.mp3", &a);

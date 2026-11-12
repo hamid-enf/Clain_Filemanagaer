@@ -69,8 +69,32 @@ static void cmd_mode1(void) { cmd_set_play_mode((int)FM_PLAY_MODE_NEXT); }
 static void cmd_mode2(void) { cmd_set_play_mode((int)FM_PLAY_MODE_REPEAT_ONE); }
 static void cmd_mode3(void) { cmd_set_play_mode((int)FM_PLAY_MODE_REPEAT_ALL); }
 
+/* --- صدا کجا برود؟ (موزیک: aoutN، صدای ویدیو: voutN) ---------------- */
+static void cmd_audio_out(int video, FM_AudioOutput out)
+{
+    static const char *const names[4] =
+        { "none", "speaker", "callback", "speaker+callback" };
+
+    if (video)
+    {
+        (void)SimpleVideo_SetAudioOutput(out);
+    }
+    else
+    {
+        (void)SimpleAudio_SetOutput(out);
+    }
+    printf("%s audio output: %s\n", video ? "video" : "music",
+           names[(unsigned)out & 3u]);
+}
+static void cmd_aout1(void) { cmd_audio_out(0, FM_AUDIO_OUT_SPEAKER); }
+static void cmd_aout2(void) { cmd_audio_out(0, FM_AUDIO_OUT_CALLBACK); }
+static void cmd_aout3(void) { cmd_audio_out(0, FM_AUDIO_OUT_BOTH); }
+static void cmd_vout0(void) { cmd_audio_out(1, FM_AUDIO_OUT_NONE); }
+static void cmd_vout1(void) { cmd_audio_out(1, FM_AUDIO_OUT_SPEAKER); }
+static void cmd_vout2(void) { cmd_audio_out(1, FM_AUDIO_OUT_CALLBACK); }
+static void cmd_vout3(void) { cmd_audio_out(1, FM_AUDIO_OUT_BOTH); }
+
 /* --- SimpleImage (اسلایدشو) --------------------------------------- */
-static void cmd_start(void) { printf("SimpleImage_Begin\n");    SimpleImage_Begin(); }
 static void cmd_ipoll(void) { printf("SimpleImage_Poll\n");    SimpleImage_Poll(); }
 static void cmd_inext(void) { printf("SimpleImage_Next\n");    SimpleImage_Next(); }
 static void cmd_iprev(void) { printf("SimpleImage_Prev\n");    SimpleImage_Prev(); }
@@ -134,6 +158,15 @@ static const CmdMusic_Entry cmd_table[] =
     { "mode2",  cmd_mode2 },
     { "mode3",  cmd_mode3 },
 
+    /* --- مسیر صدا: 1 = بلندگو، 2 = فقط کالبک، 3 = هر دو، 0 = هیچ --- */
+    { "aout1",  cmd_aout1 },
+    { "aout2",  cmd_aout2 },
+    { "aout3",  cmd_aout3 },
+    { "vout0",  cmd_vout0 },
+    { "vout1",  cmd_vout1 },
+    { "vout2",  cmd_vout2 },
+    { "vout3",  cmd_vout3 },
+
     /* --- خواندن PCM خام (audio_record_with_tap.h) --- */
     { "dtrd",   Music_DataRead     },
     { "dtrdm",  Music_DataReadMono },
@@ -151,7 +184,6 @@ static const CmdMusic_Entry cmd_table[] =
     { "vnopres", Music_ToggleVideoPresent },   /* تست کراکل: نمایش LCD خاموش/روشن */
 
     /* --- SimpleImage --- */
-    { "istart",  cmd_start },
     { "ipoll",  cmd_ipoll },
     { "inext",  cmd_inext },
     { "iprev",  cmd_iprev },
@@ -181,8 +213,8 @@ static const CmdMusic_Entry cmd_table[] =
     { "vvol9",  cmd_vvol9 },
     { "vvol5",  cmd_vvol5 },
     /* قلاب‌های شروع/پایان ویدیو + فریم داده (DSP مستقل از نمایش) */
-    { "vmut",   Music_VideoMute   },   /* صدای ویدیو خاموش (پردازش فقط داده) */
-    { "vunmut", Music_VideoUnmute },   /* صدای ویدیو روشن */
+    { "vmut",   Music_VideoMute   },   /* صدای ویدیو فقط به کالبک (= vout2) */
+    { "vunmut", Music_VideoUnmute },   /* بلندگو + کالبک (= vout3) */
 
     /* --- SD / QSPI --- */
     { "sdmcu",  cmd_sdmcu },

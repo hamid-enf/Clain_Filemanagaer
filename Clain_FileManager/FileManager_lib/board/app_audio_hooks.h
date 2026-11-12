@@ -6,7 +6,7 @@
  *   app_audio_pre_tap            قبل از ولوم: نرمالایزر بلندی (tap1 / tap0)
  *   app_audio_pcm_tap                  بعد از ولوم: پیک زنده + رینگ ضبط
  *   app_audio_track_start/end    شروع و پایان هر ترک
- *   Music_InstallTaps()         نصب همهٔ این‌ها — بعد از هر SimpleAudio_Begin()
+ *   Music_InstallTaps()         نصب همهٔ این‌ها — یک‌بار کافی است (ماندگارند)
  *   Music_*                     دستورهای UART (جدول در top_api/code_cmd.h)
  *   Music_RecPump()             فایل ضبط rectest — در حلقهٔ اصلی
  *
@@ -82,8 +82,10 @@ void Music_DataReadMono(void)
  *   - این توابع داخل مسیر refill صدا زده می‌شوند؛ فقط کار سبک
  *     (حلقهٔ کوتاه / memcpy). باز کردن و نوشتن فایل اینجا ممنوع —
  *     گرسنگی DMA و تق‌تق صدا.
- *   - نصب: Music_InstallTaps() بعد از «هر» SimpleAudio_Begin() (چون Begin
- *     کل حالت را پاک می‌کند و قلاب نصب‌شده را می‌اندازد).
+ *   - نصب: Music_InstallTaps()، قبل یا بعد از SimpleAudio_Begin(). کالبک‌ها
+ *     ماندگارند و با Stop/Begin پاک نمی‌شوند.
+ *   - مسیر: SimpleAudio_SetOutput(FM_AUDIO_OUT_SPEAKER / _CALLBACK / _BOTH)
+ *     (دستورهای aout1 / aout2 / aout3).
  */
 
 /* ---- ۱) قبل از پردازش صدا (قبل از ولوم) ---------------------------------- */
@@ -222,7 +224,7 @@ static void app_audio_pcm_tap(void *ctx, int16_t *pcm, size_t samples,
 }
 
 /* ---- قلاب‌های شروع/پایان ترک (DSP می‌داند چه چیزی پردازش می‌شود) ---------
- * SimpleAudio_SetTrackStart/SetTrackEnd: وقتی یک ترک شروع/تمام می‌شود
+ * SimpleAudio_SetTrackStartCallback/SetTrackEndCallback: وقتی یک ترک شروع/تمام می‌شود
  * صدا زده می‌شوند (از حلقهٔ اصلی، نه ISR). همین‌جا است که لایهٔ DSP
  * «کدام موزیک» در حال پردازش است را می‌فهمد؛ اگر پردازش گران است آن را
  * به تپِ PCM بدهید، نه اینجا (اینجا فقط چند چاپ سبک). */
@@ -251,15 +253,17 @@ static void app_audio_track_end(void *ctx, const char *path,
     printf("audio track END: %s\n", (path != NULL) ? path : "");
 }
 
-/* ---- نصب هر دو قلاب (بعد از هر Begin) ------------------------------------ */
+/* ---- نصب کالبک‌های موزیک ---------------------------------------------------
+ * یک‌بار کافی است؛ با Stop/Begin پاک نمی‌شوند. فراخوانی دوباره فقط
+ * نرمالایزر را از صفر شروع می‌کند. */
 static void Music_InstallTaps(void)
 {
     agc_peak_env = 0u;              /* تراک جدید: دنباله از صفر */
     agc_gain_q8 = 256u;
-    SimpleAudio_SetPrePcmTap(app_audio_pre_tap, NULL);   /* قبل از ولوم */
-    SimpleAudio_SetPcmTap(app_audio_pcm_tap, NULL);            /* بعد از ولوم  */
-    SimpleAudio_SetTrackStart(app_audio_track_start, NULL);
-    SimpleAudio_SetTrackEnd(app_audio_track_end, NULL);
+    SimpleAudio_SetDataCallback(app_audio_pre_tap, NULL);    /* قبل از ولوم */
+    SimpleAudio_SetMonitorCallback(app_audio_pcm_tap, NULL); /* بعد از ولوم */
+    SimpleAudio_SetTrackStartCallback(app_audio_track_start, NULL);
+    SimpleAudio_SetTrackEndCallback(app_audio_track_end, NULL);
 }
 
 /* ---- دستورهای UART جدید (از top_api/code_cmd.h صدا زده می‌شوند) ------------- */
@@ -337,13 +341,15 @@ static void Music_ImageStart(void)
     }
 }
 
-/* EnableAudio: خاموش/روشن صدای ویدیو (تست ایزولهٔ تصویر) */
+/* EnableAudio: خاموش/روشن صدای ویدیو (تست ایزولهٔ تصویر).
+ * خاموش = FM_AUDIO_OUT_NONE: از کلیپ بعدی ترک صدا اصلاً خوانده نمی‌شود. */
 static void Music_ToggleVideoAudio(void)
 {
     static uint8_t ve = 1u;
 
     ve = (uint8_t)!ve;
-    SimpleVideo_EnableAudio(ve);
+    (void)SimpleVideo_SetAudioOutput(ve ? FM_AUDIO_OUT_BOTH
+                                        : FM_AUDIO_OUT_NONE);
     printf("EnableAudio: صدای ویدیو %s\n", ve ? "روشن" : "خاموش");
 }
 

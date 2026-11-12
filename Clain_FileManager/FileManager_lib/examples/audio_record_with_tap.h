@@ -1,30 +1,38 @@
 /*
- * audio_record_with_tap.h — Audio Record with Pre-I2S Tap (MyPCM) + Video Audio Access
+ * audio_record_with_tap.h — audio callbacks, recording and video data access
  *
- *   SimpleAudio:  Pre/Post PCM taps before I2S, DSP, and recording
- *   SimpleVideo:  Frame+Audio access, global audio enable flag
+ *   SimpleAudio:  data / monitor callbacks, DSP and recording
+ *   SimpleVideo:  frame + sound access, audio output switch
  *   Directory:    QSPI <-> SD folder copy/move
  *
  * Wiring:
- *   1. Call SimpleAudio_SetPrePcmTap(my_dsp, NULL) before Begin.
- *      my_dsp receives raw decoded PCM before volume, you may edit in place.
- *      Use SimpleAudio_SetPostPcmTap for monitoring what speaker will get.
- *      SimpleAudio_SetTrackStart / SetTrackEnd tell the DSP WHICH track is
- *      being processed (path + codec/rate/channels on start, same path on
- *      end). Install AFTER Begin (Begin resets the player).
- *   2. For video, SimpleVideo_EnableAudio(0) to save SD/CPU when you only
- *      need pictures (mute in the processing path).
+ *   1. SimpleAudio_SetDataCallback(my_dsp, NULL): my_dsp gets the decoded
+ *      PCM before the volume and may edit it in place.
+ *      SimpleAudio_SetMonitorCallback(fn, NULL): what the speaker will get.
+ *      SimpleAudio_SetOutput(FM_AUDIO_OUT_CALLBACK) keeps the speaker
+ *      silent and only feeds the callbacks; _SPEAKER skips them; _BOTH
+ *      (default) does both.
+ *      SimpleAudio_SetTrackStartCallback / SetTrackEndCallback tell the DSP
+ *      WHICH track is being processed (path + codec/rate/channels on
+ *      start, same path on end).
+ *      All of them are kept across Stop()/Begin(): install once, before
+ *      or after Begin.
+ *   2. Video sound uses the same model: SimpleVideo_SetAudioOutput(),
+ *      SimpleVideo_SetAudioDataCallback(), SetAudioMonitorCallback().
+ *      FM_AUDIO_OUT_NONE skips the audio track completely (pictures
+ *      only: saves SD time and CPU).
  *      SimpleVideo_SetTrackStartCallback / SetTrackEndCallback report which
  *      video started/ended; SimpleVideo_SetFrameCallback delivers each
  *      decoded frame even when no present callback is installed (data-only
- *      mode — the "60% of the time I only want the data" case).
+ *      mode).
  *      SimpleVideo_SetPlayMode(FM_PLAY_MODE_STOP) + SimpleVideo_Next() lets
  *      the USER advance to the next video manually instead of auto-play.
- *      SimpleVideo_GetFrame(&w,&h) gives RGB888, SimpleVideo_ReadAudio() PCM.
+ *      SimpleVideo_GetFrame(&w,&h) gives RGB888, SimpleVideo_AudioDataRead()
+ *      PCM.
  *   3. Folder copy: Directory_Copy("/qspi/myFolder", "/sd/backup", progress, NULL)
  *      recurses depth-first across QSPI <-> SD; Directory_Move is copy+delete.
  *   4. Recording: SimpleAudio_RecStart("/sd/rec", 16000, 1) then feed PCM via
- *      tap or mic, then SimpleAudio_RecStop().
+ *      a callback or a mic, then SimpleAudio_RecStop().
  */
 
 #ifndef FM_TOPAPI_AUDIO_RECORD_WITH_TAP_H
@@ -90,12 +98,12 @@ static void audio_record_track_end(void *ctx, const char *path,
 
 static void audio_record_tap_setup(void)
 {
-    SimpleAudio_SetPrePcmTap(audio_record_pre_dsp, NULL);
-    SimpleAudio_SetPostPcmTap(audio_record_post_tap, NULL);
-    /* Legacy alias still works: SimpleAudio_SetPcmTap(audio_record_post_tap, NULL) */
-    /* Tell the DSP which music is playing / finished (after Begin). */
-    SimpleAudio_SetTrackStart(audio_record_track_start, NULL);
-    SimpleAudio_SetTrackEnd(audio_record_track_end, NULL);
+    SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);   /* speaker + callbacks */
+    SimpleAudio_SetDataCallback(audio_record_pre_dsp, NULL);
+    SimpleAudio_SetMonitorCallback(audio_record_post_tap, NULL);
+    /* Tell the DSP which music is playing / finished. */
+    SimpleAudio_SetTrackStartCallback(audio_record_track_start, NULL);
+    SimpleAudio_SetTrackEndCallback(audio_record_track_end, NULL);
 }
 
 /* Recording flow: start, pump via tap, stop.
@@ -158,13 +166,14 @@ static void audio_record_video_frame(void *ctx, const void *px, uint16_t w,
 
 static void audio_record_video_setup(void)
 {
-    /* If you only need pictures (image processing), disable video audio
-     * to save SD bandwidth and decoder CPU. Music is not affected. */
-    // SimpleVideo_EnableAudio(0); // pictures only
-    SimpleVideo_EnableAudio(1); // audio + pictures
+    /* If you only need pictures (image processing), switch the video
+     * sound off to save SD bandwidth and decoder CPU. Music is not
+     * affected. */
+    // SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_NONE);   // pictures only
+    SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);      // sound + pictures
 
-    SimpleVideo_SetPrePcmTap(audio_record_video_pre_tap, NULL);
-    SimpleVideo_SetPostPcmTap(audio_record_video_post_tap, NULL);
+    SimpleVideo_SetAudioDataCallback(audio_record_video_pre_tap, NULL);
+    SimpleVideo_SetAudioMonitorCallback(audio_record_video_post_tap, NULL);
 
     /* Which video started/ended + per-frame data (data-only aware). */
     SimpleVideo_SetTrackStartCallback(audio_record_video_track_start, NULL);
@@ -186,7 +195,7 @@ static void audio_record_video_setup(void)
     //         // ai.codec, sample_rate, channels, bits
     //     }
     //     int16_t pcm[2048]; size_t got_frames;
-    //     if (SimpleVideo_ReadAudio(pcm, 1024, &got_frames) == FM_OK) {
+    //     if (SimpleVideo_AudioDataRead(pcm, 1024, &got_frames) == FM_OK) {
     //         // got_frames * ai.channels samples in pcm
     //     }
     // }

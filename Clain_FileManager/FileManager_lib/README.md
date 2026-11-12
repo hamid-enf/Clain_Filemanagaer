@@ -1,5 +1,8 @@
 # FileManager
 
+> راهنمای فارسی کتابخانه (قابلیت‌ها، شروع سریع، همهٔ توابع با نمونه‌کد):
+> [`docs/GUIDE_FA.md`](docs/GUIDE_FA.md)
+
 A lightweight, allocation-free, portable **Unified File & Storage Framework** for C projects, embedded firmware and host tools.
 
 The library puts a high-level API over filesystems and storage drivers. Applications can use `File_WriteText`, `File_ReadAll`, `File_Copy`, `File_Move`, `Directory_Create` and similar operations without handling block sizes, chunks, directory handles or filesystem-specific calls.

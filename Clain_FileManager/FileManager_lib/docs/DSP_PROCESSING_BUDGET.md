@@ -6,7 +6,8 @@ explains the new track + frame callbacks on this branch.
 
 ## Audio (music) — `SimpleAudio` / `AudioDma`
 
-The PCM taps (`SimpleAudio_SetPrePcmTap`, `SimpleAudio_SetPostPcmTap`) fire once
+The PCM callbacks (`SimpleAudio_SetDataCallback` before the volume,
+`SimpleAudio_SetMonitorCallback` after it) fire once
 per DMA half-buffer refill, in the super-loop (`AudioDma_Poll`), NOT in the
 I2S ISR. The refill happens when the DMA has consumed the other half.
 
@@ -82,9 +83,11 @@ only until the next call).
 Both players now report which item is being processed:
 
 * **Audio** — `SimpleAudio_SetTrackStartCallback` / `SimpleAudio_SetTrackEndCallback`
-  (backed by `AudioDma_SetTrackStart`/`SetTrackEnd`). Start fires once when a
-  track begins; end fires when it finishes (EOF) or is stopped. `SetTrackStart`
-  also reports the already-playing track if installed after `Begin()`.
+  (backed by `AudioDma_SetTrackStartCallback`/`SetTrackEndCallback`). Start
+  fires once when a track begins; end fires when it finishes (EOF) or is
+  stopped. The start callback also reports the already-playing track if it is
+  installed after `Begin()`. Like the PCM callbacks they are kept across
+  `Stop()`/`Begin()`.
 * **Video** — `SimpleVideo_SetTrackStartCallback` / `SimpleVideo_SetTrackEndCallback`.
   Start fires once when an item starts; end fires when it ends (EOF) or is
   stopped. `SimpleVideo_SetTrackEndCallback` is the natural point to drive the
