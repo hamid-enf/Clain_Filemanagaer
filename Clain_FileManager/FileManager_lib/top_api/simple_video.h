@@ -293,10 +293,15 @@ FM_Result SimpleVideo_RecSetAudio(uint32_t rate, uint16_t channels)
 FM_Result SimpleVideo_RecWritePixels(const void *pixels,
         FM_PixelFormat format)
 { (void)pixels; (void)format; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecWritePlayerFrame(const void *pixels,
+        FM_PixelFormat format)
+{ (void)pixels; (void)format; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_RecWriteJpeg(const void *jpeg, size_t bytes)
 { (void)jpeg; (void)bytes; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_RecWriteAudio(const int16_t *pcm, size_t frames)
 { (void)pcm; (void)frames; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecRepeat(uint32_t count)
+{ (void)count; return FM_ERR_UNSUPPORTED; }
 FM_Bool SimpleVideo_RecActive(void)
 { return FM_FALSE; }
 uint32_t SimpleVideo_RecFrames(void)
@@ -1116,9 +1121,14 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
 
             if (r == FM_ERR_EOF)
             {
+                /* End of the sound: silence for the rest of the half.  The
+                 * samples already in it still go through the callbacks,
+                 * the volume and the fade below (they used to skip all
+                 * three: the last part of the sound was played at full
+                 * volume and never reached the data callback). */
                 memset(dst + filled, 0,
                        dst_left * sizeof(int16_t));
-                return FM_OK;
+                break;
             }
             if (r != FM_OK)
             {
@@ -1136,7 +1146,7 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
                            (unsigned long)sv_i2s_read_errs);
                 }
                 memset(dst + filled, 0, dst_left * sizeof(int16_t));
-                return FM_OK;
+                break;
             }
             sv_pcm_len = got;
             sv_pcm_off = 0;
@@ -1206,8 +1216,10 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
     if (sv_pcm_tap_pre != NULL && filled > 0u &&
         ((unsigned)sv_audio_out & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
     {
+        /* The buffer is always interleaved L/R (a mono track was doubled
+         * above), so the callback is told 2 channels: samples / 2 frames. */
         sv_pcm_tap_pre(sv_pcm_tap_pre_ctx, dst, filled,
-                       sv.audio.sample_rate, sv.audio.channels);
+                       sv.audio.sample_rate, (uint16_t)2u);
     }
     if (sv_volume_pct != 100u && filled > 0u)
     {
@@ -1325,7 +1337,7 @@ static FM_Result sv_i2s_fill_half_inner(uint8_t half)
         ((unsigned)sv_audio_out & (unsigned)FM_AUDIO_OUT_CALLBACK) != 0u)
     {
         sv_pcm_tap_post(sv_pcm_tap_post_ctx, dst, filled,
-                        sv.audio.sample_rate, sv.audio.channels);
+                        sv.audio.sample_rate, (uint16_t)2u);
     }
     return FM_OK;
 }
@@ -3459,6 +3471,8 @@ FM_Result SimpleVideo_SaveFrame(const char *path)
 /*     SimpleVideo_RecWrite(rgb888, 320 * 240 * 3);      // یا             */
 /*     SimpleVideo_RecWriteJpeg(jpg, bytes);    // دوربین در حالت JPEG     */
 /*     SimpleVideo_RecWriteAudio(pcm, 16000 / 15);       // صدای همان فریم */
+/*     SimpleVideo_RecRepeat(n);       // n بار دیگر همان تصویر قبلی       */
+/*     SimpleVideo_RecWritePlayerFrame(px, fmt); // فریم کالبک پخش‌کننده     */
 /*   SimpleVideo_RecStop();                     // الزامی: ایندکس و طول     */
 /*                                                                      */
 /* فایل به فایل (هر ویدیویی که پخش می‌شود -> MJPEG AVI)، با کالبک روی هر    */
@@ -3588,6 +3602,26 @@ FM_Result SimpleVideo_RecWritePixels(const void *pixels,
     return VideoFileWriter_WriteFrame(&sv_avi, pixels, format);
 }
 
+/* یک فریم همان‌طور که خود پخش‌کننده تحویل می‌دهد: پیکسل‌های کالبک فریم
+ * (SimpleVideo_SetFrameCallback) یا SimpleVideo_Info().pixels، با همان
+ * format. فرق با RecWritePixels: خروجی ۱۶ بیتی پخش‌کننده برای LCDهای SPI
+ * بایت‌جابه‌جا است (SIMPLE_VIDEO_SWAP16 / SimpleVideo_SetSwap16)؛ این تابع
+ * همان را در نظر می‌گیرد تا رنگ‌های فایل درست باشد. فقط برای ‎.avi‎. */
+FM_Result SimpleVideo_RecWritePlayerFrame(const void *pixels,
+                                          FM_PixelFormat format)
+{
+    if (!sv_avi_active)
+    {
+        return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
+    }
+    if ((format == FM_PIXEL_RGB565 || format == FM_PIXEL_BGR565) &&
+        sv_swap16_active() != 0u)
+    {
+        return VideoFileWriter_WriteFrameSwap16(&sv_avi, pixels, format);
+    }
+    return VideoFileWriter_WriteFrame(&sv_avi, pixels, format);
+}
+
 /* یک فریم که خودش JPEG است (FF D8 ... FF D9) — دوربین در حالت JPEG یا
  * JPEG سخت‌افزاری؛ بدون هیچ پردازشی ذخیره می‌شود. فقط برای ‎.avi‎. */
 FM_Result SimpleVideo_RecWriteJpeg(const void *jpeg, size_t bytes)
@@ -3597,6 +3631,19 @@ FM_Result SimpleVideo_RecWriteJpeg(const void *jpeg, size_t bytes)
         return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
     }
     return VideoFileWriter_WriteJpeg(&sv_avi, jpeg, bytes);
+}
+
+/* همان تصویر قبلی، `count` بار دیگر (بدون فشرده‌سازی دوباره؛ از خود فایل
+ * کپی می‌شود). برای وقتی که منبع فریم جا انداخته و زمان فایل باید با صدا
+ * جور بماند: به تعداد فریم‌های جاافتاده صدا بزنید. قبل از اولین تصویر
+ * FM_ERR_NOT_READY. فقط برای ‎.avi‎. */
+FM_Result SimpleVideo_RecRepeat(uint32_t count)
+{
+    if (!sv_avi_active)
+    {
+        return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
+    }
+    return VideoFileWriter_RepeatFrame(&sv_avi, count);
 }
 
 /* صدای فایل: `frames` فریم PCM شانزده‌بیتی با مشخصات RecSetAudio. بعد از
@@ -3732,7 +3779,10 @@ void SimpleVideo_Info(SimpleVideoInfo *out)
     out->running = sv.running ? 1u : 0u;
     out->format = sv.format;
     out->volume_pct = sv_volume_pct;
-    if (!sv.running)
+    /* The first picture of an item is presented (frame callback included)
+     * just before `running` is set; the item is open by then, so its
+     * details are reported there too. */
+    if (!sv.running && !sv.have_frame)
     {
         return;
     }

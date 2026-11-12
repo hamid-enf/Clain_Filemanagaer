@@ -70,6 +70,7 @@ build-asan/
 fm_cachetest
 fm_videohooks
 fm_audiorecordtest
+fm_saveexamplestest
 fm_tapstest
 examples/advanced_handle
 examples/crc_example

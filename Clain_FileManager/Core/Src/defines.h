@@ -45,6 +45,7 @@ uint32_t *sdram_buf = (uint32_t*)SdRamBaseAddress;
 #include "../../FileManager_lib/top_api/sdram_alloc.h"
 #include "../../FileManager_lib/top_api/hw_jpeg_video.h"
 #include "../../FileManager_lib/top_api/cache.h"
+#include "../../FileManager_lib/top_api/examples_save_media.h"  /* SaveDemo_*: save sound / video to files */
 
 #include "fm_qspi.h"
 #include "../../FileManager_lib/top_api/examples_qspi.h"        /* QspiFlash_Begin/End + QspiDemo_* */

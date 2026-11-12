@@ -369,6 +369,8 @@ typedef struct
     uint32_t  index_entries;
     uint32_t  largest_frame;
     uint32_t  largest_audio;
+    uint64_t  last_at;            /* chunk of the last picture ...     */
+    uint32_t  last_size;          /* ... and its size (0 = none yet)   */
     FM_Result error;
     FM_Bool   opened;
 } FM_VideoFileWriter;
@@ -380,12 +382,26 @@ FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
 FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
                                      const void *pixels,
                                      FM_PixelFormat format);
+/* The same for a 16-bit frame buffer whose pixels are stored high byte
+ * first: the byte order SPI LCDs take, and the one the frame callback of
+ * SimpleVideo delivers when its swap option is on.  Formats that are not
+ * 16-bit are written as by VideoFileWriter_WriteFrame. */
+FM_Result VideoFileWriter_WriteFrameSwap16(FM_VideoFileWriter *w,
+                                           const void *pixels,
+                                           FM_PixelFormat format);
 /* One picture that is already a JPEG file (FF D8 ... FF D9) of the size
  * the writer was opened with: a camera in JPEG mode, the JPEG
  * peripheral.  Stored as it is; FM_ERR_INVALID_FORMAT when it does not
  * start like a JPEG. */
 FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
                                     size_t size);
+/* The last picture again, `count` times.  For live capture that could
+ * not keep up: a video file has a fixed frame rate, so a picture that
+ * was missed has to be filled in or the file plays too fast and runs
+ * ahead of its sound.  The JPEG is copied, not encoded again (a read
+ * back from the card and a write).  FM_ERR_NOT_READY before the first
+ * picture. */
+FM_Result VideoFileWriter_RepeatFrame(FM_VideoFileWriter *w, uint32_t count);
 /* `frames` sample frames of interleaved 16-bit PCM for the sound track.
  * FM_ERR_UNSUPPORTED when the file was opened with audio_rate 0. */
 FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,

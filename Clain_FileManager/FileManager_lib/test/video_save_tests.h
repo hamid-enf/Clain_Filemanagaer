@@ -15,6 +15,8 @@ static uint8_t g_vsv_out[VSV_W * VSV_H * 3u];
 static uint8_t g_vsv_jpg[VSV_W * VSV_H * 3u + 4096u];
 static int16_t g_vsv_pcm[VSV_RATE];
 static uint8_t g_vsv_abuf[8192];
+#define VSV_BIG 70001u            /* larger than the writer's buffer, odd */
+static uint8_t g_vsv_big[2][VSV_BIG + 1u];
 
 /* A picture with smooth colour, a white box that moves with the frame
  * number and a black corner. */
@@ -216,6 +218,7 @@ static void test_video_save(void)
         FM_JpegEncodeOptions o;
         uint32_t i;
 
+        memset(&o, 0, sizeof(o));
         vsv_frame(g_vsv_rgb, 3u);
         memset(&img, 0, sizeof(img));
         img.width = VSV_W;
@@ -351,6 +354,115 @@ static void test_video_save(void)
         else
         {
             snprintf(msg, sizeof(msg), "%u formats differ", (unsigned)bad);
+            FAIL(msg);
+        }
+    }
+
+    TEST("JPEG / video: 16-bit pixels stored high byte first (SPI LCD)");
+    {
+        /* The frame buffers of the players are byte-swapped for SPI
+         * panels.  With swap16 the encoder reads them as they are; the
+         * result must be byte for byte the JPEG of the unswapped buffer. */
+        static uint8_t le[VSV_W * VSV_H * 2u];
+        static uint8_t be[VSV_W * VSV_H * 2u];
+        static uint8_t jpg_be[VSV_W * VSV_H * 3u + 4096u];
+        FM_VideoFileWriter w;
+        FM_VideoSaveConfig c;
+        FM_JpegEncodeOptions o;
+        FM_Video v;
+        FM_Image img;
+        size_t len_le = 0u;
+        size_t len_be = 0u;
+        size_t len_wrong = 0u;
+        uint32_t i;
+        uint32_t d0 = 999u;
+        uint32_t d1 = 999u;
+
+        vsv_frame(g_vsv_rgb, 2u);
+        for (i = 0u; i < VSV_W * VSV_H; i++)
+        {
+            uint16_t px = (uint16_t)(((g_vsv_rgb[3u * i] >> 3) << 11) |
+                                     ((uint16_t)(g_vsv_rgb[3u * i + 1u] >> 2)
+                                          << 5) |
+                                     (g_vsv_rgb[3u * i + 2u] >> 3));
+
+            le[2u * i] = (uint8_t)(px & 0xFFu);
+            le[2u * i + 1u] = (uint8_t)(px >> 8);
+            be[2u * i] = (uint8_t)(px >> 8);
+            be[2u * i + 1u] = (uint8_t)(px & 0xFFu);
+        }
+        memset(&img, 0, sizeof(img));
+        img.width = VSV_W;
+        img.height = VSV_H;
+        img.format = FM_PIXEL_RGB565;
+        img.data_capacity = sizeof(le);
+        img.data_size = sizeof(le);
+        memset(&o, 0, sizeof(o));
+        o.quality = 90u;
+        img.data = le;
+        r = Image_EncodeJPEGEx(&img, &o, g_vsv_jpg, sizeof(g_vsv_jpg),
+                               &len_le);
+        img.data = be;
+        if (r == FM_OK)
+        {
+            r = Image_EncodeJPEGEx(&img, &o, jpg_be, sizeof(jpg_be),
+                                   &len_wrong);
+        }
+        o.swap16 = 1u;
+        if (r == FM_OK)
+        {
+            r = Image_EncodeJPEGEx(&img, &o, jpg_be, sizeof(jpg_be),
+                                   &len_be);
+        }
+
+        memset(&c, 0, sizeof(c));
+        c.width = (uint16_t)VSV_W;
+        c.height = (uint16_t)VSV_H;
+        c.fps = 10u;
+        c.quality = 90u;
+        if (r == FM_OK) r = VideoFileWriter_Open(&w, "/vsv/swap.avi", &c);
+        if (r == FM_OK) r = VideoFileWriter_WriteFrame(&w, le,
+                                                       FM_PIXEL_RGB565);
+        if (r == FM_OK) r = VideoFileWriter_WriteFrameSwap16(&w, be,
+                                                             FM_PIXEL_RGB565);
+        /* not a 16-bit format: the same as WriteFrame */
+        if (r == FM_OK) r = VideoFileWriter_WriteFrameSwap16(&w, g_vsv_rgb,
+                                                             FM_PIXEL_RGB888);
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_Close(&w);
+        }
+        else
+        {
+            (void)VideoFileWriter_Close(&w);
+        }
+        if (r == FM_OK) r = Video_Open("/vsv/swap.avi", &v);
+        if (r == FM_OK)
+        {
+            r = Video_DecodeFrame(&v, g_vsv_out, sizeof(g_vsv_out));
+            if (r == FM_OK)
+            {
+                r = Video_DecodeFrame(&v, g_vsv_out, sizeof(g_vsv_out));
+                d0 = vsv_diff(g_vsv_rgb, g_vsv_out, sizeof(g_vsv_rgb));
+            }
+            if (r == FM_OK)
+            {
+                r = Video_DecodeFrame(&v, g_vsv_out, sizeof(g_vsv_out));
+                d1 = vsv_diff(g_vsv_rgb, g_vsv_out, sizeof(g_vsv_rgb));
+            }
+            (void)Video_Close(&v);
+        }
+        if (r == FM_OK && len_le != 0u && len_be == len_le &&
+            memcmp(g_vsv_jpg, jpg_be, len_le) == 0 && len_wrong != 0u &&
+            d0 <= 6u && d1 <= 3u)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "r=%d le=%u be=%u d0=%u d1=%u", (int)r,
+                     (unsigned)len_le, (unsigned)len_be, (unsigned)d0,
+                     (unsigned)d1);
             FAIL(msg);
         }
     }
@@ -500,6 +612,8 @@ static void test_video_save(void)
         size_t len = 0u;
         size_t got = 0u;
         FM_Result bad_jpeg;
+
+        memset(&o, 0, sizeof(o));
         FM_Result no_track;
         static uint8_t back[sizeof(g_vsv_jpg)];
 
@@ -619,6 +733,111 @@ static void test_video_save(void)
         {
             snprintf(msg, sizeof(msg), "%d %d exists=%d,%d", (int)a, (int)b,
                      (int)exists, (int)e2);
+            FAIL(msg);
+        }
+    }
+
+    TEST("Video save: a repeated frame is the same picture again");
+    {
+        /* Live capture that missed frames fills them with the previous
+         * picture; the copy is read back from the file being written. */
+        FM_VideoFileWriter w;
+        FM_VideoSaveConfig c;
+        FM_Video v;
+        FM_VideoInfo vi;
+        FM_Result early;
+        uint32_t n;
+        uint32_t worst = 0u;
+        size_t got = 0u;
+        int same = 1;
+        static const uint8_t want[5] = { 0u, 0u, 0u, 3u, 3u };
+
+        memset(&c, 0, sizeof(c));
+        memset(&vi, 0, sizeof(vi));
+        c.width = (uint16_t)VSV_W;
+        c.height = (uint16_t)VSV_H;
+        c.fps = 10u;
+        c.audio_rate = VSV_RATE;
+        c.audio_channels = 1u;
+        for (n = 0u; n < VSV_BIG; n++)
+        {
+            g_vsv_big[0][n] = (uint8_t)((n * 7u) ^ (n >> 8));
+        }
+        g_vsv_big[0][0] = 0xFFu;
+        g_vsv_big[0][1] = 0xD8u;
+
+        r = VideoFileWriter_Open(&w, "/vsv/rep.avi", &c);
+        early = VideoFileWriter_RepeatFrame(&w, 1u);     /* nothing yet */
+        vsv_frame(g_vsv_rgb, 0u);
+        if (r == FM_OK) r = VideoFileWriter_WriteFrame(&w, g_vsv_rgb,
+                                                       FM_PIXEL_RGB888);
+        if (r == FM_OK) r = VideoFileWriter_RepeatFrame(&w, 0u);
+        if (r == FM_OK) r = VideoFileWriter_RepeatFrame(&w, 2u);
+        vsv_pcm(g_vsv_pcm, 0u, 800u);
+        if (r == FM_OK) r = VideoFileWriter_WriteAudio(&w, g_vsv_pcm, 800u);
+        vsv_frame(g_vsv_rgb, 3u);
+        if (r == FM_OK) r = VideoFileWriter_WriteFrame(&w, g_vsv_rgb,
+                                                       FM_PIXEL_RGB888);
+        /* the sound chunk written in between must not be what is copied */
+        if (r == FM_OK) r = VideoFileWriter_WriteAudio(&w, g_vsv_pcm, 800u);
+        if (r == FM_OK) r = VideoFileWriter_RepeatFrame(&w, 1u);
+        if (r == FM_OK) r = VideoFileWriter_WriteJpeg(&w, g_vsv_big[0],
+                                                      VSV_BIG);
+        if (r == FM_OK) r = VideoFileWriter_RepeatFrame(&w, 2u);
+        if (r == FM_OK && w.frames != 8u) r = FM_ERR_INTERNAL;
+        if (r == FM_OK)
+        {
+            r = VideoFileWriter_Close(&w);
+        }
+        else
+        {
+            (void)VideoFileWriter_Close(&w);
+        }
+
+        if (r == FM_OK) r = Video_Open("/vsv/rep.avi", &v);
+        if (r == FM_OK)
+        {
+            r = Video_GetInfo(&v, &vi);
+            for (n = 0u; r == FM_OK && n < 5u; n++)
+            {
+                r = Video_DecodeFrame(&v, g_vsv_out, sizeof(g_vsv_out));
+                if (r == FM_OK)
+                {
+                    uint32_t d;
+
+                    vsv_frame(g_vsv_rgb, want[n]);
+                    d = vsv_diff(g_vsv_rgb, g_vsv_out, sizeof(g_vsv_rgb));
+                    if (d > worst)
+                    {
+                        worst = d;
+                    }
+                }
+            }
+            for (n = 5u; r == FM_OK && n < 8u; n++)
+            {
+                memset(g_vsv_big[1], 0, sizeof(g_vsv_big[1]));
+                r = Video_ReadFrame(&v, g_vsv_big[1], sizeof(g_vsv_big[1]),
+                                    &got);
+                if (r == FM_OK &&
+                    (got != VSV_BIG ||
+                     memcmp(g_vsv_big[0], g_vsv_big[1], VSV_BIG) != 0))
+                {
+                    same = 0;
+                }
+            }
+            (void)Video_Close(&v);
+        }
+        if (r == FM_OK && early == FM_ERR_NOT_READY && vi.frame_count == 8u &&
+            worst <= 6u && same)
+        {
+            PASS();
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg),
+                     "r=%d early=%d frames=%u worst=%u same=%d got=%u", (int)r,
+                     (int)early, (unsigned)vi.frame_count, (unsigned)worst,
+                     same, (unsigned)got);
             FAIL(msg);
         }
     }

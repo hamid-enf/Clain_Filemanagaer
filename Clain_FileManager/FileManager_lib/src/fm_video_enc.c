@@ -187,9 +187,9 @@ static void vw_index_flush(FM_VideoFileWriter *w)
     w->ibuf_len = 0u;
 }
 
-/* End a chunk: length, pad byte, index entry. */
-static void vw_chunk_end(FM_VideoFileWriter *w, uint64_t at,
-                         const char *fourcc, uint32_t *largest)
+/* End a chunk: length, pad byte, index entry.  Returns the length. */
+static uint32_t vw_chunk_end(FM_VideoFileWriter *w, uint64_t at,
+                             const char *fourcc, uint32_t *largest)
 {
     uint32_t size = (uint32_t)(vw_pos(w) - (at + 8u));
     uint8_t e[16];
@@ -216,6 +216,7 @@ static void vw_chunk_end(FM_VideoFileWriter *w, uint64_t at,
     memcpy(w->ibuf + w->ibuf_len, e, 16);
     w->ibuf_len += 16u;
     w->index_entries++;
+    return size;
 }
 
 /* The whole header, with the values known so far; written with zero
@@ -475,21 +476,23 @@ FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
     }
     at = vw_chunk_begin(w, "00dc");
     vw_put(w, jpeg, (uint32_t)size);
-    vw_chunk_end(w, at, "00dc", &w->largest_frame);
+    (void)vw_chunk_end(w, at, "00dc", &w->largest_frame);
     if (w->error == FM_OK)
     {
         w->frames++;
+        w->last_at = at;
+        w->last_size = (uint32_t)size;
     }
     return w->error;
 }
 
-FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
-                                     const void *pixels,
-                                     FM_PixelFormat format)
+static FM_Result vw_write_frame(FM_VideoFileWriter *w, const void *pixels,
+                                FM_PixelFormat format, uint8_t swap16)
 {
     FM_Image img;
     FM_JpegEncodeOptions opt;
     uint64_t at;
+    uint32_t size;
     size_t bpp = Image_BytesPerPixel(format);
     FM_Result r = vw_ready(w);
 
@@ -516,6 +519,7 @@ FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
     img.data_size = img.data_capacity;
     opt.quality = w->config.quality;
     opt.subsample = (uint8_t)((w->config.chroma_full != 0u) ? 0u : 1u);
+    opt.swap16 = swap16;
 
     at = vw_chunk_begin(w, "00dc");
     r = FM_JPEG_EncodeSink(&img, &opt, vw_jpeg_sink, w);
@@ -525,12 +529,111 @@ FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
          * the chunk header is in the file, so the writer is finished */
         w->error = r;
     }
-    vw_chunk_end(w, at, "00dc", &w->largest_frame);
+    size = vw_chunk_end(w, at, "00dc", &w->largest_frame);
     if (w->error == FM_OK)
     {
         w->frames++;
+        w->last_at = at;
+        w->last_size = size;
     }
     return w->error;
+}
+
+FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
+                                     const void *pixels,
+                                     FM_PixelFormat format)
+{
+    return vw_write_frame(w, pixels, format, 0u);
+}
+
+FM_Result VideoFileWriter_WriteFrameSwap16(FM_VideoFileWriter *w,
+                                           const void *pixels,
+                                           FM_PixelFormat format)
+{
+    return vw_write_frame(w, pixels, format, 1u);
+}
+
+/* The previous picture once more.  Its bytes are read back from the file
+ * (the handle is read / write) straight into the output buffer, so no
+ * memory is needed for it and nothing is encoded. */
+FM_Result VideoFileWriter_RepeatFrame(FM_VideoFileWriter *w, uint32_t count)
+{
+    FM_Result r = vw_ready(w);
+
+    if (r != FM_OK)
+    {
+        return r;
+    }
+    if (count == 0u)
+    {
+        return FM_OK;
+    }
+    if (w->last_size == 0u)
+    {
+        return FM_ERR_NOT_READY;                 /* no picture yet */
+    }
+    while (count != 0u)
+    {
+        uint64_t src = w->last_at + 8u;
+        uint32_t left = w->last_size;
+        uint64_t at;
+
+        r = vw_room(w, left);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        vw_flush(w);                 /* the picture is on the card now */
+        at = vw_chunk_begin(w, "00dc");
+        while (left != 0u && w->error == FM_OK)
+        {
+            uint32_t room;
+            uint32_t n;
+            uint32_t got = 0;
+
+            if (w->buf_len == w->buf_cap)
+            {
+                vw_flush(w);
+                if (w->error != FM_OK)
+                {
+                    break;
+                }
+            }
+            room = w->buf_cap - w->buf_len;
+            n = (left < room) ? left : room;
+            w->error = File_Seek(&w->file, (int64_t)src, FM_SEEK_SET);
+            if (w->error == FM_OK)
+            {
+                FM_Result rr = File_Read(&w->file, w->buf + w->buf_len, n,
+                                         &got);
+
+                /* the picture may end exactly where the file ends */
+                w->error = (got == n) ? FM_OK
+                                      : ((rr != FM_OK) ? rr : FM_ERR_IO);
+            }
+            if (w->error == FM_OK)
+            {
+                /* back to the end: that is where the buffer goes */
+                w->error = File_Seek(&w->file, (int64_t)w->buf_pos,
+                                     FM_SEEK_SET);
+            }
+            if (w->error == FM_OK)
+            {
+                w->buf_len += n;
+                src += n;
+                left -= n;
+            }
+        }
+        (void)vw_chunk_end(w, at, "00dc", &w->largest_frame);
+        if (w->error != FM_OK)
+        {
+            return w->error;
+        }
+        w->frames++;
+        w->last_at = at;
+        count--;
+    }
+    return FM_OK;
 }
 
 FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
@@ -579,7 +682,7 @@ FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
 #else
     vw_put(w, pcm, (uint32_t)bytes);
 #endif
-    vw_chunk_end(w, at, "01wb", &w->largest_audio);
+    (void)vw_chunk_end(w, at, "01wb", &w->largest_audio);
     if (w->error == FM_OK)
     {
         w->audio_bytes += bytes;
@@ -956,10 +1059,24 @@ FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
     return FM_ERR_UNSUPPORTED;
 }
 
+FM_Result VideoFileWriter_WriteFrameSwap16(FM_VideoFileWriter *w,
+                                           const void *pixels,
+                                           FM_PixelFormat format)
+{
+    (void)w; (void)pixels; (void)format;
+    return FM_ERR_UNSUPPORTED;
+}
+
 FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
                                     size_t size)
 {
     (void)w; (void)jpeg; (void)size;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result VideoFileWriter_RepeatFrame(FM_VideoFileWriter *w, uint32_t count)
+{
+    (void)w; (void)count;
     return FM_ERR_UNSUPPORTED;
 }
 

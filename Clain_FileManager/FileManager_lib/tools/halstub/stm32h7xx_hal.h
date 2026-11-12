@@ -13,7 +13,7 @@
 
 typedef struct { volatile uint32_t CR1, CR2, CFG1, CFG2, IER, SR, IFCR,
                                    TXDR, RXDR; } SPI_TypeDef;
-typedef struct { volatile uint32_t CR1, CFGR, SR, DR, I2SCFGR; } DMA_Stream_TypeDef;
+typedef struct { volatile uint32_t CR1, CFGR, SR, DR, I2SCFGR, NDTR; } DMA_Stream_TypeDef;
 
 typedef enum { HAL_OK = 0, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET } GPIO_PinState;
@@ -36,7 +36,7 @@ typedef enum
     GPIO_PIN_6  = 0x0040u, GPIO_PIN_7  = 0x0080u, GPIO_PIN_8  = 0x0100u,
     GPIO_PIN_9  = 0x0200u, GPIO_PIN_10 = 0x0400u
 } GPIO_Pin;
-static GPIO_TypeDef fm_halstub_gpio_dummy;
+static GPIO_TypeDef fm_halstub_gpio_dummy __attribute__((unused));
 #define GPIOA (&fm_halstub_gpio_dummy)
 #define GPIOB (&fm_halstub_gpio_dummy)
 #define GPIOC (&fm_halstub_gpio_dummy)
@@ -128,7 +128,19 @@ typedef DMA_HandleTypeDef_s DMA_HandleTypeDef;
 typedef struct { uint32_t Instance; } UART_HandleTypeDef;
 
 
-static inline uint32_t HAL_GetTick(void) { return 0u; }
+/* The clock stands still unless a host test moves it: set
+ * halstub_tick_ms, or install halstub_tick_hook (called on every
+ * HAL_GetTick, e.g. to advance the clock and fire the I2S "interrupts"). */
+static volatile uint32_t halstub_tick_ms __attribute__((unused));
+static void (*halstub_tick_hook)(void) __attribute__((unused));
+static inline uint32_t HAL_GetTick(void)
+{
+    if (halstub_tick_hook != NULL)
+    {
+        halstub_tick_hook();
+    }
+    return halstub_tick_ms;
+}
 static inline void HAL_Delay(uint32_t ms) { (void)ms; }
 static inline void HAL_GPIO_WritePin(GPIO_TypeDef *p, uint16_t n, GPIO_PinState s)
 { (void)p; (void)n; (void)s; }
@@ -264,6 +276,7 @@ static inline HAL_StatusTypeDef HAL_I2S_DMAStop(I2S_HandleTypeDef *h) { (void)h;
 #define HAL_SPI_STATE_BUSY           2u
 #define SPI_CR2_TSIZE                0xFFFFu
 #define HAL_I2S_STATE_READY          1u
+#define HAL_I2S_STATE_BUSY_TX        3u
 #define HAL_SPI_STATE_READY          1u
 
 /* --- more functions the examples call ---------------------------------- */

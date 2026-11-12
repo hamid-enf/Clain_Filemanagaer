@@ -1087,8 +1087,9 @@ static void jpeg_write_block(JpegOut *o, int32_t *blk, const uint16_t *q8,
  * to full-range YCbCr (JFIF), centred on zero.  Columns and rows past
  * the picture repeat the last one, which is what a decoder expects of
  * the padding of an incomplete block. */
-static void jpeg_row_ycc(const FM_Image *img, uint32_t x, uint32_t y,
-                         uint32_t n, int32_t *yy, int32_t *cb, int32_t *cr)
+static void jpeg_row_ycc(const FM_Image *img, int swap16, uint32_t x,
+                         uint32_t y, uint32_t n, int32_t *yy, int32_t *cb,
+                         int32_t *cr)
 {
     const uint8_t *p;
     uint32_t have;
@@ -1131,7 +1132,9 @@ static void jpeg_row_ycc(const FM_Image *img, uint32_t x, uint32_t y,
     case FM_PIXEL_BGR565:
         for (i = 0; i < have; i++, p += 2)
         {
-            uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+            uint32_t v = swap16
+                ? ((uint32_t)p[1] | ((uint32_t)p[0] << 8))
+                : ((uint32_t)p[0] | ((uint32_t)p[1] << 8));
             uint8_t hi = (uint8_t)(((v >> 11) << 3) | (v >> 13));
             uint8_t lo = (uint8_t)(((v & 0x1Fu) << 3) | ((v & 0x1Fu) >> 2));
 
@@ -1176,7 +1179,7 @@ static void jpeg_row_ycc(const FM_Image *img, uint32_t x, uint32_t y,
 }
 
 static void jpeg_encode(JpegOut *o, const FM_Image *img, int quality,
-                        int subsample)
+                        int subsample, int swap16)
 {
     uint16_t qy8[64];
     uint16_t qc8[64];
@@ -1275,7 +1278,7 @@ static void jpeg_encode(JpegOut *o, const FM_Image *img, int quality,
 
                 for (i = 0; i < 8u; i++)
                 {
-                    jpeg_row_ycc(img, mx, my + i, 8u, by + 8u * i,
+                    jpeg_row_ycc(img, swap16, mx, my + i, 8u, by + 8u * i,
                                  bcb + 8u * i, bcr + 8u * i);
                 }
                 jpeg_write_block(o, by, qy8, &jpeg_h_dc_y, &jpeg_h_ac_y,
@@ -1302,7 +1305,8 @@ static void jpeg_encode(JpegOut *o, const FM_Image *img, int quality,
                     int32_t *right = by[(row / 8u) * 2u + 1u] +
                                      8u * (row % 8u);
 
-                    jpeg_row_ycc(img, mx, my + row, 16u, ry, rcb[row & 1u],
+                    jpeg_row_ycc(img, swap16, mx, my + row, 16u, ry,
+                                 rcb[row & 1u],
                                  rcr[row & 1u]);
                     for (k = 0; k < 8u; k++)
                     {
@@ -1359,7 +1363,8 @@ static FM_Result jpeg_encode_common(const FM_Image *img, JpegOut *o,
         return r;
     }
     jpeg_encode(o, img, (opt != NULL) ? (int)opt->quality : 0,
-                (opt != NULL && opt->subsample != 0u) ? 1 : 0);
+                (opt != NULL && opt->subsample != 0u) ? 1 : 0,
+                (opt != NULL && opt->swap16 != 0u) ? 1 : 0);
     return o->err;
 }
 

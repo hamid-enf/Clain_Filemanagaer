@@ -216,6 +216,12 @@ static const CmdMusic_Entry cmd_table[] =
     { "vmut",   Music_VideoMute   },   /* صدای ویدیو فقط به کالبک (= vout2) */
     { "vunmut", Music_VideoUnmute },   /* بلندگو + کالبک (= vout3) */
 
+    /* --- ذخیرهٔ چیزی که پخش می‌شود، از کالبک‌ها (board/app_save_hooks.h) --- */
+    { "arec",   Cmd_SaveMusicStart },  /* موزیک -> /save/music_cb.wav */
+    { "arecs",  Cmd_SaveMusicStop  },
+    { "vrec",   Cmd_SaveVideoStart },  /* ویدیو -> /save/video_cb.avi */
+    { "vrecs",  Cmd_SaveVideoStop  },
+
     /* --- SD / QSPI --- */
     { "sdmcu",  cmd_sdmcu },
     { "sdpc",   cmd_sdpc  },

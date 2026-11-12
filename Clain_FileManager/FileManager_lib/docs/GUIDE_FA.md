@@ -380,7 +380,7 @@ SimpleAudio_Begin();
 
 `DataRead` از همان ترکِ در حال پخش برمی‌دارد: آنچه بخوانید دیگر پخش
 نمی‌شود. برای دادهٔ هم‌زمان با پخش، کالبک بخش ۷.۲ را استفاده کنید.
-ذخیره در فایل: بخش ۷.۵.
+ذخیره در فایل: بخش ۷.۵؛ مثال‌های آماده: بخش ۷.۶.
 
 ### ۷.۴ حالت‌های پخش (مشترک با ویدیو)
 
@@ -474,6 +474,56 @@ SimpleAudio_Convert("/music/a.mp3", "/out/a.flac", half_volume, NULL);
 تا پایان فایل برنمی‌گردد. اگر خطا بدهد، فایل مقصد پاک می‌شود. فایل ADPCM
 تا یک بلوک (حداکثر ۲۰۴۱ نمونه) بلندتر از ورودی است؛ انتهای آن تکرار آخرین
 نمونه است.
+
+### ۷.۶ مثال‌های آمادهٔ ذخیرهٔ صدا
+
+همه در `top_api/examples_save_media.h` هستند و روی کامپیوتر با
+`make saveexamplestest` اجرا و بازخوانی می‌شوند.
+
+| مثال | سبک | چه می‌سازد |
+|---|---|---|
+| `SaveDemo_AudioPlain()` | ساده: داده را خودتان می‌سازید | بوق ۱ کیلوهرتز، ۲ ثانیه → `/save/tone.wav` و `/save/tone.flac` |
+| `SaveDemo_MusicFromCallback(dest, seconds)` | از کالبک، همه در یک تابع | `seconds` ثانیه از موزیکِ پوشهٔ موزیک → `dest` |
+| `SaveDemo_MusicCallback` + `SaveDemo_MusicRecStart(dest)` / `RecPump()` / `RecStop()` | از کالبک، تکه‌تکه برای برنامهٔ خودتان | موزیک در حال پخش → `dest` |
+
+**سبک ساده** همان سه خط بالاست: `RecStart`، چند بار `RecWrite`، `RecStop`.
+
+**سبک کالبک.** فرق با `SimpleAudio_RecPlaying`: نمونه‌ها اول به تابع شما
+می‌رسند و خودتان تصمیم می‌گیرید چه چیزی، کی و کجا ذخیره شود.
+
+```
+دیکدر ─> کالبک داده ─> رینگ در RAM ─> Pump در حلقهٔ اصلی ─> SimpleAudio_RecWrite ─> فایل
+         (فقط کپی)
+```
+
+```c
+/* یک‌بار: */
+SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);                  /* بلندگو + کالبک */
+SimpleAudio_SetDataCallback(SaveDemo_MusicCallback, NULL);
+
+/* شروع ذخیره (قبل از Begin یا وسط پخش): */
+SaveDemo_MusicRecStart("/save/music_cb.wav");
+
+/* در while (1)، کنار SimpleAudio_Poll(): */
+SaveDemo_MusicRecPump();
+
+/* پایان: */
+SaveDemo_MusicRecStop();
+```
+
+- کالبک داده داخل پُرکردن بافر صدا اجرا می‌شود: در آن فایل ننویسید، فقط
+  کپی کنید. نوشتن کار `Pump` است.
+- اولین نمونه‌ها قبل از کالبک شروع ترک می‌رسند. `RecStart` را قبل از
+  `SimpleAudio_Begin()` بزنید تا ابتدای آهنگ جا نماند. فایل با اولین
+  داده باز می‌شود، چون نرخ نمونه‌برداری همان‌جا معلوم می‌شود.
+- کالبک همیشه استریو می‌دهد (`channels = 2`)، حتی برای فایل مونو.
+- یک فایل یک نرخ نمونه‌برداری دارد: با رسیدن ترکی با نرخ دیگر، فایل بسته
+  می‌شود.
+- رینگ: `SAVE_DEMO_MUSIC_RING_SAMPLES` (پیش‌فرض ۷۰۰۰۰ نمونه = ۱۴۰ کیلوبایت
+  از `FM_Alloc`). اگر `Pump` دیر صدا زده شود و رینگ پُر شود، آن تکه دور
+  ریخته و در گزارش پایان با `dropped` شمرده می‌شود.
+- اگر کالبک دادهٔ خودتان را دارید، `SaveDemo_MusicCallback` را از داخل آن
+  صدا بزنید (نمونه: `board/app_save_hooks.h`).
 
 ---
 
@@ -571,7 +621,9 @@ SimpleVideo_Start();
 | `SimpleVideo_RecStart(path, w, h, fps, 0)` | با پسوند `.avi` فایل MJPEG را همان لحظه باز می‌کند | مسیر، ابعاد، فریم در ثانیه | فایل |
 | `SimpleVideo_RecWrite(rgb888, bytes)` | یک فریم RGB888 | `w * h * 3` بایت | فایل |
 | `SimpleVideo_RecWritePixels(px, format)` | یک فریم با هر فرمت پیکسل | مثلاً `FM_PIXEL_RGB565` از فریم‌بافر | فایل |
+| `SimpleVideo_RecWritePlayerFrame(px, format)` | فریمی که خود پخش‌کننده داده (کالبک فریم) | پیکسل و فرمت همان کالبک | فایل |
 | `SimpleVideo_RecWriteJpeg(jpg, bytes)` | یک فریم که خودش JPEG است | دوربین در حالت JPEG | فایل |
+| `SimpleVideo_RecRepeat(n)` | آخرین فریم را `n` بار دیگر تکرار می‌کند (بدون فشرده‌سازی دوباره، بدون حجم) | – | فایل |
 | `SimpleVideo_RecWriteAudio(pcm, frames)` | صدای همان فریم | PCM شانزده‌بیتی | فایل |
 | `SimpleVideo_RecStop()` | ایندکس و طول را می‌نویسد و می‌بندد | – | نتیجهٔ ذخیره |
 | `SimpleVideo_RecSetQuality(q)` | کیفیت JPEG، ۱ تا ۱۰۰ (پیش‌فرض ۸۰) | – | – |
@@ -598,6 +650,11 @@ SimpleVideo_RecStop();
   بعدی باز می‌شود).
 - حجم: تصویر آزمایشی ۴۸۰×۲۷۲ با کیفیت ۸۵ حدود ۱۴ کیلوبایت برای هر فریم شد.
   سرعت انکود روی برد اندازه‌گیری نشده است.
+- `RecWritePixels` پیکسل ۱۶ بیتی را با بایت کم‌ارزش اول می‌خواند (همان
+  `uint16_t` در حافظهٔ میکروکنترلر). فریم‌بافری که برای LCD از نوع SPI
+  بایت‌جابه‌جا شده (خروجی خود پخش‌کننده با `SIMPLE_VIDEO_SWAP16 = 1`) را با
+  `RecWritePlayerFrame` بدهید؛ وگرنه رنگ‌های فایل غلط می‌شود. در لایهٔ
+  پایین‌تر: `VideoFileWriter_WriteFrameSwap16` و `FM_JpegEncodeOptions.swap16`.
 
 **فایل به فایل.** هر فریم به‌صورت RGB888 به تابع شما می‌رسد؛ درجا تغییرش
 بدهید:
@@ -619,6 +676,55 @@ SimpleVideo_Convert("/videos/a.mp4", "/out/a.avi", red_bar, NULL);
 می‌دهد. حافظه: یک فریم RGB888 (`w * h * 3` بایت) از `FM_Alloc`، به‌اضافهٔ
 نیاز دیکدر. برای اندازهٔ دیگر، پردازش صدا، پیشرفت یا لغو: `Video_Convert`
 با `FM_VideoConvertConfig` (بخش ۱۰).
+
+### ۸.۵ مثال‌های آمادهٔ ذخیرهٔ ویدیو
+
+در همان `top_api/examples_save_media.h`:
+
+| مثال | سبک | چه می‌سازد |
+|---|---|---|
+| `SaveDemo_VideoPlain()` | ساده: فریم و صدا را خودتان می‌سازید | ۳۰ فریم ۱۶۰×۱۲۰ (نوار رنگی + مربع متحرک) و بوق → `/save/bars.avi` |
+| `SaveDemo_VideoFromCallback(dest, max_frames)` | از کالبک، همه در یک تابع | اولین ویدیوی پوشهٔ ویدیو (`max_frames = 0` یعنی تا آخر) → `dest` |
+| `SaveDemo_VideoFrameCallback` + `SaveDemo_VideoSoundCallback` + `SaveDemo_VideoRecStart(dest)` / `RecPump()` / `RecStop()` | از کالبک، تکه‌تکه | ویدیوی در حال پخش، تصویر و صدا → `dest` |
+
+```
+فریم ─> کالبک فریم ─> SimpleVideo_RecWritePlayerFrame ─────────────────────> فایل
+صدا  ─> کالبک صدا  ─> رینگ در RAM ─> Pump ─> SimpleVideo_RecWriteAudio ─> فایل
+```
+
+```c
+/* یک‌بار، بعد از SimpleVideo_Begin(): */
+SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);             /* بلندگو + کالبک */
+SimpleVideo_SetFrameCallback(SaveDemo_VideoFrameCallback, NULL);
+SimpleVideo_SetAudioDataCallback(SaveDemo_VideoSoundCallback, NULL);
+
+/* شروع ذخیره (بهتر است قبل از SimpleVideo_Start()): */
+SaveDemo_VideoRecStart("/save/video_cb.avi");
+
+/* در while (1)، کنار SimpleVideo_Poll(): */
+SaveDemo_VideoRecPump();
+
+/* پایان (در انتهای ویدیو خودش بسته می‌شود): */
+SaveDemo_VideoRecStop();
+```
+
+- کالبک فریم در حلقهٔ اصلی اجرا می‌شود (داخل `SimpleVideo_Poll`)؛ همان‌جا
+  فشرده و نوشته می‌شود. کالبک صدا داخل پُرکردن بافر I2S است: فقط کپی.
+- اندازه و نرخ فریم فایل از `SimpleVideo_Info()` در اولین کالبک فریم
+  گرفته می‌شود؛ فایل همان‌جا باز می‌شود.
+- اگر پخش‌کننده فریم جا بیندازد (فشرده‌سازی JPEG وقت می‌برد)، جای آن‌ها
+  با `SimpleVideo_RecRepeat` پُر می‌شود: تعداد فریم‌ها و زمان فایل با
+  ویدیوی اصلی و با صدا یکی می‌ماند، فقط حرکت کم‌تر می‌شود.
+- صدای فایل همیشه استریو و کامل است، حتی وقتی فریم جا افتاده.
+- هر فایل یک ویدیو است: در پایان ویدیو، یا با رفتن به ویدیوی بعدی، فایل
+  بسته می‌شود.
+- بدون خروجی «کالبک» (`FM_AUDIO_OUT_SPEAKER`) فایل تصویر دارد ولی تراک
+  صدا ندارد.
+- رینگ صدا: `SAVE_DEMO_VIDEO_RING_SAMPLES` (پیش‌فرض ۴۰۰۰۰ نمونه = ۸۰
+  کیلوبایت).
+
+روی برد دستورهای `arec` / `arecs` و `vrec` / `vrecs` همین‌ها را صدا
+می‌زنند: `board/README.md`.
 
 ---
 

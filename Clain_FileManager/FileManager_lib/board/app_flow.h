@@ -241,6 +241,16 @@ APP_STEP App_RunSdDemos(void)
     APP_RUN(SdPlayerDemo_RemoteButtons);
 }
 
+/* ذخیرهٔ صدا و ویدیو در فایل، سبک ساده (examples_save_media.h): داده را
+ * خود مثال می‌سازد و روی SD می‌نویسد؛ نتیجه در /save است و روی PC هم باز
+ * می‌شود. سبک دوم (ذخیرهٔ چیزی که پخش می‌شود، از کالبک) با دستورهای
+ * arec / vrec و دو خط Pump در while (1) است: board/app_save_hooks.h */
+APP_STEP App_RunSaveDemos(void)
+{
+    APP_RUN(SaveDemo_AudioPlain);              /* /save/tone.wav, tone.flac */
+    APP_RUN(SaveDemo_VideoPlain);              /* /save/bars.avi            */
+}
+
 /* فرمت QSPI فقط با تأیید خودتان: اگر دکمهٔ سرویس دارید این را با آن
  * مقدار بدهید. FM_TRUE یعنی «اگر فلش مونت نشد، فرمتش کن». */
 static FM_Bool service_button_confirmed = FM_TRUE;
@@ -354,6 +364,7 @@ static void app_video_begin(void)
         printf(" failed SimpleVideo_Begin ");
     }
     Music_InstallVideoHooks();      /* شروع/پایان ویدیو + دادهٔ فریم */
+    App_SaveHooksInstall();         /* همان‌ها + ذخیره (vrec) و نرمالایزر صدا */
     SimpleVideo_Start();
     SimpleVideo_SetAutoPlay(1);
 }
@@ -365,6 +376,7 @@ APP_STEP App_PlayersBegin(void)
     {
         app_banner("simple_audio");
         Music_InstallTaps();        /* کالبک‌ها: یک‌بار، ماندگار */
+        App_SaveHooksInstall();     /* کالبک داده = نرمالایزر + ذخیره (arec) */
         if (SimpleAudio_Begin() != FM_OK)
         {
             printf("SimpleAudio_Begin() != FM_OK \n");
@@ -453,6 +465,7 @@ APP_STEP App_MusicCommandPoll(void)
     {
         SimpleVideo_Stop();         /* I2S را آزاد می‌کند */
         Music_InstallTaps();        /* نرمالایزر از صفر؛ کالبک‌ها سر جایشان */
+        App_SaveHooksInstall();     /* کالبک داده = نرمالایزر + ذخیره (arec) */
         if (SimpleAudio_Begin() != FM_OK)
         {
             /* دابل-start: Begin وقتی پخش فعال است BUSY می‌دهد. پخش را
@@ -511,8 +524,8 @@ APP_STEP App_VideoCommandPoll(void)
         SimpleAudio_Stop();
         SimpleVideo_SetPresent(App_LcdBlitVideo);
         SimpleVideo_SetOutputSize(320, 240);
-        /* همان نرمالایزر موزیک (tap1) روی صدای ویدیو */
-        SimpleVideo_SetAudioDataCallback(app_audio_pre_tap, NULL);
+        /* نرمالایزر موزیک (tap1) روی صدای ویدیو هم هست: app_video_begin()
+         * کالبک صدا را با App_SaveHooksInstall() می‌گذارد */
         printf("SimpleVideo_Begin \n");
         app_video_begin();
     }

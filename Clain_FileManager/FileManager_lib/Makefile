@@ -426,6 +426,18 @@ audiorecordtest: $(LIBS)
 		tools/audio_record_host_test.c $(LIBS) -lm -o fm_audiorecordtest
 	@./fm_audiorecordtest
 
+# saveexamplestest — examples/examples_save_media.h RUN on the host: the
+# plain save examples and the "save what is playing through its callback"
+# examples, against the real players (SimpleAudio, SimpleVideo with its
+# I2S path) with simulated interrupts; every file is read back and
+# compared.  `./fm_saveexamplestest -v` also prints what the examples log.
+saveexamplestest: $(LIBS)
+	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
+		-DSIMPLE_VIDEO_I2S=1 \
+		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
+		tools/save_examples_host_test.c $(LIBS) -lm -o fm_saveexamplestest
+	@./fm_saveexamplestest
+
 # tapstest — the PCM-tap block of board/app_audio_hooks.h (audio_record_with_tap.h
 # wiring) executed on the host.  The section is extracted VERBATIM from
 # that header between "AGC_TARGET_PEAK" (the pre-tap DSP banner) and the
@@ -447,7 +459,7 @@ fatfs:
 	@sh test/build_fatfs_host.sh
 
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks audiorecordtest tapstest asan ports fatfs
+check: test cachetest videohooks audiorecordtest saveexamplestest tapstest asan ports fatfs
 	@sh tools/check_examples.sh
 	@sh tools/check_cubeide.sh
 	@sh tools/check_cmake.sh
@@ -455,7 +467,7 @@ check: test cachetest videohooks audiorecordtest tapstest asan ports fatfs
 
 clean:
 	rm -rf build-asan
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_audiorecordtest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

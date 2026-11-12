@@ -1065,6 +1065,7 @@ STM32H7/SD examples are target-oriented and are not part of `make examples`:
 - `examples/examples_sdcard.h` — file examples 01-10 on a mounted SD card
 - `examples/examples_sdcard_media.h` — WAV/FMRV, media detection and verified media copies
 - `examples/examples_sdcard_player.h` — playlist, seek, next/previous and audio/video player controls
+- `examples/examples_save_media.h` — saving sound and video to files: plain (your own samples / frames) and through the player callbacks (what is playing); run on the host by `make saveexamplestest`
 - `examples/simple_audio.h` — WAV/MP3 playlist + I2S DMA
 - `examples/simple_image.h` — photo album + TFT present callback
 - `examples/simple_video.h` — folder playlist + TFT present callback + optional I2S

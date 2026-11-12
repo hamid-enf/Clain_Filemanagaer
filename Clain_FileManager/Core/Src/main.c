@@ -45,6 +45,7 @@
 #include "../../FileManager_lib/board/app_display.h"        /* LCD present + SPI DMA callbacks  */
 #include "../../FileManager_lib/board/app_audio_hooks.h"    /* PCM taps, recorder, Music_*      */
 #include "../../FileManager_lib/board/app_video_hooks.h"    /* video track / frame hooks        */
+#include "../../FileManager_lib/board/app_save_hooks.h"     /* save what is playing: arec, vrec */
 #include "../../FileManager_lib/board/app_uart_commands.h"  /* UART command line                */
 #include "../../FileManager_lib/board/app_flow.h"           /* the App_* steps called by main() */
 
@@ -164,6 +165,7 @@ int main(void)
   /* ---- 2) demos (comment a line out to skip that group) ----------------- */
   App_RunFileDemos();                    /* FileDemo_*                       RAM disk         */
   App_RunSdDemos();                      /* SdDemo_*, SdMediaDemo_*, SdPlayerDemo_*   SD card */
+  App_RunSaveDemos();                    /* SaveDemo_AudioPlain, SaveDemo_VideoPlain: /save/tone.wav, tone.flac, bars.avi */
   App_RunQspiDemos();                    /* QspiDemo_*, QspiMediaDemo_*, QspiPlayerDemo_*, TransferDemo_*  QSPI flash */
   App_RunSpiFlashDemos();                /* SpiFlashDemo_*                   SPI flash (SPI4) */
   App_RunEepromDemos();                  /* I2cEepromDemo_*, EepromDemo_*    I2C EEPROM       */
@@ -187,6 +189,11 @@ int main(void)
     App_MusicCommandPoll();              /* start / stop                            */
     CmdMusic_ProcessPending();           /* every other command (top_api/code_cmd.h) */
     Music_RecPump();                     /* "rectest": recorder file I/O            */
+
+    /* save what is playing, through the callbacks (examples_save_media.h).
+     * The callbacks only copy; the file is written here. Idle = returns at once. */
+    SaveDemo_MusicRecPump();             /* "arec" ... "arecs": music -> /save/music_cb.wav */
+    SaveDemo_VideoRecPump();             /* "vrec" ... "vrecs": video -> /save/video_cb.avi */
 
     /* players: each Poll returns at once when its player is idle */
     SimpleAudio_Poll();

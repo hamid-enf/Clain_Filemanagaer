@@ -148,12 +148,19 @@ FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
  *   quality    1..100 (the usual JPEG scale; 0 = FM_JPEG_QUALITY)
  *   subsample  0 = 4:4:4 (sharp colour edges), 1 = 4:2:0 (about a third
  *              smaller and faster: what cameras and video use)
+ *   swap16     0 = 16-bit pixels (RGB565 / BGR565) are stored low byte
+ *              first: a uint16_t array on this CPU.  1 = high byte first,
+ *              the order SPI LCDs take (the frame buffers of SimpleVideo
+ *              and SimpleImage when their swap option is on).  Other
+ *              formats ignore it.
+ * Clear the structure first (memset), so that options added later are 0.
  * Output is baseline JFIF with the standard Huffman tables, readable by
  * every JPEG decoder (and by the STM32 JPEG peripheral). */
 typedef struct
 {
     uint8_t quality;
     uint8_t subsample;
+    uint8_t swap16;
 } FM_JpegEncodeOptions;
 
 FM_Result Image_EncodeJPEGEx(const FM_Image *img,
