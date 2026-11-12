@@ -66,8 +66,9 @@ File_Move("/config/backup.txt", "/backup.txt", NULL, NULL);
 | Image/video scaling (nearest + bilinear, playback and storage) | ✅ |
 | WAV PCM audio read/write | ✅ |
 | MP3 playback (vendored minimp3, mono/stereo + downmix) | ✅ |
-| Extension-selected WAV/MP3 writer with compressed-encoder registry | ✅ |
+| Audio saving: WAV, IMA ADPCM and FLAC encoders built in, format from the file name, registry for MP3 / Vorbis / Opus encoders, file-to-file `Audio_Convert` | ✅ |
 | FMRV raw video read/write and codec plugin hook | ✅ |
+| Video saving: Motion-JPEG in AVI with a PCM sound track (`VideoFileWriter_*`), file-to-file `Video_Convert` | ✅ |
 | AVI, MP4 (ISO BMFF), Matroska/WebM and FLV container parsing | ✅ |
 | H.264 software decoding via vendored h264bsd (self-healing: keyframe replay after a broken reference chain) | ✅ |
 | MJPEG decoding via vendored picojpeg (USB/ESP32 cameras) | ✅ |
@@ -86,12 +87,12 @@ File/container formats and decoded raw-buffer layouts are separate concepts:
 | Operation | Built in | Optional/plugin behavior |
 |---|---|---|
 | Audio read | WAV/PCM and MP3 are detected from file bytes and decoded to PCM16 | AAC/ADTS decoder registry |
-| Audio write | `.wav` is encoded internally | `.mp3` is selected automatically but requires a registered software/hardware MP3 encoder; otherwise returns `FM_ERR_UNSUPPORTED` |
+| Audio write | `.wav` (PCM16, or IMA ADPCM when asked for) and `.flac` are encoded internally | `.mp3` / `.ogg` / `.opus` are selected from the name but require an encoder registered with `Audio_RegisterEncoder`; otherwise `FM_ERR_UNSUPPORTED` and no file is created |
 | Image file read/write | BMP, JPEG, PNG (magic-byte detect; Save picks the encoder from the destination extension). PNG read: every colour type and bit depth, Adam7 interlace, CRC and Adler-32 verified; output is RGB888 | STM32 JPEG peripheral via `Image_RegisterCodec` |
 | Image raw output | GRAY8, RGB565, BGR565, RGB888, BGR888, RGBA8888, BGRA8888 | — |
 | Video read | FMRV, AVI, MP4, Matroska/WebM and FLV container detection; RAW, bundled MJPEG and H.264 decode where supported | Hardware codec registry |
 | Video raw output | Same caller-selected pixel layouts as images | Conversion uses a caller-owned RGB888 work buffer |
-| Video write | FMRV raw RGB888 | AVI/MJPEG or MP4/H.264 require real encoder/container plugins and are not mislabeled |
+| Video write | FMRV raw RGB888; AVI with MJPEG pictures (encoded here, or ready JPEG frames from a camera) and 16-bit PCM sound | There is no H.264 / MP4 encoder |
 
 Reading is content-based: renaming an MP3 file to `.wav` does not turn it into
 WAV. Writing starts from raw PCM/pixels, so the desired output cannot be
@@ -440,8 +441,9 @@ them add theirs on top, a few hundred bytes each:
 | Function | Frame | Reached from |
 |---|---|---|
 | `mp3dec_decode_frame` (minimp3) | 17.4 KB | `Audio_Read*` on an MP3 file, `Video_ReadAudioFrame` on an MP3 track |
-| `jpeg_encode_common` | 5.1 KB | writing a JPEG (`FM_JPEG_Encode*`, `Image_Save` to `.jpg`) |
 | `drflac_open_with_metadata_private` | 4.9 KB | `Audio_Open` on a FLAC file |
+| `flac_encode_block` | 2.7 KB | saving FLAC (`AudioFileWriter_*`, `Audio_Convert`) |
+| `jpeg_encode_common` | 2.4 KB | writing a JPEG (`Image_Save` to `.jpg`, `Image_EncodeJPEG*`, every frame of `VideoFileWriter_WriteFrame`) |
 | `png_inflate` | 2.2 KB | PNG decode |
 | `h264bsdInterpolate*` | 1.9 KB | H.264 decode |
 | image layer otherwise | up to 1.4 KB | `Image_StreamDecode`, `Image_GetInfo`, PNG decode |

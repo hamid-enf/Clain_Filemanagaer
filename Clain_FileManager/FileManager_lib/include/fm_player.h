@@ -61,13 +61,8 @@ typedef enum
     FM_AUDIO_OUT_BOTH     = 3
 } FM_AudioOutput;
 
-/* The one PCM callback type of both players.
- *   pcm       signed 16-bit samples, interleaved (L,R,L,R...); writable
- *   samples   number of int16_t values (a stereo frame is two)
- * It runs on the buffer-refill path: copy or process and return. No file
- * I/O and no printf in here. */
-typedef void (*FM_AudioDataFn)(void *ctx, int16_t *pcm, size_t samples,
-                               uint32_t sample_rate, uint16_t channels);
+/* FM_AudioDataFn, the one PCM callback type of both players and of
+ * Audio_Convert, is declared in fm_audio.h. */
 
 typedef struct
 {

@@ -182,7 +182,7 @@ OBJS     = src/fm_core.o src/fm_crc.o src/fm_path.o \
            src/fm_logger.o src/fm_explorer.o \
            src/fm_media.o src/fm_async.o src/fm_fmfs.o \
            src/fm_image.o src/fm_jpeg.o src/fm_png.o \
-           src/fm_audio.o src/fm_video.o \
+           src/fm_audio.o src/fm_audio_enc.o src/fm_video.o src/fm_video_enc.o \
            src/fm_eeprom.o src/fm_usb_msc.o src/fm_device.o \
            src/fm_h264.o src/fm_mjpeg.o src/fm_flac.o src/fm_vorbis.o src/fm_opus.o src/fm_alloc.o \
            src/fm_hw.o src/fm_player.o src/fm_sd_hal.o \

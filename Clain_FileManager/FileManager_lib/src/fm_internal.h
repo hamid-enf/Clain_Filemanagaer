@@ -177,6 +177,14 @@ FM_Result FM_PNG_EncodeFile(FM_File *f, const FM_Image *img);
 #endif
 #endif /* FM_USE_IMAGE */
 
+/* JPEG encode that hands the file out in pieces (the video writer puts
+ * them into an AVI chunk).  FM_ERR_UNSUPPORTED when FM_USE_JPEG is 0. */
+typedef FM_Result (*FM_JpegSinkFn)(void *ctx, const uint8_t *data,
+                                   uint32_t len);
+FM_Result FM_JPEG_EncodeSink(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt,
+                             FM_JpegSinkFn sink, void *ctx);
+
 FM_END_DECLS
 
 #endif /* FM_INTERNAL_H */

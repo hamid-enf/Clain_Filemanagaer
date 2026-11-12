@@ -24,6 +24,8 @@
 - **ویدیو.** AVI، MP4 و MOV با MJPEG یا H.264، صدا و تصویر هماهنگ.
 - **تصویر.** BMP، JPEG و PNG. اسلایدشو، چرخش، برعکس، تغییر اندازه، افکت،
   ذخیره.
+- **ذخیرهٔ صدا و ویدیو.** صدا به WAV، ADPCM یا FLAC؛ ویدیو به MJPEG در AVI.
+  از دادهٔ خودتان، از موزیکِ در حال پخش، یا فایل به فایل با پردازش شما.
 - **دادهٔ خام در دست شما.** نمونه‌های صدا و فریم‌های تصویر با یک کالبک به
   برنامه می‌رسند، با پخش یا بدون پخش.
 - **USB.** کارت SD مثل یک فلش‌مموری روی کامپیوتر دیده می‌شود.
@@ -369,19 +371,16 @@ SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);      /* یا _CALLBACK: بدون صد�
 SimpleAudio_Begin();
 ```
 
-### ۷.۳ خواندن و ضبط
+### ۷.۳ خواندن مستقیم
 
 | تابع | کار | ورودی | خروجی |
 |---|---|---|---|
 | `SimpleAudio_DataRead(buf, frames, &n)` | نمونهٔ استریو را مستقیم می‌خواند | ترکِ در حال پخش | `buf` |
 | `SimpleAudio_DataReadMono(buf, n, &got)` | همان، مونو | ترکِ در حال پخش | `buf` |
-| `SimpleAudio_RecStart(dest, rate, ch)` | فایل WAV باز می‌کند | پوشه یا مسیر `.wav` | فایل |
-| `SimpleAudio_RecWrite(pcm, frames)` | نمونه اضافه می‌کند | بافر شما | فایل |
-| `SimpleAudio_RecStop()` | فایل را می‌بندد | – | WAV کامل |
-| `SimpleAudio_RecPath()` | مسیر فایل ضبط‌شده | – | رشته |
 
 `DataRead` از همان ترکِ در حال پخش برمی‌دارد: آنچه بخوانید دیگر پخش
 نمی‌شود. برای دادهٔ هم‌زمان با پخش، کالبک بخش ۷.۲ را استفاده کنید.
+ذخیره در فایل: بخش ۷.۵.
 
 ### ۷.۴ حالت‌های پخش (مشترک با ویدیو)
 
@@ -393,6 +392,88 @@ SimpleAudio_Begin();
 | `FM_PLAY_MODE_REPEAT_ALL` | بعدی؛ آخر فهرست برمی‌گردد به اول |
 
 پیش‌فرض موزیک `REPEAT_ALL` و پیش‌فرض ویدیو `STOP` است.
+
+### ۷.۵ ذخیرهٔ صدا در فایل
+
+فرمت از پسوند فایل مقصد انتخاب می‌شود:
+
+| پسوند | فرمت | حجم نسبت به WAV | کیفیت |
+|---|---|---|---|
+| `.wav` | WAV شانزده‌بیتی | ۱ | بدون افت |
+| `.wav` با `RecSetFormat(FM_AUDIO_FILE_ADPCM)` | IMA ADPCM | یک‌چهارم | با افت کم؛ مناسب صدای ضبط‌شده |
+| `.flac` | FLAC | حدود ۰٫۶ تا ۰٫۷ برای موسیقی | بدون افت |
+| `.mp3` `.ogg` `.opus` | فقط با انکودری که خودتان ثبت کنید (`Audio_RegisterEncoder`) | – | – |
+
+بدون انکودر، `FM_ERR_UNSUPPORTED` برمی‌گردد و فایلی ساخته نمی‌شود.
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleAudio_RecStart(dest, rate, ch)` | فایل را برای صدای خودتان باز می‌کند | مسیر فایل، یا پوشه (نام خودکار `rec_000001`) | فایل |
+| `SimpleAudio_RecWrite(pcm, frames)` | نمونه اضافه می‌کند | بافر شما | فایل |
+| `SimpleAudio_RecPlaying(dest)` | موزیکِ در حال پخش را ذخیره می‌کند | پوشه: برای هر ترک یک فایل. فایل: همه در یک فایل | فایل |
+| `SimpleAudio_RecStop()` | فایل را کامل می‌کند و می‌بندد | – | نتیجهٔ ذخیره |
+| `SimpleAudio_RecPath()` | مسیر آخرین فایل | – | رشته |
+| `SimpleAudio_RecActive()` | ذخیره فعال است؟ | – | بله / نه |
+| `SimpleAudio_RecSetFormat(fmt)` | فرمت در حالت پوشه، یا ADPCM برای `.wav` | `FM_AUDIO_FILE_...` | – |
+| `SimpleAudio_RecSetChannels(n)` | ۰ همان ورودی، ۱ مونو، ۲ استریو | – | – |
+| `SimpleAudio_RecSetBitrate(kbps)` | برای انکودرهای ثبت‌شده | – | – |
+| `SimpleAudio_Convert(src, dst, fn, ctx)` | فایل به فایل، بدون پخش، با تمام سرعت | فایل | فایل |
+
+**صدای خودتان** (میکروفون، ADC):
+
+```c
+SimpleAudio_RecStart("/rec/mic.flac", 16000, 1);   /* ۱۶ کیلوهرتز، مونو */
+/* هر بار که داده رسید، از حلقهٔ اصلی: */
+SimpleAudio_RecWrite(pcm, frames);
+/* پایان: */
+SimpleAudio_RecStop();
+```
+
+**موزیکِ در حال پخش.** قبل یا وسط پخش:
+
+```c
+SimpleAudio_RecPlaying("/rec");            /* /music/a.mp3 -> /rec/a.wav */
+/* یا: SimpleAudio_RecPlaying("/rec/all.flac");   همه در یک فایل */
+...
+SimpleAudio_RecStop();
+```
+
+آنچه ذخیره می‌شود صدای قبل از ولوم است. پردازش کالبک دادهٔ شما
+(`SetDataCallback`) فقط وقتی در فایل هست که خروجی «کالبک» را هم داشته
+باشد:
+
+| `SimpleAudio_SetOutput(...)` | بلندگو | پردازش شما در فایل |
+|---|---|---|
+| `FM_AUDIO_OUT_SPEAKER` | دارد | ندارد |
+| `FM_AUDIO_OUT_BOTH` | دارد | دارد |
+| `FM_AUDIO_OUT_CALLBACK` | ساکت | دارد |
+| `FM_AUDIO_OUT_NONE` | ساکت | ندارد |
+
+- حالت پوشه تا `RecStop` فعال می‌ماند، حتی بعد از `Stop` و `Begin` دوباره.
+- حالت تک‌فایل با `RecStop`، با توقف پخش، یا با رسیدن به ترکی که نرخ
+  نمونه‌برداری دیگری دارد تمام می‌شود (یک فایل فقط یک نرخ دارد).
+- ذخیره با سرعت پخش پیش می‌رود: آهنگ سه‌دقیقه‌ای، سه دقیقه.
+- نوشتن روی کارت در همان حلقهٔ پخش انجام می‌شود. اگر پخش قطع شد
+  (`Poll` مقدار `FM_ERR_TIMEOUT` داد)، کارت کند است: `SIMPLE_AUDIO_HALF_SAMPLES`
+  را بزرگ نگه دارید یا از `SimpleAudio_Convert` استفاده کنید.
+- مقصد را پوشه‌ای غیر از پوشهٔ موزیک بگذارید، تا فایل‌های ساخته‌شده وارد
+  فهرست پخش نشوند.
+
+**فایل به فایل**، با پردازش شما روی هر بلوک:
+
+```c
+static void half_volume(void *ctx, int16_t *pcm, size_t samples,
+                        uint32_t rate, uint16_t channels)
+{
+    for (size_t i = 0; i < samples; i++) pcm[i] /= 2;
+}
+
+SimpleAudio_Convert("/music/a.mp3", "/out/a.flac", half_volume, NULL);
+```
+
+تا پایان فایل برنمی‌گردد. اگر خطا بدهد، فایل مقصد پاک می‌شود. فایل ADPCM
+تا یک بلوک (حداکثر ۲۰۴۱ نمونه) بلندتر از ورودی است؛ انتهای آن تکرار آخرین
+نمونه است.
 
 ---
 
@@ -479,6 +560,66 @@ SimpleVideo_Begin();
 SimpleVideo_Start();
 ```
 
+### ۸.۴ ذخیرهٔ ویدیو در فایل
+
+فایل ساخته‌شده MJPEG در AVI است، با صدای PCM اگر بخواهید. روی کامپیوتر،
+گوشی و همین کتابخانه پخش می‌شود. انکودر H.264 یا MP4 وجود ندارد: برای
+میکروکنترلر عملی نیست.
+
+| تابع | کار | ورودی | خروجی |
+|---|---|---|---|
+| `SimpleVideo_RecStart(path, w, h, fps, 0)` | با پسوند `.avi` فایل MJPEG را همان لحظه باز می‌کند | مسیر، ابعاد، فریم در ثانیه | فایل |
+| `SimpleVideo_RecWrite(rgb888, bytes)` | یک فریم RGB888 | `w * h * 3` بایت | فایل |
+| `SimpleVideo_RecWritePixels(px, format)` | یک فریم با هر فرمت پیکسل | مثلاً `FM_PIXEL_RGB565` از فریم‌بافر | فایل |
+| `SimpleVideo_RecWriteJpeg(jpg, bytes)` | یک فریم که خودش JPEG است | دوربین در حالت JPEG | فایل |
+| `SimpleVideo_RecWriteAudio(pcm, frames)` | صدای همان فریم | PCM شانزده‌بیتی | فایل |
+| `SimpleVideo_RecStop()` | ایندکس و طول را می‌نویسد و می‌بندد | – | نتیجهٔ ذخیره |
+| `SimpleVideo_RecSetQuality(q)` | کیفیت JPEG، ۱ تا ۱۰۰ (پیش‌فرض ۸۰) | – | – |
+| `SimpleVideo_RecSetAudio(rate, ch)` | تراک صدا برای فایل بعدی (`0` = بدون صدا) | – | – |
+| `SimpleVideo_RecActive()` / `RecFrames()` | وضعیت و تعداد فریم نوشته‌شده | – | – |
+| `SimpleVideo_Convert(src, dst, fn, ctx)` | فایل به فایل، با کالبک روی هر فریم | هر ویدیوی قابل‌پخش | MJPEG AVI |
+
+```c
+SimpleVideo_RecSetAudio(16000, 1);                    /* اختیاری */
+SimpleVideo_RecStart("/videos/cam.avi", 320, 240, 15, 0);
+/* برای هر فریم: */
+SimpleVideo_RecWritePixels(framebuffer, FM_PIXEL_RGB565);
+SimpleVideo_RecWriteAudio(pcm, 16000 / 15);           /* صدای همان فریم */
+/* پایان: */
+SimpleVideo_RecStop();
+```
+
+- `RecStop` الزامی است. فایلی که بسته نشده (قطع برق) ایندکس ندارد و در
+  این کتابخانه باز نمی‌شود.
+- تا `RecStop` یک فایل کمکی `<نام>.idx` کنار ویدیو هست؛ بعد پاک می‌شود.
+- هر فایل تا حدود ۲ گیگابایت جا دارد؛ بعد از آن نوشتن `FM_ERR_TOO_LARGE`
+  می‌دهد: `RecStop` بزنید و فایل بعدی را شروع کنید.
+- مسیر با پسوند دیگر، مثل قبل FMRV خام می‌سازد (بدون فشرده‌سازی، با `Poll`
+  بعدی باز می‌شود).
+- حجم: تصویر آزمایشی ۴۸۰×۲۷۲ با کیفیت ۸۵ حدود ۱۴ کیلوبایت برای هر فریم شد.
+  سرعت انکود روی برد اندازه‌گیری نشده است.
+
+**فایل به فایل.** هر فریم به‌صورت RGB888 به تابع شما می‌رسد؛ درجا تغییرش
+بدهید:
+
+```c
+static void red_bar(void *ctx, uint8_t *rgb, uint16_t w, uint16_t h,
+                    uint32_t frame)
+{
+    for (uint32_t x = 0; x < 2u * w; x++)             /* دو سطر بالا */
+    {
+        rgb[3u * x] = 255; rgb[3u * x + 1u] = 0; rgb[3u * x + 2u] = 0;
+    }
+}
+
+SimpleVideo_Convert("/videos/a.mp4", "/out/a.avi", red_bar, NULL);
+```
+
+تا پایان فایل برنمی‌گردد و وقتی ویدیویی در حال پخش است `FM_ERR_BUSY`
+می‌دهد. حافظه: یک فریم RGB888 (`w * h * 3` بایت) از `FM_Alloc`، به‌اضافهٔ
+نیاز دیکدر. برای اندازهٔ دیگر، پردازش صدا، پیشرفت یا لغو: `Video_Convert`
+با `FM_VideoConvertConfig` (بخش ۱۰).
+
 ---
 
 ## ۹. تصویر — `SimpleImage`
@@ -532,12 +673,18 @@ while (1)
 | `Audio_ReadMono(&a, buf, count, &n)` | نمونهٔ مونو | فایل | `buf` |
 | `Audio_Seek(&a, sec)` | پرش به ثانیه | – | – |
 | `AudioWriter_Create / Write / Close` | نوشتن WAV | بافر | فایل WAV |
+| `AudioFileWriter_Open / WriteFrames / Close` | نوشتن WAV، ADPCM، FLAC یا فرمت انکودر ثبت‌شده | بافر | فایل |
+| `Audio_Convert(src, dst, &cfg, &frames)` | فایل صدا به فایل صدا، با پردازش، پیشرفت و لغو | فایل | فایل |
+| `Audio_RegisterEncoder(format, &ops)` | انکودر خودتان (MP3، Vorbis، Opus) | – | – |
 | `Image_Load(path, &img, buf, cap)` | عکس را دیکد می‌کند | فایل | پیکسل در `buf` |
 | `Image_Save(path, &img)` | عکس را ذخیره می‌کند | `img` | فایل |
+| `Image_EncodeJPEGEx(&img, &opt, out, cap, &len)` | JPEG با کیفیت ۱ تا ۱۰۰ و رنگ ۴:۴:۴ یا ۴:۲:۰ | `img` | بایت‌های JPEG |
 | `Image_ResizeFile(src, dst, w, h, mode)` | فایل عکس را با اندازهٔ جدید می‌سازد | فایل | فایل |
 | `Video_Open(path, &v)` / `Video_Close(&v)` | فایل ویدیو را باز / بسته می‌کند | فایل | `v` |
 | `Video_GetInfo(&v, &info)` | ابعاد، fps، تعداد فریم | `v` | `info` |
 | `Video_DecodeFrame(&v, buf, cap)` | فریم بعدی را دیکد می‌کند | فایل | پیکسل در `buf` |
+| `VideoFileWriter_Open / WriteFrame / WriteJpeg / WriteAudio / Close` | نوشتن MJPEG AVI | پیکسل یا JPEG، و PCM | فایل AVI |
+| `Video_Convert(src, dst, &cfg, &frames)` | ویدیو به MJPEG AVI، با تغییر اندازه، پردازش، پیشرفت و لغو | فایل | فایل |
 
 ```c
 FM_Audio a;
@@ -597,6 +744,11 @@ if (Audio_Open("/music/a.mp3", &a) == FM_OK)
 - FLAC بالاتر از ۲۴ بیت و WAV بالای ۱۶ بیت پشتیبانی نمی‌شود.
 - AAC فقط با دیکدری که خودتان ثبت کنید پخش می‌شود.
 - پلیرها برای حلقهٔ اصلی نوشته شده‌اند؛ `Poll` را از وقفه صدا نزنید.
+- ذخیرهٔ صدا: WAV، ADPCM و FLAC داخلی‌اند. MP3، Vorbis و Opus انکودر داخلی
+  ندارند.
+- ذخیرهٔ ویدیو فقط MJPEG در AVI است. ذخیرهٔ هم‌زمان ویدیوی در حال پخش وجود
+  ندارد؛ `SimpleVideo_Convert` همان کار را فایل به فایل انجام می‌دهد.
+- `Video_Convert` نرخ فریم را عدد صحیح می‌نویسد (۲۹٫۹۷ می‌شود ۳۰).
 
 ---
 

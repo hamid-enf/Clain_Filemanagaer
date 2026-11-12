@@ -142,6 +142,23 @@ FM_Result Image_ProbePNG(const void *png, size_t png_size,
                          FM_ImageInfo *info);
 FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
                            size_t *out_len);
+
+/* JPEG encode with a chosen quality and chroma layout.  Image_EncodeJPEG
+ * and Image_Save use quality FM_JPEG_QUALITY (85) and 4:4:4.
+ *   quality    1..100 (the usual JPEG scale; 0 = FM_JPEG_QUALITY)
+ *   subsample  0 = 4:4:4 (sharp colour edges), 1 = 4:2:0 (about a third
+ *              smaller and faster: what cameras and video use)
+ * Output is baseline JFIF with the standard Huffman tables, readable by
+ * every JPEG decoder (and by the STM32 JPEG peripheral). */
+typedef struct
+{
+    uint8_t quality;
+    uint8_t subsample;
+} FM_JpegEncodeOptions;
+
+FM_Result Image_EncodeJPEGEx(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt, void *out,
+                             size_t out_cap, size_t *out_len);
 FM_Result Image_EncodePNG(const FM_Image *img, void *out, size_t out_cap,
                           size_t *out_len);
 

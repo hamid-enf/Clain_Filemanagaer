@@ -150,28 +150,58 @@ FM_Result AudioWriter_Write(FM_AudioWriter *w, const int16_t *samples,
 FM_Result AudioWriter_Close(FM_AudioWriter *w);
 
 /* ------------------------------------------------------------------ */
-/* Format-dispatching PCM16 file writer                                */
+/* Saving: PCM16 in, a finished audio file out                         */
+/*                                                                     */
+/*   format   file          built in                  size (16-bit)    */
+/*   WAV      .wav          always                    1 : 1            */
+/*   ADPCM    .wav (IMA)    always                    1 : 4, lossy     */
+/*   FLAC     .flac         when FM_USE_FLAC is 1     about 1 : 2,     */
+/*                                                    lossless         */
+/*   MP3      .mp3          no - Audio_RegisterEncoder                 */
+/*   VORBIS   .ogg          no - Audio_RegisterEncoder                 */
+/*   OPUS     .opus         no - Audio_RegisterEncoder                 */
+/*                                                                     */
+/* Every file written here is read back by Audio_Open.                 */
 /* ------------------------------------------------------------------ */
 typedef enum
 {
-    FM_AUDIO_FILE_AUTO = 0,  /* select from destination extension */
-    FM_AUDIO_FILE_WAV,
-    FM_AUDIO_FILE_MP3
+    FM_AUDIO_FILE_AUTO = 0,  /* select from the destination extension  */
+    FM_AUDIO_FILE_WAV,       /* 16-bit PCM                              */
+    FM_AUDIO_FILE_MP3,
+    FM_AUDIO_FILE_ADPCM,     /* IMA ADPCM in a .wav: never chosen by
+                              * AUTO, ask for it by name                */
+    FM_AUDIO_FILE_FLAC,
+    FM_AUDIO_FILE_VORBIS,
+    FM_AUDIO_FILE_OPUS,
+    FM_AUDIO_FILE_COUNT
 } FM_AudioFileFormat;
 
+/* Describes the PCM you hand in.  Clear the whole structure first
+ * (memset) so that fields added later stay at their default. */
 typedef struct
 {
-    uint32_t sample_rate;
-    uint16_t channels;
-    uint16_t bits_per_sample; /* currently PCM16 input */
-    uint32_t bitrate_kbps;    /* compressed encoders, e.g. MP3 */
+    uint32_t sample_rate;     /* of the PCM you hand in                 */
+    uint16_t channels;        /* of the PCM you hand in: 1 or 2         */
+    uint16_t bits_per_sample; /* 16                                     */
+    uint32_t bitrate_kbps;    /* compressed plugin encoders, e.g. MP3   */
+    uint16_t out_channels;    /* in the file: 1 = mix down to mono,
+                               * 2 = stereo (mono is doubled),
+                               * anything else = the same as `channels` */
 } FM_AudioEncodeConfig;
 
-/* Compressed encoders are optional plugins. FileManager owns the destination
- * FM_File and all file I/O; the plugin owns only its codec state. `write`
- * consumes PCM16 frames (interleaved for stereo) and writes encoded bytes to
- * `file`. This keeps format dispatch inside FileManager while allowing a
- * software or hardware MP3 encoder to be selected per target. */
+/* An encoder.  The built-in ones use this table too; a plugin (a
+ * software MP3 or Opus encoder, a hardware codec) is registered with
+ * Audio_RegisterEncoder.  FileManager owns the destination FM_File; the
+ * encoder owns only its state.
+ *
+ *   init    `config` describes what `write` will receive: channels and
+ *           out_channels are both the channel count in the file.
+ *   write   takes `frame_count` PCM16 frames (interleaved for stereo),
+ *           writes encoded bytes to `file`, reports how many frames it
+ *           used (all of them, or fewer to be called again).
+ *   finish  flushes what is buffered and completes the header; may seek.
+ *   close   frees the state.  Called exactly once after a successful
+ *           init, also when writing failed. */
 typedef struct FM_AudioEncoderOps
 {
     const char *name;
@@ -185,22 +215,38 @@ typedef struct FM_AudioEncoderOps
 typedef struct
 {
     FM_AudioFileFormat format;
-    FM_AudioEncodeConfig config;
-    FM_AudioWriter wav;
-    FM_File encoded_file;
+    FM_AudioEncodeConfig config;    /* as given to Open                  */
+    FM_File file;
     const FM_AudioEncoderOps *encoder;
     void *encoder_ctx;
+    uint16_t out_channels;          /* channels in the file              */
+    uint64_t frames;                /* frames accepted so far            */
+    FM_Result error;                /* first failure; the writer then
+                                     * refuses more data                 */
     FM_Bool opened;
 } FM_AudioFileWriter;
 
+/* Register an encoder for a format (not for WAV).  It replaces the
+ * built-in one of that format, if there is one. */
 FM_Result Audio_RegisterEncoder(FM_AudioFileFormat format,
                                 const FM_AudioEncoderOps *ops);
 FM_Result Audio_UnregisterEncoder(FM_AudioFileFormat format);
+/* The encoder that would be used: registered, else built in, else NULL. */
 const FM_AudioEncoderOps *Audio_GetEncoder(FM_AudioFileFormat format);
+FM_Bool Audio_CanEncode(FM_AudioFileFormat format);
 
-/* AUTO uses .wav/.wave or .mp3 (case-insensitive). WAV is built in. MP3
- * requires one registered MP3 encoder; otherwise Open returns
- * FM_ERR_UNSUPPORTED rather than writing fake WAV bytes into an .mp3 file. */
+/* .wav/.wave, .flac, .mp3, .ogg/.oga, .opus (any letter case); AUTO when
+ * the name has none of them. */
+FM_AudioFileFormat Audio_FormatFromPath(const char *path);
+/* ".wav", ".flac", ... ; "" for AUTO. */
+const char *Audio_FormatExtension(FM_AudioFileFormat format);
+
+/* Open: with AUTO the format comes from the extension.  A format with
+ * no encoder gives FM_ERR_UNSUPPORTED and creates nothing (no WAV bytes
+ * under an .mp3 name).  The folder must exist.
+ * WriteFrames: `frame_count` frames in the layout given to Open.
+ * Close: completes the header and closes the file; returns the first
+ * error of the whole recording, and always releases the writer. */
 FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,
                                FM_AudioFileFormat format,
                                const FM_AudioEncodeConfig *config);
@@ -209,6 +255,43 @@ FM_Result AudioFileWriter_WriteFrames(FM_AudioFileWriter *writer,
                                       size_t frame_count,
                                       size_t *frames_written);
 FM_Result AudioFileWriter_Close(FM_AudioFileWriter *writer);
+
+/* ------------------------------------------------------------------ */
+/* File to file: read -> your processing -> write, nothing is played   */
+/* ------------------------------------------------------------------ */
+/* The one PCM callback type: of both players and of Audio_Convert.
+ *   pcm       signed 16-bit samples, interleaved (L,R,L,R...); writable
+ *   samples   number of int16_t values (a stereo frame is two)
+ * In a player it runs on the buffer-refill path: copy or process and
+ * return; no file I/O and no printf in there. */
+typedef void (*FM_AudioDataFn)(void *ctx, int16_t *pcm, size_t samples,
+                               uint32_t sample_rate, uint16_t channels);
+/* Called after every block; return FM_FALSE to cancel (the unfinished
+ * destination is deleted).  total_frames is 0 when the length of the
+ * source is not known. */
+typedef FM_Bool (*FM_AudioProgressFn)(void *ctx, uint64_t done_frames,
+                                      uint64_t total_frames);
+
+typedef struct
+{
+    FM_AudioFileFormat format;      /* AUTO: from the extension of dst   */
+    uint16_t out_channels;          /* 0 = as the source, 1 mono, 2 stereo */
+    uint32_t bitrate_kbps;          /* plugin encoders                   */
+    FM_AudioDataFn process;         /* your DSP, in place; may be NULL   */
+    void *process_ctx;
+    FM_AudioProgressFn progress;    /* may be NULL                       */
+    void *progress_ctx;
+} FM_AudioConvertConfig;
+
+/* Decode `src` (anything Audio_Open reads), pass every block through
+ * config->process, and encode the result into `dst`.  Runs as fast as
+ * the processor and the card allow and returns when the file is done.
+ * `config` may be NULL: a plain conversion chosen by the extension of
+ * dst.  `frames_out` (may be NULL) receives the frames written.  On any
+ * failure dst is removed. */
+FM_Result Audio_Convert(const char *src, const char *dst,
+                        const FM_AudioConvertConfig *config,
+                        uint64_t *frames_out);
 
 /* ------------------------------------------------------------------ */
 /* Recorder: write audio into a folder                                */

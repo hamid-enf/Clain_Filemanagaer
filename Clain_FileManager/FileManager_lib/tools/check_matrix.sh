@@ -27,8 +27,8 @@ fi
 # Objects that belong to each subsystem.  With the subsystem switched off
 # they may only contain stateless stubs: .data + .bss must be 0 bytes.
 IMG_OBJS='fm_image.o fm_jpeg.o fm_png.o'
-VID_OBJS='fm_video.o fm_h264.o fm_mjpeg.o fm_hw.o'
-AUD_OBJS='fm_audio.o fm_flac.o fm_vorbis.o fm_opus.o'
+VID_OBJS='fm_video.o fm_video_enc.o fm_h264.o fm_mjpeg.o fm_hw.o'
+AUD_OBJS='fm_audio.o fm_audio_enc.o fm_flac.o fm_vorbis.o fm_opus.o'
 
 ram_of() {    # $* = object names ; prints total .data+.bss they own
     size libfilemanager.a 2>/dev/null | awk -v list=" $* " '

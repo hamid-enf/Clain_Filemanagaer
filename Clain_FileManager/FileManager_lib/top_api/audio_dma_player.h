@@ -164,6 +164,9 @@ typedef struct
     void          *data_ctx;
     FM_AudioDataFn monitor_cb;    /* after the volume                    */
     void          *monitor_ctx;
+    FM_AudioDataFn save_cb;       /* the recorder: after data_cb, before
+                                   * the volume, whatever the output is  */
+    void          *save_ctx;
     AudioDma_TrackFn track_start_cb;
     void          *track_start_ctx;
     AudioDma_TrackFn track_end_cb;
@@ -197,6 +200,13 @@ typedef struct
      * above is the monitor callback, after the volume. */
     FM_AudioDataFn pcm_tap_pre;
     void *pcm_tap_pre_context;
+    /* Recorder: receives what the data callback left, before the volume,
+     * with every output setting (also "speaker only" and "none"). */
+    FM_AudioDataFn save_fn;
+    void *save_context;
+    /* Counts the tracks opened since the start: a recorder that keeps
+     * one file per track sees a new number and starts a new file. */
+    uint32_t track_serial;
 
     /* Track lifecycle callbacks (start = a track begins; end = it finishes).
      * See AudioDma_SetTrackStartCallback/SetTrackEndCallback. The end
@@ -347,6 +357,16 @@ static inline FM_Result audio_dma_fill_half(AudioDma *state,
                                filled - prev, state->sample_rate,
                                state->force_stereo ? (uint16_t)2u
                                                    : state->channels);
+        }
+
+        /* Recorder: the decoded sound as the data callback left it,
+         * before the volume and independent of the output switch. */
+        if (state->save_fn != NULL && filled > prev)
+        {
+            state->save_fn(state->save_context, dst + prev, filled - prev,
+                           state->sample_rate,
+                           state->force_stereo ? (uint16_t)2u
+                                               : state->channels);
         }
 
         if (state->volume != 0x7FFF)
@@ -612,6 +632,7 @@ static inline FM_Result audio_dma_play_from(AudioDma *state,
             last = r;
             continue;
         }
+        state->track_serial++;      /* before its first buffer is filled */
         r = audio_dma_start_current(state);
         if (r == FM_OK)
         {
@@ -709,6 +730,8 @@ static inline FM_Result AudioDma_StartConfig(AudioDma *state,
         state->pcm_tap_pre_context = config->data_ctx;
         state->pcm_tap = config->monitor_cb;
         state->pcm_tap_context = config->monitor_ctx;
+        state->save_fn = config->save_cb;
+        state->save_context = config->save_ctx;
         state->on_track_start = config->track_start_cb;
         state->track_start_context = config->track_start_ctx;
         state->on_track_end = config->track_end_cb;
@@ -787,6 +810,21 @@ static inline void AudioDma_SetOutput(AudioDma *state, FM_AudioOutput output)
 static inline FM_AudioOutput AudioDma_GetOutput(const AudioDma *state)
 {
     return (state == NULL) ? FM_AUDIO_OUT_NONE : state->output;
+}
+
+/* Install (or remove, with NULL) the recorder callback: called right
+ * after the data callback with the same samples, before the volume, for
+ * every output setting. */
+static inline void AudioDma_SetSaveCallback(AudioDma *state,
+                                            FM_AudioDataFn fn,
+                                            void *context)
+{
+    if (state == NULL)
+    {
+        return;
+    }
+    state->save_context = context;
+    state->save_fn = fn;
 }
 
 /* Install (or remove, with NULL) the data callback: decoded PCM before

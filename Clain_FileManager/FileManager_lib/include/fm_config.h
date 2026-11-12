@@ -172,6 +172,11 @@
 #ifndef FM_IMAGE_MAX_BYTES
 #define FM_IMAGE_MAX_BYTES SIZE_MAX
 #endif
+/* JPEG quality (1..100) of Image_Save("x.jpg") and Image_EncodeJPEG.
+ * Image_EncodeJPEGEx and the video writer take their own value. */
+#ifndef FM_JPEG_QUALITY
+#define FM_JPEG_QUALITY 85
+#endif
 /* Work budget of the JPEG header probe (Image_GetInfo / Image_Load on a
  * .jpg): one unit per padding byte examined, 16 per marker segment.  A
  * file made of 0xFF fill or of endless tiny segments is rejected as

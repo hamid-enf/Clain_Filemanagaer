@@ -52,11 +52,19 @@
  *   این دو از همان دیکدرِ در حال پخش می‌خوانند: آنچه بخوانید دیگر پخش
  *   نمی‌شود. برای دادهٔ هم‌زمان با پخش، کالبک بالا را استفاده کنید.
  *
- * ── ضبط WAV ─────────────────────────────────────────────────────────────
- *   SimpleAudio_RecStart("/rec", rate, channels)   یا مسیر کامل یک .wav
- *   SimpleAudio_RecWrite(pcm, frames)
- *   SimpleAudio_RecStop()
- *   SimpleAudio_RecPath() / RecActive()
+ * ── ذخیره در فایل (WAV، ADPCM، FLAC؛ بقیه با انکودر ثبت‌شده) ─────────────
+ *   صدای خودتان:
+ *     SimpleAudio_RecStart("/rec", rate, channels)   یا مسیر کامل یک فایل
+ *     SimpleAudio_RecWrite(pcm, frames)
+ *   موزیکِ در حال پخش (قبل از ولوم؛ با DSP شما اگر خروجی «کالبک» دارد):
+ *     SimpleAudio_RecPlaying("/rec")           برای هر ترک یک فایل
+ *     SimpleAudio_RecPlaying("/rec/all.flac")  همه در یک فایل
+ *   هر دو:
+ *     SimpleAudio_RecStop()
+ *     SimpleAudio_RecPath() / RecActive()
+ *     SimpleAudio_RecSetFormat(fmt) / RecSetChannels(n) / RecSetBitrate(kbps)
+ *   فایل به فایل، بدون پخش، با تمام سرعت:
+ *     SimpleAudio_Convert("/music/a.mp3", "/out/a.flac", my_dsp, ctx)
  *
  * نمونه:
  *
@@ -398,14 +406,6 @@ typedef struct
     uint32_t refill_max_ms;
     uint64_t refill_sum_ms;
 
-    /* «تابهٔ ضبط»: داده می‌دهی، خودش به آدرس ذخیره می‌کند */
-    FM_AudioFileWriter rec;
-    FM_Bool rec_active;
-    char rec_path[FM_PATH_MAX];
-    uint32_t rec_rate;
-    uint16_t rec_channels;
-    uint64_t rec_frames;
-
     /* Track-change commands issued from a UART/key ISR must not open
      * files or fill DMA halves in that ISR: a 64 KB WAV File_Read from
      * inside HAL_UARTEx_RxEventCallback waits for SDMMC completion that
@@ -427,6 +427,33 @@ typedef struct
 #define SA_CMD_RESUME  5u
 
 static SimpleAudioState sa;
+
+/* ذخیرهٔ صدا. بیرون از SimpleAudioState است چون Begin آن را پاک می‌کند و
+ * ذخیره (و تنظیم‌هایش) باید از Stop و Begin و عوض‌شدن ترک جان به‌در ببرد. */
+typedef struct
+{
+    FM_AudioFileWriter w;
+    FM_Bool  active;              /* یک فایل باز است                     */
+    FM_Bool  playing;             /* منبع = موزیکِ در حال پخش (RecPlaying) */
+    FM_Bool  per_track;           /* مقصد پوشه بود: برای هر ترک یک فایل   */
+    uint32_t serial;              /* شمارهٔ ترکی که در فایلِ باز است       */
+    char     dest[FM_PATH_MAX];   /* همان که به RecPlaying داده شد         */
+    char     path[FM_PATH_MAX];   /* فایل فعلی / آخرین فایل               */
+    uint32_t rate;
+    uint16_t channels;
+    uint64_t frames;
+    FM_Result error;              /* چرا ذخیرهٔ موزیک خودش تمام شد         */
+    /* تنظیم‌های ماندگار */
+    FM_AudioFileFormat format;
+    uint16_t out_channels;
+    uint32_t bitrate;
+} SimpleAudioRec;
+
+static SimpleAudioRec sa_rec;
+
+static void simple_audio_rec_tap(void *ctx, int16_t *pcm, size_t samples,
+                                 uint32_t rate, uint16_t channels);
+static void simple_audio_rec_service(void);
 
 static void simple_audio_i2s_half(I2S_HandleTypeDef *hi2s)
 {
@@ -565,6 +592,7 @@ static AudioDma_Config *simple_audio_cfg(void)
     {
         AudioDma_ConfigDefaults(&sa_cfg);
         sa_cfg.force_stereo = FM_TRUE;   /* mono -> استریو، خودکار */
+        sa_cfg.save_cb = simple_audio_rec_tap;   /* تا RecPlaying بی‌اثر */
         sa_cfg_ready = 1u;
     }
     return &sa_cfg;
@@ -643,10 +671,17 @@ FM_Result SimpleAudio_Begin(void)
 {
     FM_Result r;
 
-    if (sa.dma.running || sa.rec_active)
+    if (sa.dma.running)
     {
         return FM_ERR_BUSY;
     }
+#if SIMPLE_AUDIO_I2S_REC
+    if (sa_rec.active && !sa_rec.playing)
+    {
+        return FM_ERR_BUSY;          /* RX و TX یک ساعت I2S دارند */
+    }
+#endif
+    simple_audio_rec_service();      /* فایلِ بازِ پخش قبلی بسته شود */
 
     SimpleI2S_Take(simple_audio_i2s_half, simple_audio_i2s_full,
                    simple_audio_i2s_err, SimpleAudio_Stop);
@@ -978,7 +1013,7 @@ static void simple_audio_rx_drain(void)
              * با کش خاموش این فقط یک بریر است.
              */
             FM_Cache_InvalidateAfterDma(chunk, chunk_bytes);
-            if (sa.rec_active)
+            if (sa_rec.active && !sa_rec.playing)
             {
                 /* RX_HALF channel samples = RX_HALF/2 stereo frames
                  * (the RX path records 16-bit stereo slots). */
@@ -1001,6 +1036,8 @@ static void simple_audio_rx_drain(void)
 FM_Result SimpleAudio_Poll(void)
 {
     FM_Result r;
+
+    simple_audio_rec_service();
 
 #if SIMPLE_AUDIO_I2S_REC
     simple_audio_rx_drain();
@@ -1201,6 +1238,7 @@ FM_Result SimpleAudio_Stop(void)
     SimpleI2S_Drop(SimpleAudio_Stop);
     SimpleIdle_Remove(simple_audio_idle);
     r = AudioDma_Stop(&sa.dma);
+    simple_audio_rec_service();      /* فایل ذخیرهٔ موزیک کامل و بسته شود */
 
     if (r == FM_OK)
     {
@@ -1533,64 +1571,150 @@ FM_Result SimpleAudio_DataReadMono(int16_t *buf, size_t count, size_t *got)
 }
 
 /* ------------------------------------------------------------------------ */
-/* ضبط — «تابهٔ صدا»: داده بده، خودش می‌فهمد و به آدرس ذخیره می‌کند         */
+/* ذخیرهٔ صدا در فایل                                                         */
+/*                                                                            */
+/* سه کار، با یک دسته تابع:                                                   */
+/*   ۱) صدای خودتان (میکروفون، ADC، هر منبعی):                                */
+/*        SimpleAudio_RecStart("/rec/mic.wav", 16000, 1);                     */
+/*        SimpleAudio_RecWrite(pcm, frames);   // هر چند بار                  */
+/*        SimpleAudio_RecStop();                                              */
+/*   ۲) همان موزیکی که پخش می‌شود (قبل از ولوم):                              */
+/*        SimpleAudio_RecPlaying("/rec");      // برای هر ترک یک فایل          */
+/*        SimpleAudio_RecPlaying("/rec/all.flac");   // همه در یک فایل         */
+/*        SimpleAudio_RecStop();                                              */
+/*   ۳) فایل به فایل، بدون پخش، با تمام سرعت:                                 */
+/*        SimpleAudio_Convert("/music/a.mp3", "/out/a.flac", my_dsp, NULL);   */
+/*                                                                            */
+/* فرمت از پسوند مقصد: ‎.wav‎ و ‎.flac‎ داخلی‌اند؛ ‎.mp3 / .ogg / .opus‎ فقط وقتی     */
+/* انکودرشان با Audio_RegisterEncoder ثبت شده باشد (وگرنه FM_ERR_UNSUPPORTED   */
+/* و هیچ فایلی ساخته نمی‌شود).                                                 */
 /* ------------------------------------------------------------------------ */
 
-/* آیا string با .wav/.mp3 (بی‌توجه به حروف بزرگ/کوچک) تمام می‌شود؟ */
+/* آیا مسیر با پسوند یک فایل صوتی تمام می‌شود؟ (wav، flac، mp3، ogg، opus) */
 static FM_Bool simple_audio_has_audio_ext(const char *p)
 {
-    static const char *exts[2] = {".wav", ".mp3"};
-    size_t len = strlen(p);
-    uint8_t i;
+    return (Audio_FormatFromPath(p) != FM_AUDIO_FILE_AUTO) ? FM_TRUE
+                                                           : FM_FALSE;
+}
 
-    for (i = 0u; i < 2u; i++)
+/* فرمت فایل مقصد. file = مسیر با پسوند، یا NULL وقتی مقصد یک پوشه است.
+ * پسوند تعیین‌کننده است؛ RecSetFormat فقط دو جا اثر دارد: نام‌گذاری خودکار
+ * در پوشه، و انتخاب ADPCM برای یک ‎.wav‎. */
+static FM_AudioFileFormat simple_audio_rec_format(const char *file)
+{
+    FM_AudioFileFormat f = (file != NULL) ? Audio_FormatFromPath(file)
+                                          : FM_AUDIO_FILE_AUTO;
+
+    if (f == FM_AUDIO_FILE_AUTO)
     {
-        size_t elen = strlen(exts[i]);
-        size_t k;
-
-        if (len < elen)
-        {
-            continue;
-        }
-        for (k = 0u; k < elen; k++)
-        {
-            char a = p[len - elen + k];
-            char b = exts[i][k];
-
-            if (a >= 'A' && a <= 'Z')
-            {
-                a = (char)(a - 'A' + 'a');
-            }
-            if (a != b)
-            {
-                break;
-            }
-        }
-        if (k == elen)
-        {
-            return FM_TRUE;
-        }
+        f = (sa_rec.format != FM_AUDIO_FILE_AUTO) ? sa_rec.format
+                                                  : FM_AUDIO_FILE_WAV;
     }
-    return FM_FALSE;
+    else if (f == FM_AUDIO_FILE_WAV && sa_rec.format == FM_AUDIO_FILE_ADPCM)
+    {
+        f = FM_AUDIO_FILE_ADPCM;
+    }
+    return f;
+}
+
+/*
+ * تنظیم‌های ذخیره — ماندگار؛ یک‌بار، هر وقت (روی فایلِ بعدی اثر می‌کنند):
+ *
+ *   RecSetFormat    FM_AUDIO_FILE_AUTO (پیش‌فرض: از پسوند؛ در پوشه WAV)،
+ *                   FM_AUDIO_FILE_WAV، FM_AUDIO_FILE_ADPCM (‎.wav‎ یک‌چهارم حجم)،
+ *                   FM_AUDIO_FILE_FLAC (بدون افت، حدود نصف حجم)، ...
+ *   RecSetChannels  0 = همان ورودی، 1 = مونو (میانگین چپ و راست)، 2 = استریو
+ *   RecSetBitrate   برای انکودرهای فشردهٔ ثبت‌شده (MP3 و ...)، kbps
+ */
+FM_Result SimpleAudio_RecSetFormat(FM_AudioFileFormat format)
+{
+    if (format != FM_AUDIO_FILE_AUTO && !Audio_CanEncode(format))
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    sa_rec.format = format;
+    return FM_OK;
+}
+
+FM_Result SimpleAudio_RecSetChannels(uint16_t channels)
+{
+    if (channels > 2u)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    sa_rec.out_channels = channels;
+    return FM_OK;
+}
+
+void SimpleAudio_RecSetBitrate(uint32_t kbps)
+{
+    sa_rec.bitrate = kbps;
+}
+
+static FM_Result simple_audio_rec_open(const char *path,
+                                       FM_AudioFileFormat format,
+                                       uint32_t rate, uint16_t channels)
+{
+    FM_AudioEncodeConfig cfg;
+    FM_Result r;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.sample_rate = rate;
+    cfg.channels = channels;
+    cfg.bits_per_sample = 16;
+    cfg.bitrate_kbps = sa_rec.bitrate;
+    cfg.out_channels = sa_rec.out_channels;
+    r = AudioFileWriter_Open(&sa_rec.w, path, format, &cfg);
+    if (r == FM_OK)
+    {
+        sa_rec.active = FM_TRUE;
+        sa_rec.rate = rate;
+        sa_rec.channels = channels;
+        sa_rec.frames = 0u;
+    }
+    return r;
+}
+
+static FM_Result simple_audio_rec_close(void)
+{
+    FM_Result r = AudioFileWriter_Close(&sa_rec.w);
+
+    sa_rec.active = FM_FALSE;
+    if (r == FM_OK)
+    {
+        FM_Log("SimpleAudio: saved %s (%lu s, %lu frames)\n", sa_rec.path,
+               (unsigned long)(sa_rec.frames /
+                               (sa_rec.rate != 0u ? sa_rec.rate : 1u)),
+               (unsigned long)sa_rec.frames);
+    }
+    else
+    {
+        FM_Log("SimpleAudio: closing %s failed: %s (%d)\n", sa_rec.path,
+               File_GetErrorString(r), (int)r);
+    }
+    return r;
 }
 
 /* در حالت «پوشه» (بدون پسوند): rec_000001.wav، rec_000002.wav، ... */
-static FM_Result simple_audio_make_rec_path(const char *folder, char *path,
+static FM_Result simple_audio_make_rec_path(const char *folder,
+                                            const char *ext, char *path,
                                             size_t cap)
 {
     static uint32_t counter;
     size_t flen;
+    size_t elen;
     size_t off;
     uint32_t n;
     uint32_t tries;
     FM_Result r;
 
-    if (folder == NULL || path == NULL || cap == 0u)
+    if (folder == NULL || ext == NULL || path == NULL || cap == 0u)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
     flen = strlen(folder);
-    if (flen == 0u || flen + 1 + 4 + 6 + 4 + 1 > cap)
+    elen = strlen(ext);
+    if (flen == 0u || flen + 1u + 4u + 6u + elen + 1u > cap)
     {
         return FM_ERR_TOO_LARGE;
     }
@@ -1623,8 +1747,8 @@ static FM_Result simple_audio_make_rec_path(const char *folder, char *path,
         {
             path[off++] = (char)('0' + (counter / n) % 10u);
         }
-        memcpy(path + off, ".wav", 4u);
-        off += 4u;
+        memcpy(path + off, ext, elen);
+        off += elen;
         path[off] = '\0';
 
         if (File_Exists(path, &exists) != FM_OK || !exists)
@@ -1636,26 +1760,26 @@ static FM_Result simple_audio_make_rec_path(const char *folder, char *path,
 }
 
 /*
- * شروع ضبط:
- *   dest = آدرس دقیق با پسوند  -> همان فایل: "/rec/take1.wav"
- *                                (فرمت از پسوند: .wav داخلی / .mp3 اگر
- *                                encoder ثبت‌شده باشد)
+ * شروع ذخیرهٔ صدای خودتان:
+ *   dest = آدرس دقیق با پسوند  -> همان فایل: "/rec/take1.wav"، "/rec/a.flac"
  *   dest = پوشه (بدون پسوند)   -> نام خودکار: "/rec" -> rec_000001.wav
+ *                                 (پسوند طبق RecSetFormat)
  *
- * rate/channels: ویژگی‌های دادهٔ خامی که می‌دهید (مثلاً 16000 Hz mono
- * از میکروفون). هدر فایل (WAV) خودکار درست نوشته/رفع می‌شود.
+ * rate/channels: مشخصات داده‌ای که می‌دهید (مثلاً 16000 Hz مونو از
+ * میکروفون؛ channels = 1 یا 2). سرصفحهٔ فایل خودکار نوشته و در RecStop
+ * کامل می‌شود. پخش موزیک هم‌زمان با این ذخیره مانعی ندارد.
  */
 FM_Result SimpleAudio_RecStart(const char *dest, uint32_t rate,
                                uint16_t channels)
 {
-    FM_AudioEncodeConfig cfg;
+    FM_AudioFileFormat format;
     FM_Result r;
 
     if (dest == NULL || rate == 0u || (channels != 1u && channels != 2u))
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    if (sa.rec_active)
+    if (sa_rec.active || sa_rec.playing)
     {
         return FM_ERR_BUSY;
     }
@@ -1668,28 +1792,26 @@ FM_Result SimpleAudio_RecStart(const char *dest, uint32_t rate,
     }
 #endif
 
-    memset(&sa.rec, 0, sizeof(sa.rec));
-    cfg.sample_rate = rate;
-    cfg.channels = channels;
-    cfg.bits_per_sample = 16;
-    cfg.bitrate_kbps = 0u;
-
+    sa_rec.error = FM_OK;
     if (simple_audio_has_audio_ext(dest))
     {
-        (void)strncpy(sa.rec_path, dest, FM_PATH_MAX - 1u);
-        sa.rec_path[FM_PATH_MAX - 1u] = '\0';
-        r = AudioFileWriter_Open(&sa.rec, sa.rec_path,
-                                 FM_AUDIO_FILE_AUTO, &cfg);
+        if (strlen(dest) >= FM_PATH_MAX)
+        {
+            return FM_ERR_TOO_LARGE;
+        }
+        (void)strcpy(sa_rec.path, dest);
+        format = simple_audio_rec_format(dest);
+        r = FM_OK;
     }
     else
     {
-        r = simple_audio_make_rec_path(dest, sa.rec_path,
-                                       sizeof(sa.rec_path));
-        if (r == FM_OK)
-        {
-            r = AudioFileWriter_Open(&sa.rec, sa.rec_path,
-                                     FM_AUDIO_FILE_AUTO, &cfg);
-        }
+        format = simple_audio_rec_format(NULL);
+        r = simple_audio_make_rec_path(dest, Audio_FormatExtension(format),
+                                       sa_rec.path, sizeof(sa_rec.path));
+    }
+    if (r == FM_OK)
+    {
+        r = simple_audio_rec_open(sa_rec.path, format, rate, channels);
     }
     if (r != FM_OK)
     {
@@ -1698,35 +1820,35 @@ FM_Result SimpleAudio_RecStart(const char *dest, uint32_t rate,
         return r;
     }
 
-    sa.rec_active = FM_TRUE;
-    sa.rec_rate = rate;
-    sa.rec_channels = channels;
-    sa.rec_frames = 0u;
-
 #if SIMPLE_AUDIO_I2S_REC
     r = simple_audio_board_rx_start(rate, channels);
     if (r != FM_OK)
     {
-        (void)AudioFileWriter_Close(&sa.rec);
-        sa.rec_active = FM_FALSE;
+        (void)AudioFileWriter_Close(&sa_rec.w);
+        sa_rec.active = FM_FALSE;
         return r;
     }
 #endif
-    FM_Log("SimpleAudio: recording -> %s (%lu Hz %uch)\n", sa.rec_path,
+    FM_Log("SimpleAudio: recording -> %s (%lu Hz %uch)\n", sa_rec.path,
            (unsigned long)rate, (unsigned)channels);
     return FM_OK;
 }
 
 /*
- * دادن داده به تابه: `frames` فریم (هر فریم = channels نمونهٔ int16،
- * به‌هم‌ریز). هر چقدر data از منبع (DMA/IRQ/چرخهٔ اصلی) آمد، اینجا بده.
+ * دادن داده: `frames` فریم (هر فریم = channels نمونهٔ int16، به‌هم‌ریز).
+ * هر چقدر داده از منبع آمد، از حلقهٔ اصلی اینجا بدهید (نه از وقفه: این
+ * تابع روی کارت می‌نویسد).
  */
 FM_Result SimpleAudio_RecWrite(const int16_t *pcm, size_t frames)
 {
     size_t written = 0u;
     FM_Result r;
 
-    if (!sa.rec_active)
+    if (sa_rec.playing)
+    {
+        return FM_ERR_BUSY;          /* منبع، موزیکِ در حال پخش است */
+    }
+    if (!sa_rec.active)
     {
         return FM_ERR_NOT_READY;
     }
@@ -1734,44 +1856,351 @@ FM_Result SimpleAudio_RecWrite(const int16_t *pcm, size_t frames)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    r = AudioFileWriter_WriteFrames(&sa.rec, pcm, frames, &written);
-    sa.rec_frames += written;
+    r = AudioFileWriter_WriteFrames(&sa_rec.w, pcm, frames, &written);
+    sa_rec.frames += written;
     return r;
 }
 
-/* پایان ضبط: هدر WAV رفع و فایل بسته می‌شود. آدرس نهایی: RecPath(). */
-FM_Result SimpleAudio_RecStop(void)
+/* نام فایل یک ترک در حالت «برای هر ترک یک فایل»: <پوشه>/<نام ترک><پسوند>.
+ * اگر این همان فایلی باشد که دارد پخش می‌شود (پوشهٔ مقصد = پوشهٔ موزیک و
+ * همان پسوند)، «‎_rec‎» به نام اضافه می‌شود تا فایل اصلی پاک نشود. */
+static FM_Result simple_audio_rec_track_path(const char *track,
+                                             const char *ext)
 {
+    const char *base;
+    const char *p;
+    const char *dot = NULL;
+    size_t blen;
+    size_t dlen = strlen(sa_rec.dest);
+    size_t elen = strlen(ext);
+    uint8_t pass;
+
+    if (track == NULL)
+    {
+        track = "";
+    }
+    base = track;
+    for (p = track; *p != '\0'; p++)
+    {
+        if (*p == '/' || *p == '\\')
+        {
+            base = p + 1;
+        }
+    }
+    for (p = base; *p != '\0'; p++)
+    {
+        if (*p == '.')
+        {
+            dot = p;
+        }
+    }
+    blen = (dot != NULL) ? (size_t)(dot - base) : strlen(base);
+    if (blen == 0u)
+    {
+        base = "track";
+        blen = 5u;
+    }
+    while (dlen > 0u && sa_rec.dest[dlen - 1u] == '/')
+    {
+        dlen--;
+    }
+
+    for (pass = 0u; pass < 2u; pass++)
+    {
+        const char *suffix = (pass == 0u) ? "" : "_rec";
+        size_t slen = strlen(suffix);
+        size_t off = 0u;
+        size_t i;
+
+        if (dlen + 1u + blen + slen + elen + 1u > sizeof(sa_rec.path))
+        {
+            return FM_ERR_TOO_LARGE;
+        }
+        memcpy(sa_rec.path, sa_rec.dest, dlen);
+        off = dlen;
+        sa_rec.path[off++] = '/';
+        memcpy(sa_rec.path + off, base, blen);
+        off += blen;
+        memcpy(sa_rec.path + off, suffix, slen);
+        off += slen;
+        memcpy(sa_rec.path + off, ext, elen);
+        off += elen;
+        sa_rec.path[off] = '\0';
+
+        for (i = 0u; sa_rec.path[i] != '\0' && track[i] != '\0'; i++)
+        {
+            char a = sa_rec.path[i];
+            char b = track[i];
+
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b)
+            {
+                break;
+            }
+        }
+        if (sa_rec.path[i] != track[i])
+        {
+            return FM_OK;            /* فایل دیگری است */
+        }
+    }
+    return FM_OK;
+}
+
+/* ذخیرهٔ موزیکِ در حال پخش به پایان رسید؛ دلیل در لاگ و در RecStop. */
+static void simple_audio_rec_fail(FM_Result r, const char *what)
+{
+    FM_Log("SimpleAudio: saving the music stopped (%s): %s (%d)\n", what,
+           File_GetErrorString(r), (int)r);
+    if (sa_rec.active)
+    {
+        (void)simple_audio_rec_close();
+    }
+    sa_rec.playing = FM_FALSE;
+    sa_rec.error = r;
+}
+
+/* موتور پخش این را بعد از کالبک دادهٔ شما (اگر خروجی آن را روشن کرده) و
+ * قبل از ولوم صدا می‌زند، با هر تنظیم خروجی (حتی «بدون بلندگو»). */
+static void simple_audio_rec_tap(void *ctx, int16_t *pcm, size_t samples,
+                                 uint32_t rate, uint16_t channels)
+{
+    size_t frames;
+    FM_Result r = FM_OK;
+
+    (void)ctx;
+    if (!sa_rec.playing || channels == 0u)
+    {
+        return;
+    }
+    frames = samples / channels;
+    if (frames == 0u)
+    {
+        return;
+    }
+
+    if (sa_rec.active &&
+        ((sa_rec.per_track && sa_rec.serial != sa.dma.track_serial) ||
+         rate != sa_rec.rate || channels != sa_rec.channels))
+    {
+        /* ترک بعدی: در حالت پوشه فایل تازه؛ در حالت تک‌فایل فقط وقتی
+         * ادامه می‌دهیم که نرخ نمونه‌برداری همان باشد (یک فایل، یک نرخ). */
+        r = simple_audio_rec_close();
+        if (r != FM_OK)
+        {
+            simple_audio_rec_fail(r, sa_rec.path);
+            return;
+        }
+        if (!sa_rec.per_track)
+        {
+            FM_Log("SimpleAudio: the next track has another sample rate; "
+                   "saving ended with %s\n", sa_rec.path);
+            sa_rec.playing = FM_FALSE;
+            return;
+        }
+    }
+    if (!sa_rec.active)
+    {
+        FM_AudioFileFormat format;
+
+        if (sa_rec.per_track)
+        {
+            format = simple_audio_rec_format(NULL);
+            r = simple_audio_rec_track_path(
+                    Player_ItemPath(&sa.dma.player,
+                                    Player_Current(&sa.dma.player)),
+                    Audio_FormatExtension(format));
+        }
+        else
+        {
+            format = simple_audio_rec_format(sa_rec.dest);
+            (void)strcpy(sa_rec.path, sa_rec.dest);
+        }
+        if (r == FM_OK)
+        {
+            r = simple_audio_rec_open(sa_rec.path, format, rate, channels);
+        }
+        if (r != FM_OK)
+        {
+            simple_audio_rec_fail(r, sa_rec.path);
+            return;
+        }
+        sa_rec.serial = sa.dma.track_serial;
+        FM_Log("SimpleAudio: saving the music -> %s (%lu Hz %uch)\n",
+               sa_rec.path, (unsigned long)rate, (unsigned)channels);
+    }
+    r = AudioFileWriter_WriteFrames(&sa_rec.w, pcm, frames, NULL);
+    if (r != FM_OK)
+    {
+        simple_audio_rec_fail(r, sa_rec.path);
+        return;
+    }
+    sa_rec.frames += frames;
+}
+
+/* از Poll و Begin: وقتی پخش تمام شده، فایلِ باز بسته می‌شود (سرصفحه کامل
+ * می‌شود). حالت پوشه آماده می‌ماند تا پخش بعدی؛ حالت تک‌فایل تمام است. */
+static void simple_audio_rec_service(void)
+{
+    if (sa_rec.playing && sa_rec.active && !sa.dma.running &&
+        sa.paused == 0u)
+    {
+        (void)simple_audio_rec_close();
+        if (!sa_rec.per_track)
+        {
+            sa_rec.playing = FM_FALSE;
+        }
+    }
+}
+
+/*
+ * ذخیرهٔ همان موزیکی که پخش می‌شود. قبل یا وسط پخش صدا بزنید:
+ *
+ *   dest = پوشه            برای هر ترک یک فایل با نام همان ترک:
+ *                          "/rec" + "/music/a.mp3" -> "/rec/a.wav"
+ *                          (پسوند طبق RecSetFormat). تا RecStop فعال می‌ماند،
+ *                          حتی بعد از Stop و Begin دوباره.
+ *   dest = فایل با پسوند   همهٔ ترک‌ها پشت‌سرهم در همین فایل، تا RecStop، یا
+ *                          توقف پخش، یا ترکی با نرخ نمونه‌برداری دیگر.
+ *
+ * چه چیزی ذخیره می‌شود: صدای دیکدشده، قبل از ولوم؛ همیشه استریو مگر
+ * RecSetChannels(1). کالبک دادهٔ شما (SetDataCallback) فقط وقتی اجرا
+ * می‌شود که خروجی شامل «کالبک» باشد؛ پس:
+ *
+ *   SetOutput(...)            بلندگو    DSP شما در فایل
+ *   FM_AUDIO_OUT_SPEAKER      دارد      ندارد (صدای خام فایل)
+ *   FM_AUDIO_OUT_BOTH         دارد      دارد
+ *   FM_AUDIO_OUT_CALLBACK     ساکت      دارد
+ *   FM_AUDIO_OUT_NONE         ساکت      ندارد
+ *
+ * سرعت همان سرعت پخش است (یک آهنگ سه‌دقیقه‌ای سه دقیقه طول می‌کشد)؛ برای
+ * تبدیل سریع فایل، SimpleAudio_Convert.
+ */
+FM_Result SimpleAudio_RecPlaying(const char *dest)
+{
+    FM_AudioFileFormat format;
+    FM_Bool is_file;
     FM_Result r;
 
-    if (!sa.rec_active)
+    if (dest == NULL || dest[0] == '\0')
     {
-        return FM_ERR_NOT_READY;
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (strlen(dest) >= sizeof(sa_rec.dest))
+    {
+        return FM_ERR_TOO_LARGE;
+    }
+    if (sa_rec.active || sa_rec.playing)
+    {
+        return FM_ERR_BUSY;
+    }
+    is_file = simple_audio_has_audio_ext(dest);
+    format = simple_audio_rec_format(is_file ? dest : NULL);
+    if (!Audio_CanEncode(format))
+    {
+        return FM_ERR_UNSUPPORTED;
+    }
+    if (!is_file)
+    {
+        r = Directory_Create(dest);
+        if (r != FM_OK && r != FM_ERR_EXISTS)
+        {
+            return r;
+        }
+    }
+    (void)simple_audio_cfg();        /* کالبک ذخیره در پیکربندی پخش است */
+    AudioDma_SetSaveCallback(&sa.dma, simple_audio_rec_tap, NULL);
+    (void)strcpy(sa_rec.dest, dest);
+    sa_rec.path[0] = '\0';
+    sa_rec.per_track = is_file ? FM_FALSE : FM_TRUE;
+    sa_rec.error = FM_OK;
+    sa_rec.playing = FM_TRUE;
+    return FM_OK;
+}
+
+/* پایان ذخیره (هر دو حالت): سرصفحه کامل و فایل بسته می‌شود. آدرس آخرین
+ * فایل: RecPath(). اگر ذخیرهٔ موزیک وسط کار با خطا تمام شده باشد (مثلاً
+ * کارت پر)، همان خطا این‌جا برمی‌گردد. */
+FM_Result SimpleAudio_RecStop(void)
+{
+    FM_Result r = FM_OK;
+
+    if (!sa_rec.active && !sa_rec.playing)
+    {
+        r = sa_rec.error;
+        sa_rec.error = FM_OK;
+        return (r != FM_OK) ? r : FM_ERR_NOT_READY;
     }
 #if SIMPLE_AUDIO_I2S_REC
-    (void)simple_audio_board_rx_stop();
-#endif
-    r = AudioFileWriter_Close(&sa.rec);
-    sa.rec_active = FM_FALSE;
-    if (r == FM_OK)
+    if (!sa_rec.playing)
     {
-        FM_Log("SimpleAudio: recorded %s (%.2f s, %lu frames)\n",
-               sa.rec_path,
-               (double)sa.rec_frames / (double)sa.rec_rate,
-               (unsigned long)sa.rec_frames);
+        (void)simple_audio_board_rx_stop();
+    }
+#endif
+    sa_rec.playing = FM_FALSE;
+    if (sa_rec.active)
+    {
+        r = simple_audio_rec_close();
     }
     return r;
 }
 
-/* آدرس فایل آخرین ضبط (معتبر بعد از RecStart تا بعد از RecStop). */
+/* آدرس آخرین فایل ذخیره‌شده (یا در حال ذخیره). */
 const char *SimpleAudio_RecPath(void)
 {
-    return sa.rec_path;
+    return sa_rec.path;
 }
 
+/* ذخیره فعال است؟ (فایل باز است، یا منتظر ترک بعدی) */
 FM_Bool SimpleAudio_RecActive(void)
 {
-    return sa.rec_active;
+    return (sa_rec.active || sa_rec.playing) ? FM_TRUE : FM_FALSE;
+}
+
+/* وسط تبدیل فایل، پخش موزیک زنده می‌ماند. */
+static FM_Bool simple_audio_convert_tick(void *ctx, uint64_t done,
+                                         uint64_t total)
+{
+    (void)ctx;
+    (void)done;
+    (void)total;
+    simple_audio_idle();
+    return FM_TRUE;
+}
+
+/*
+ * فایل به فایل، بدون پخش: src را می‌خواند (هر فرمتی که پخش می‌شود)، هر
+ * بلوک را به تابع `process` شما می‌دهد (درجا تغییرش بدهید؛ NULL = بدون
+ * پردازش) و نتیجه را در dst می‌نویسد. فرمت از پسوند dst. تا پایان فایل
+ * برنمی‌گردد و با تمام سرعت پردازنده و کارت کار می‌کند. RecSetChannels و
+ * RecSetFormat(ADPCM) این‌جا هم اثر دارند. اگر خطا بدهد dst پاک می‌شود.
+ *
+ *   static void half_volume(void *ctx, int16_t *pcm, size_t samples,
+ *                           uint32_t rate, uint16_t channels)
+ *   {
+ *       for (size_t i = 0; i < samples; i++) pcm[i] /= 2;
+ *   }
+ *   SimpleAudio_Convert("/music/a.mp3", "/out/a.flac", half_volume, NULL);
+ *
+ * برای نوار پیشرفت یا لغو وسط کار: Audio_Convert با FM_AudioConvertConfig.
+ */
+FM_Result SimpleAudio_Convert(const char *src, const char *dst,
+                              FM_AudioDataFn process, void *ctx)
+{
+    FM_AudioConvertConfig cc;
+
+    if (src == NULL || dst == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    memset(&cc, 0, sizeof(cc));
+    cc.format = simple_audio_rec_format(dst);
+    cc.out_channels = sa_rec.out_channels;
+    cc.bitrate_kbps = sa_rec.bitrate;
+    cc.process = process;
+    cc.process_ctx = ctx;
+    cc.progress = simple_audio_convert_tick;
+    return Audio_Convert(src, dst, &cc, NULL);
 }
 
 /* ------------------------------------------------------------------------ */

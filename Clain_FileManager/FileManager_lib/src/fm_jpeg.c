@@ -669,18 +669,44 @@ FM_Result FM_JPEG_LoadFile(FM_File *f, FM_Image *img, void *pixel_buffer,
 }
 
 /* ------------------------------------------------------------------ */
-/* Baseline JPEG encode (4:4:4, standard Huffman, quality ~70)         */
+/* Baseline JPEG encode                                                 */
+/*                                                                      */
+/* JFIF (full-range BT.601 YCbCr), standard Huffman tables, quality     */
+/* 1..100 (libjpeg scale), 4:4:4 or 4:2:0 chroma.  The same encoder     */
+/* writes still images (Image_Save / Image_EncodeJPEG) and the frames   */
+/* of saved video (MJPEG in AVI, fm_video_enc.c).                       */
 /* ------------------------------------------------------------------ */
+
+#define JPEG_OUT_BUF 256u
 
 typedef struct
 {
     FM_File *file;
+    FM_JpegSinkFn sink;
+    void    *sink_ctx;
     uint8_t *mem;
     size_t   mem_cap;
     size_t   mem_len;
     uint32_t bits;
     int      nbits;
+    FM_Result err;
+    uint32_t n;
+    uint8_t  buf[JPEG_OUT_BUF];
 } JpegOut;
+
+static void jpeg_out_init(JpegOut *o)
+{
+    o->file = NULL;
+    o->sink = NULL;
+    o->sink_ctx = NULL;
+    o->mem = NULL;
+    o->mem_cap = 0u;
+    o->mem_len = 0u;
+    o->bits = 0u;
+    o->nbits = 0;
+    o->err = FM_OK;
+    o->n = 0u;
+}
 
 static const uint8_t k_zigzag[64] = {
     0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
@@ -786,499 +812,539 @@ static void jpeg_huff_build(JpegHuff *h, const uint8_t *bits,
     }
 }
 
-static FM_Result jpeg_out_byte(JpegOut *o, uint8_t b)
-{
-    if (o->file != NULL)
-    {
-        uint32_t wr = 0;
-        FM_Result r = File_Write(o->file, &b, 1, &wr);
+/* The four standard tables, expanded once (3 KB of .bss, no stack). */
+static JpegHuff jpeg_h_dc_y;
+static JpegHuff jpeg_h_dc_c;
+static JpegHuff jpeg_h_ac_y;
+static JpegHuff jpeg_h_ac_c;
+static uint8_t  jpeg_h_ready;
 
-        return (r == FM_OK && wr == 1u) ? FM_OK : FM_ERR_IO;
-    }
-    if (o->mem_len >= o->mem_cap)
+static void jpeg_huff_init(void)
+{
+    if (jpeg_h_ready == 0u)
     {
-        return FM_ERR_TOO_LARGE;
+        jpeg_huff_build(&jpeg_h_dc_y, k_dc_lum_bits, k_dc_lum_val, 12);
+        jpeg_huff_build(&jpeg_h_dc_c, k_dc_chr_bits, k_dc_chr_val, 12);
+        jpeg_huff_build(&jpeg_h_ac_y, k_ac_lum_bits, k_ac_lum_val, 162);
+        jpeg_huff_build(&jpeg_h_ac_c, k_ac_chr_bits, k_ac_chr_val, 162);
+        jpeg_h_ready = 1u;
     }
-    o->mem[o->mem_len++] = b;
-    return FM_OK;
 }
 
-static FM_Result jpeg_out_bytes(JpegOut *o, const void *p, uint32_t n)
+static void jpeg_out_flush(JpegOut *o)
+{
+    if (o->n == 0u || o->err != FM_OK)
+    {
+        o->n = 0u;
+        return;
+    }
+    if (o->sink != NULL)
+    {
+        o->err = o->sink(o->sink_ctx, o->buf, o->n);
+    }
+    else if (o->file != NULL)
+    {
+        uint32_t wr = 0;
+        FM_Result r = File_Write(o->file, o->buf, o->n, &wr);
+
+        if (r != FM_OK)
+        {
+            o->err = r;
+        }
+        else if (wr != o->n)
+        {
+            o->err = FM_ERR_IO;
+        }
+    }
+    else if (o->n > o->mem_cap - o->mem_len)
+    {
+        o->err = FM_ERR_TOO_LARGE;
+    }
+    else
+    {
+        memcpy(o->mem + o->mem_len, o->buf, o->n);
+        o->mem_len += o->n;
+    }
+    o->n = 0u;
+}
+
+static void jpeg_out_byte(JpegOut *o, uint8_t b)
+{
+    if (o->n >= JPEG_OUT_BUF)
+    {
+        jpeg_out_flush(o);
+    }
+    o->buf[o->n++] = b;
+}
+
+static void jpeg_out_bytes(JpegOut *o, const void *p, uint32_t n)
 {
     const uint8_t *s = (const uint8_t *)p;
     uint32_t i;
-    FM_Result r = FM_OK;
 
-    for (i = 0; i < n && r == FM_OK; i++)
+    for (i = 0; i < n; i++)
     {
-        r = jpeg_out_byte(o, s[i]);
+        jpeg_out_byte(o, s[i]);
     }
-    return r;
 }
 
-static FM_Result jpeg_put_bits(JpegOut *o, uint32_t bits, int n)
+/* n is 1..16; at most 7 bits are pending, so 32 bits never overflow. */
+static void jpeg_put_bits(JpegOut *o, uint32_t bits, int n)
 {
-    o->bits = (o->bits << n) | (bits & ((n == 32) ? 0xFFFFFFFFu
-                                                  : ((1u << n) - 1u)));
+    o->bits = (o->bits << n) | (bits & ((1u << n) - 1u));
     o->nbits += n;
     while (o->nbits >= 8)
     {
         uint8_t b;
-        FM_Result r;
 
         o->nbits -= 8;
         b = (uint8_t)((o->bits >> o->nbits) & 0xFFu);
-        r = jpeg_out_byte(o, b);
-        if (r != FM_OK)
-        {
-            return r;
-        }
+        jpeg_out_byte(o, b);
         if (b == 0xFFu)
         {
-            r = jpeg_out_byte(o, 0x00);
-            if (r != FM_OK)
-            {
-                return r;
-            }
+            jpeg_out_byte(o, 0x00);
         }
     }
-    return FM_OK;
 }
 
-static FM_Result jpeg_flush_bits(JpegOut *o)
+static void jpeg_flush_bits(JpegOut *o)
 {
     if (o->nbits > 0)
     {
-        FM_Result r = jpeg_put_bits(o, (1u << (8 - o->nbits)) - 1u,
-                                    8 - o->nbits);
+        jpeg_put_bits(o, (1u << (8 - o->nbits)) - 1u, 8 - o->nbits);
         o->nbits = 0;
-        return r;
-    }
-    return FM_OK;
-}
-
-static int jpeg_clamp_i(int v)
-{
-    if (v < 0)
-    {
-        return 0;
-    }
-    if (v > 255)
-    {
-        return 255;
-    }
-    return v;
-}
-
-static void jpeg_pixel_rgb(const FM_Image *img, uint16_t x, uint16_t y,
-                           uint8_t *r, uint8_t *g, uint8_t *b)
-{
-    size_t index;
-    const uint8_t *p;
-    uint8_t a = 0xFFu;
-
-    if (x >= img->width)
-    {
-        x = (uint16_t)(img->width - 1u);
-    }
-    if (y >= img->height)
-    {
-        y = (uint16_t)(img->height - 1u);
-    }
-    index = (size_t)y * img->width + x;
-    *r = *g = *b = 0;
-    if (img->format == FM_PIXEL_RGB888)
-    {
-        p = img->data + index * 3u;
-        *r = p[0]; *g = p[1]; *b = p[2];
-    }
-    else if (img->format == FM_PIXEL_BGR888)
-    {
-        p = img->data + index * 3u;
-        *b = p[0]; *g = p[1]; *r = p[2];
-    }
-    else if (img->format == FM_PIXEL_RGB565 || img->format == FM_PIXEL_BGR565)
-    {
-        uint16_t v;
-
-        p = img->data + index * 2u;
-        v = (uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8);
-        *g = (uint8_t)(((v >> 5) & 0x3Fu) * 255u / 63u);
-        if (img->format == FM_PIXEL_RGB565)
-        {
-            *r = (uint8_t)(((v >> 11) & 0x1Fu) * 255u / 31u);
-            *b = (uint8_t)((v & 0x1Fu) * 255u / 31u);
-        }
-        else
-        {
-            *b = (uint8_t)(((v >> 11) & 0x1Fu) * 255u / 31u);
-            *r = (uint8_t)((v & 0x1Fu) * 255u / 31u);
-        }
-    }
-    else if (img->format == FM_PIXEL_RGBA8888)
-    {
-        p = img->data + index * 4u;
-        *r = p[0]; *g = p[1]; *b = p[2]; (void)a; (void)p[3];
-    }
-    else if (img->format == FM_PIXEL_BGRA8888)
-    {
-        p = img->data + index * 4u;
-        *b = p[0]; *g = p[1]; *r = p[2];
-    }
-    else
-    {
-        uint8_t v = img->data[index];
-        *r = *g = *b = v;
     }
 }
 
-/* Integer 8-point DCT (scaled, Loeffler-style constants >> 10). */
-static void jpeg_dct8(const int *src, int *dst)
+static void jpeg_write_marker(JpegOut *o, uint8_t m, const uint8_t *data,
+                              uint16_t n)
 {
-    int i;
-    int tmp[8];
+    uint8_t h[4];
 
-    for (i = 0; i < 8; i++)
-    {
-        int s07 = src[0] + src[7];
-        int s16 = src[1] + src[6];
-        int s25 = src[2] + src[5];
-        int s34 = src[3] + src[4];
-        int d07 = src[0] - src[7];
-        int d16 = src[1] - src[6];
-        int d25 = src[2] - src[5];
-        int d34 = src[3] - src[4];
-        int s0734 = s07 + s34;
-        int s1625 = s16 + s25;
-        int d0734 = s07 - s34;
-        int d1625 = s16 - s25;
-
-        tmp[0] = s0734 + s1625;
-        tmp[4] = s0734 - s1625;
-        tmp[2] = (d0734 * 1420 + d1625 * 588) >> 10;   /* cos(2pi/16),sin */
-        tmp[6] = (d0734 * 588 - d1625 * 1420) >> 10;
-        tmp[1] = (d07 * 1448 + d16 * 1892 + d25 * 784 - d34 * 400) >> 10;
-        tmp[3] = (d07 * 784 - d16 * 400 - d25 * 1892 + d34 * 1448) >> 10;
-        tmp[5] = (d07 * 400 - d16 * 784 + d25 * 1448 + d34 * 1892) >> 10;
-        tmp[7] = (d07 * 1892 - d16 * 1448 + d25 * 400 + d34 * 784) >> 10;
-        src += 8;
-        for (s07 = 0; s07 < 8; s07++)
-        {
-            dst[s07 * 8 + i] = tmp[s07];
-        }
-    }
+    h[0] = 0xFF;
+    h[1] = m;
+    h[2] = (uint8_t)((n + 2u) >> 8);
+    h[3] = (uint8_t)((n + 2u) & 0xFFu);
+    jpeg_out_bytes(o, h, 4);
+    jpeg_out_bytes(o, data, n);
 }
 
-static void jpeg_fdct(const int block[64], int coeff[64])
+/*
+ * Forward DCT, the accurate integer one of the IJG library (jfdctint,
+ * Loeffler / Ligtenberg / Moschytz, 12 multiplies per row).  Input: 64
+ * samples centred on zero.  Output: the coefficients times 8.
+ */
+#define JF_CONST_BITS 13
+#define JF_PASS1_BITS 2
+#define JF_DESCALE(x, n) (((x) + ((int32_t)1 << ((n) - 1))) >> (n))
+
+static void jpeg_fdct(int32_t *d)
 {
-    int tmp[64];
+    int32_t *p = d;
     int i;
 
-    jpeg_dct8(block, tmp);
-    jpeg_dct8(tmp, coeff);
+    for (i = 0; i < 8; i++, p += 8)
+    {
+        int32_t t0 = p[0] + p[7], t7 = p[0] - p[7];
+        int32_t t1 = p[1] + p[6], t6 = p[1] - p[6];
+        int32_t t2 = p[2] + p[5], t5 = p[2] - p[5];
+        int32_t t3 = p[3] + p[4], t4 = p[3] - p[4];
+        int32_t t10 = t0 + t3, t13 = t0 - t3;
+        int32_t t11 = t1 + t2, t12 = t1 - t2;
+        int32_t z1, z2, z3, z4, z5;
+
+        p[0] = (t10 + t11) * (1 << JF_PASS1_BITS);
+        p[4] = (t10 - t11) * (1 << JF_PASS1_BITS);
+        z1 = (t12 + t13) * 4433;
+        p[2] = JF_DESCALE(z1 + t13 * 6270, JF_CONST_BITS - JF_PASS1_BITS);
+        p[6] = JF_DESCALE(z1 - t12 * 15137, JF_CONST_BITS - JF_PASS1_BITS);
+
+        z1 = t4 + t7;
+        z2 = t5 + t6;
+        z3 = t4 + t6;
+        z4 = t5 + t7;
+        z5 = (z3 + z4) * 9633;
+        t4 *= 2446;
+        t5 *= 16819;
+        t6 *= 25172;
+        t7 *= 12299;
+        z1 *= -7373;
+        z2 *= -20995;
+        z3 = z3 * -16069 + z5;
+        z4 = z4 * -3196 + z5;
+        p[7] = JF_DESCALE(t4 + z1 + z3, JF_CONST_BITS - JF_PASS1_BITS);
+        p[5] = JF_DESCALE(t5 + z2 + z4, JF_CONST_BITS - JF_PASS1_BITS);
+        p[3] = JF_DESCALE(t6 + z2 + z3, JF_CONST_BITS - JF_PASS1_BITS);
+        p[1] = JF_DESCALE(t7 + z1 + z4, JF_CONST_BITS - JF_PASS1_BITS);
+    }
+
+    p = d;
+    for (i = 0; i < 8; i++, p++)
+    {
+        int32_t t0 = p[0] + p[56], t7 = p[0] - p[56];
+        int32_t t1 = p[8] + p[48], t6 = p[8] - p[48];
+        int32_t t2 = p[16] + p[40], t5 = p[16] - p[40];
+        int32_t t3 = p[24] + p[32], t4 = p[24] - p[32];
+        int32_t t10 = t0 + t3, t13 = t0 - t3;
+        int32_t t11 = t1 + t2, t12 = t1 - t2;
+        int32_t z1, z2, z3, z4, z5;
+
+        p[0] = JF_DESCALE(t10 + t11, JF_PASS1_BITS);
+        p[32] = JF_DESCALE(t10 - t11, JF_PASS1_BITS);
+        z1 = (t12 + t13) * 4433;
+        p[16] = JF_DESCALE(z1 + t13 * 6270, JF_CONST_BITS + JF_PASS1_BITS);
+        p[48] = JF_DESCALE(z1 - t12 * 15137, JF_CONST_BITS + JF_PASS1_BITS);
+
+        z1 = t4 + t7;
+        z2 = t5 + t6;
+        z3 = t4 + t6;
+        z4 = t5 + t7;
+        z5 = (z3 + z4) * 9633;
+        t4 *= 2446;
+        t5 *= 16819;
+        t6 *= 25172;
+        t7 *= 12299;
+        z1 *= -7373;
+        z2 *= -20995;
+        z3 = z3 * -16069 + z5;
+        z4 = z4 * -3196 + z5;
+        p[56] = JF_DESCALE(t4 + z1 + z3, JF_CONST_BITS + JF_PASS1_BITS);
+        p[40] = JF_DESCALE(t5 + z2 + z4, JF_CONST_BITS + JF_PASS1_BITS);
+        p[24] = JF_DESCALE(t6 + z2 + z3, JF_CONST_BITS + JF_PASS1_BITS);
+        p[8] = JF_DESCALE(t7 + z1 + z4, JF_CONST_BITS + JF_PASS1_BITS);
+    }
+}
+
+/* DCT, quantise and entropy-code one 8x8 block.  `q8` holds the
+ * quantiser steps times 8, in natural (row) order. */
+static void jpeg_write_block(JpegOut *o, int32_t *blk, const uint16_t *q8,
+                             const JpegHuff *dc, const JpegHuff *ac,
+                             int *pred)
+{
+    int run = 0;
+    int i;
+    int v;
+    int a;
+    int cat;
+
+    jpeg_fdct(blk);
+
     for (i = 0; i < 64; i++)
     {
-        coeff[i] = (coeff[i] + 4) >> 3;
-    }
-}
+        int32_t c = blk[k_zigzag[i]];
+        int32_t q = (int32_t)q8[k_zigzag[i]];
 
-static int jpeg_category(int v)
-{
-    int a = (v < 0) ? -v : v;
-    int n = 0;
+        v = (c < 0) ? -(int)((-c + (q >> 1)) / q) : (int)((c + (q >> 1)) / q);
 
-    while (a != 0)
-    {
-        a >>= 1;
-        n++;
-    }
-    return n;
-}
-
-static FM_Result jpeg_write_block(JpegOut *o, const int *zz, const uint8_t *q,
-                                  JpegHuff *dc, JpegHuff *ac, int *pred)
-{
-    int dc_val = zz[0] / (int)q[0];
-    int d;
-    int cat;
-    int i;
-    int run = 0;
-    FM_Result r;
-
-    if (dc_val > 1023)
-    {
-        dc_val = 1023;
-    }
-    if (dc_val < -1023)
-    {
-        dc_val = -1023;
-    }
-    d = dc_val - *pred;
-    *pred = dc_val;
-    cat = jpeg_category(d);
-    r = jpeg_put_bits(o, dc->code[cat], dc->size[cat]);
-    if (r != FM_OK)
-    {
-        return r;
-    }
-    if (cat != 0)
-    {
-        uint32_t bits = (d < 0) ? (uint32_t)(d + ((1 << cat) - 1))
-                                : (uint32_t)d;
-
-        r = jpeg_put_bits(o, bits, cat);
-        if (r != FM_OK)
+        if (i == 0)
         {
-            return r;
-        }
-    }
-    for (i = 1; i < 64; i++)
-    {
-        int v = zz[i] / (int)q[i];
+            int diff = v - *pred;
 
-        if (v > 1023)
-        {
-            v = 1023;
+            *pred = v;
+            v = diff;
         }
-        if (v < -1023)
-        {
-            v = -1023;
-        }
-        if (v == 0)
+        else if (v == 0)
         {
             run++;
             continue;
         }
-        while (run >= 16)
-        {
-            r = jpeg_put_bits(o, ac->code[0xF0], ac->size[0xF0]);
-            if (r != FM_OK)
-            {
-                return r;
-            }
-            run -= 16;
-        }
-        cat = jpeg_category(v);
-        r = jpeg_put_bits(o, ac->code[(run << 4) | cat],
-                          ac->size[(run << 4) | cat]);
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        {
-            uint32_t bits = (v < 0) ? (uint32_t)(v + ((1 << cat) - 1))
-                                    : (uint32_t)v;
 
-            r = jpeg_put_bits(o, bits, cat);
-            if (r != FM_OK)
-            {
-                return r;
-            }
+        a = (v < 0) ? -v : v;
+        cat = 0;
+        while (a != 0)
+        {
+            a >>= 1;
+            cat++;
         }
-        run = 0;
+        if (i == 0)
+        {
+            jpeg_put_bits(o, dc->code[cat], dc->size[cat]);
+        }
+        else
+        {
+            while (run >= 16)
+            {
+                jpeg_put_bits(o, ac->code[0xF0], ac->size[0xF0]);
+                run -= 16;
+            }
+            jpeg_put_bits(o, ac->code[(run << 4) | cat],
+                          ac->size[(run << 4) | cat]);
+            run = 0;
+        }
+        if (cat > 0)
+        {
+            jpeg_put_bits(o, (uint32_t)((v < 0) ? v + ((1 << cat) - 1) : v),
+                          cat);
+        }
     }
     if (run > 0)
     {
-        r = jpeg_put_bits(o, ac->code[0x00], ac->size[0x00]);
+        jpeg_put_bits(o, ac->code[0x00], ac->size[0x00]);
     }
-    return r;
 }
 
-static FM_Result jpeg_write_marker(JpegOut *o, uint8_t m,
-                                   const uint8_t *data, uint16_t n)
+/* Reads `n` pixels of row `y` starting at column `x` and converts them
+ * to full-range YCbCr (JFIF), centred on zero.  Columns and rows past
+ * the picture repeat the last one, which is what a decoder expects of
+ * the padding of an incomplete block. */
+static void jpeg_row_ycc(const FM_Image *img, uint32_t x, uint32_t y,
+                         uint32_t n, int32_t *yy, int32_t *cb, int32_t *cr)
 {
-    uint8_t h[4];
-    FM_Result r;
+    const uint8_t *p;
+    uint32_t have;
+    uint32_t i;
+    size_t bpp = Image_BytesPerPixel(img->format);
+    uint8_t rgb[16][3];
 
-    h[0] = 0xFF;
-    h[1] = m;
-    r = jpeg_out_bytes(o, h, 2);
-    if (n > 0u || m == 0xC0u || m == 0xC4u || m == 0xDBu || m == 0xDAu ||
-        m == 0xE0u)
+    if (y >= img->height)
     {
-        uint16_t len = (uint16_t)(n + 2u);
-
-        h[0] = (uint8_t)(len >> 8);
-        h[1] = (uint8_t)(len & 0xFFu);
-        r = (r == FM_OK) ? jpeg_out_bytes(o, h, 2) : r;
-        if (r == FM_OK && n > 0u)
-        {
-            r = jpeg_out_bytes(o, data, n);
-        }
+        y = (uint32_t)img->height - 1u;
     }
-    return r;
+    if (x >= img->width)
+    {
+        x = (uint32_t)img->width - 1u;
+    }
+    have = (uint32_t)img->width - x;
+    if (have > n)
+    {
+        have = n;
+    }
+    p = img->data + ((size_t)y * img->width + x) * bpp;
+
+    switch (img->format)
+    {
+    case FM_PIXEL_RGB888:
+    case FM_PIXEL_RGBA8888:
+        for (i = 0; i < have; i++, p += bpp)
+        {
+            rgb[i][0] = p[0]; rgb[i][1] = p[1]; rgb[i][2] = p[2];
+        }
+        break;
+    case FM_PIXEL_BGR888:
+    case FM_PIXEL_BGRA8888:
+        for (i = 0; i < have; i++, p += bpp)
+        {
+            rgb[i][0] = p[2]; rgb[i][1] = p[1]; rgb[i][2] = p[0];
+        }
+        break;
+    case FM_PIXEL_RGB565:
+    case FM_PIXEL_BGR565:
+        for (i = 0; i < have; i++, p += 2)
+        {
+            uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+            uint8_t hi = (uint8_t)(((v >> 11) << 3) | (v >> 13));
+            uint8_t lo = (uint8_t)(((v & 0x1Fu) << 3) | ((v & 0x1Fu) >> 2));
+
+            rgb[i][1] = (uint8_t)((((v >> 5) & 0x3Fu) << 2) |
+                                  (((v >> 5) & 0x3Fu) >> 4));
+            if (img->format == FM_PIXEL_RGB565)
+            {
+                rgb[i][0] = hi; rgb[i][2] = lo;
+            }
+            else
+            {
+                rgb[i][0] = lo; rgb[i][2] = hi;
+            }
+        }
+        break;
+    default:                                    /* GRAY8 */
+        for (i = 0; i < have; i++, p++)
+        {
+            rgb[i][0] = rgb[i][1] = rgb[i][2] = p[0];
+        }
+        break;
+    }
+
+    for (i = 0; i < have; i++)
+    {
+        int32_t r = rgb[i][0];
+        int32_t g = rgb[i][1];
+        int32_t b = rgb[i][2];
+
+        yy[i] = ((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) - 128;
+        cb[i] = (-11059 * r - 21709 * g + 32768 * b + 32768) >> 16;
+        cr[i] = (32768 * r - 27439 * g - 5329 * b + 32768) >> 16;
+        if (cb[i] > 127) cb[i] = 127;
+        if (cr[i] > 127) cr[i] = 127;
+    }
+    for (; i < n; i++)
+    {
+        yy[i] = yy[have - 1u];
+        cb[i] = cb[have - 1u];
+        cr[i] = cr[have - 1u];
+    }
 }
 
-static FM_Result jpeg_encode(JpegOut *o, const FM_Image *img)
+static void jpeg_encode(JpegOut *o, const FM_Image *img, int quality,
+                        int subsample)
 {
-    JpegHuff dc_y;
-    JpegHuff dc_c;
-    JpegHuff ac_y;
-    JpegHuff ac_c;
-    uint8_t qy[64];
-    uint8_t qc[64];
+    uint16_t qy8[64];
+    uint16_t qc8[64];
+    uint8_t seg[1 + 16 + 162];
     int pred_y = 0;
     int pred_cb = 0;
     int pred_cr = 0;
-    uint16_t mx;
-    uint16_t my;
-    uint16_t mcu_w;
-    uint16_t mcu_h;
-    FM_Result r;
+    int scale;
+    uint32_t step = subsample ? 16u : 8u;
+    uint32_t mx;
+    uint32_t my;
     uint32_t i;
 
-    jpeg_huff_build(&dc_y, k_dc_lum_bits, k_dc_lum_val, 12);
-    jpeg_huff_build(&dc_c, k_dc_chr_bits, k_dc_chr_val, 12);
-    jpeg_huff_build(&ac_y, k_ac_lum_bits, k_ac_lum_val, 162);
-    jpeg_huff_build(&ac_c, k_ac_chr_bits, k_ac_chr_val, 162);
-    for (i = 0; i < 64u; i++)
+    jpeg_huff_init();
+    if (quality < 1)
     {
-        int v = ((int)k_q_lum[k_zigzag[i]] * 50 + 50) / 100;
-        int c = ((int)k_q_chr[k_zigzag[i]] * 50 + 50) / 100;
-
-        if (v < 1) v = 1;
-        if (v > 255) v = 255;
-        if (c < 1) c = 1;
-        if (c > 255) c = 255;
-        qy[i] = (uint8_t)v;
-        qc[i] = (uint8_t)c;
+        quality = FM_JPEG_QUALITY;
     }
-
-    r = jpeg_out_byte(o, 0xFF);
-    if (r == FM_OK) r = jpeg_out_byte(o, 0xD8);
+    if (quality > 100)
     {
-        uint8_t app0[14] = {
+        quality = 100;
+    }
+    scale = (quality < 50) ? (5000 / quality) : (200 - 2 * quality);
+
+    jpeg_out_byte(o, 0xFF);
+    jpeg_out_byte(o, 0xD8);
+    {
+        static const uint8_t app0[14] = {
             'J','F','I','F',0, 1, 1, 0, 0, 1, 0, 1, 0, 0
         };
 
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xE0, app0, 14);
+        jpeg_write_marker(o, 0xE0, app0, 14);
     }
+    for (i = 0; i < 2u; i++)
     {
-        uint8_t dqt[65];
+        const uint8_t *base = (i == 0u) ? k_q_lum : k_q_chr;
+        uint16_t *q8 = (i == 0u) ? qy8 : qc8;
+        uint32_t k;
 
-        dqt[0] = 0x00;
-        memcpy(dqt + 1, qy, 64);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xDB, dqt, 65);
-        dqt[0] = 0x01;
-        memcpy(dqt + 1, qc, 64);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xDB, dqt, 65);
-    }
-    {
-        uint8_t sof[15];
+        seg[0] = (uint8_t)i;
+        for (k = 0; k < 64u; k++)
+        {
+            int v = ((int)base[k_zigzag[k]] * scale + 50) / 100;
 
-        sof[0] = 8;
-        sof[1] = (uint8_t)(img->height >> 8);
-        sof[2] = (uint8_t)(img->height & 0xFFu);
-        sof[3] = (uint8_t)(img->width >> 8);
-        sof[4] = (uint8_t)(img->width & 0xFFu);
-        sof[5] = 3;
-        sof[6] = 1; sof[7] = 0x11; sof[8] = 0;
-        sof[9] = 2; sof[10] = 0x11; sof[11] = 1;
-        sof[12] = 3; sof[13] = 0x11; sof[14] = 1;
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xC0, sof, 15);
+            if (v < 1) v = 1;
+            if (v > 255) v = 255;
+            seg[1u + k] = (uint8_t)v;
+            q8[k_zigzag[k]] = (uint16_t)(v * 8);
+        }
+        jpeg_write_marker(o, 0xDB, seg, 65);
     }
-    {
-        uint8_t dht[1 + 16 + 162];
-        uint32_t n;
+    seg[0] = 8;
+    seg[1] = (uint8_t)(img->height >> 8);
+    seg[2] = (uint8_t)(img->height & 0xFFu);
+    seg[3] = (uint8_t)(img->width >> 8);
+    seg[4] = (uint8_t)(img->width & 0xFFu);
+    seg[5] = 3;
+    seg[6] = 1; seg[7] = subsample ? 0x22 : 0x11; seg[8] = 0;
+    seg[9] = 2; seg[10] = 0x11; seg[11] = 1;
+    seg[12] = 3; seg[13] = 0x11; seg[14] = 1;
+    jpeg_write_marker(o, 0xC0, seg, 15);
 
-        dht[0] = 0x00;
-        memcpy(dht + 1, k_dc_lum_bits + 1, 16);
-        memcpy(dht + 17, k_dc_lum_val, 12);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xC4, dht, 29);
-        dht[0] = 0x10;
-        memcpy(dht + 1, k_ac_lum_bits + 1, 16);
-        memcpy(dht + 17, k_ac_lum_val, 162);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xC4, dht, 179);
-        dht[0] = 0x01;
-        memcpy(dht + 1, k_dc_chr_bits + 1, 16);
-        memcpy(dht + 17, k_dc_chr_val, 12);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xC4, dht, 29);
-        dht[0] = 0x11;
-        memcpy(dht + 1, k_ac_chr_bits + 1, 16);
-        memcpy(dht + 17, k_ac_chr_val, 162);
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xC4, dht, 179);
-        (void)n;
-    }
+    seg[0] = 0x00;
+    memcpy(seg + 1, k_dc_lum_bits + 1, 16);
+    memcpy(seg + 17, k_dc_lum_val, 12);
+    jpeg_write_marker(o, 0xC4, seg, 29);
+    seg[0] = 0x10;
+    memcpy(seg + 1, k_ac_lum_bits + 1, 16);
+    memcpy(seg + 17, k_ac_lum_val, 162);
+    jpeg_write_marker(o, 0xC4, seg, 179);
+    seg[0] = 0x01;
+    memcpy(seg + 1, k_dc_chr_bits + 1, 16);
+    memcpy(seg + 17, k_dc_chr_val, 12);
+    jpeg_write_marker(o, 0xC4, seg, 29);
+    seg[0] = 0x11;
+    memcpy(seg + 1, k_ac_chr_bits + 1, 16);
+    memcpy(seg + 17, k_ac_chr_val, 162);
+    jpeg_write_marker(o, 0xC4, seg, 179);
     {
-        uint8_t sos[10] = {
+        static const uint8_t sos[10] = {
             3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0
         };
 
-        if (r == FM_OK) r = jpeg_write_marker(o, 0xDA, sos, 10);
+        jpeg_write_marker(o, 0xDA, sos, 10);
     }
 
-    mcu_w = (uint16_t)((img->width + 7u) / 8u);
-    mcu_h = (uint16_t)((img->height + 7u) / 8u);
-    for (my = 0; r == FM_OK && my < mcu_h; my++)
+    for (my = 0; my < img->height && o->err == FM_OK; my += step)
     {
-        for (mx = 0; r == FM_OK && mx < mcu_w; mx++)
+        for (mx = 0; mx < img->width; mx += step)
         {
-            int by[64], bcb[64], bcr[64];
-            int cy[64], ccb[64], ccr[64];
-            int zz[64];
-            int y;
-            int x;
+            if (!subsample)
+            {
+                int32_t by[64];
+                int32_t bcb[64];
+                int32_t bcr[64];
 
-            for (y = 0; y < 8; y++)
-            {
-                for (x = 0; x < 8; x++)
+                for (i = 0; i < 8u; i++)
                 {
-                    uint8_t R, G, B;
-                    int Yv, Cb, Cr;
-                    uint16_t px = (uint16_t)(mx * 8u + (uint16_t)x);
-                    uint16_t py = (uint16_t)(my * 8u + (uint16_t)y);
+                    jpeg_row_ycc(img, mx, my + i, 8u, by + 8u * i,
+                                 bcb + 8u * i, bcr + 8u * i);
+                }
+                jpeg_write_block(o, by, qy8, &jpeg_h_dc_y, &jpeg_h_ac_y,
+                                 &pred_y);
+                jpeg_write_block(o, bcb, qc8, &jpeg_h_dc_c, &jpeg_h_ac_c,
+                                 &pred_cb);
+                jpeg_write_block(o, bcr, qc8, &jpeg_h_dc_c, &jpeg_h_ac_c,
+                                 &pred_cr);
+            }
+            else
+            {
+                int32_t by[4][64];
+                int32_t bcb[64];
+                int32_t bcr[64];
+                int32_t ry[16];
+                int32_t rcb[2][16];
+                int32_t rcr[2][16];
+                uint32_t row;
+                uint32_t k;
 
-                    jpeg_pixel_rgb(img, px, py, &R, &G, &B);
-                    Yv = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
-                    Cb = ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
-                    Cr = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
-                    by[y * 8 + x] = jpeg_clamp_i(Yv) - 128;
-                    bcb[y * 8 + x] = jpeg_clamp_i(Cb) - 128;
-                    bcr[y * 8 + x] = jpeg_clamp_i(Cr) - 128;
-                }
-            }
-            jpeg_fdct(by, cy);
-            jpeg_fdct(bcb, ccb);
-            jpeg_fdct(bcr, ccr);
-            for (i = 0; i < 64u; i++)
-            {
-                zz[i] = cy[k_zigzag[i]];
-            }
-            r = jpeg_write_block(o, zz, qy, &dc_y, &ac_y, &pred_y);
-            if (r == FM_OK)
-            {
-                for (i = 0; i < 64u; i++)
+                for (row = 0; row < 16u; row++)
                 {
-                    zz[i] = ccb[k_zigzag[i]];
+                    int32_t *left = by[(row / 8u) * 2u] + 8u * (row % 8u);
+                    int32_t *right = by[(row / 8u) * 2u + 1u] +
+                                     8u * (row % 8u);
+
+                    jpeg_row_ycc(img, mx, my + row, 16u, ry, rcb[row & 1u],
+                                 rcr[row & 1u]);
+                    for (k = 0; k < 8u; k++)
+                    {
+                        left[k] = ry[k];
+                        right[k] = ry[8u + k];
+                    }
+                    if ((row & 1u) != 0u)
+                    {
+                        int32_t *ocb = bcb + 8u * (row / 2u);
+                        int32_t *ocr = bcr + 8u * (row / 2u);
+
+                        for (k = 0; k < 8u; k++)
+                        {
+                            ocb[k] = (rcb[0][2u * k] + rcb[0][2u * k + 1u] +
+                                      rcb[1][2u * k] + rcb[1][2u * k + 1u] +
+                                      2) >> 2;
+                            ocr[k] = (rcr[0][2u * k] + rcr[0][2u * k + 1u] +
+                                      rcr[1][2u * k] + rcr[1][2u * k + 1u] +
+                                      2) >> 2;
+                        }
+                    }
                 }
-                r = jpeg_write_block(o, zz, qc, &dc_c, &ac_c, &pred_cb);
-            }
-            if (r == FM_OK)
-            {
-                for (i = 0; i < 64u; i++)
+                for (k = 0; k < 4u; k++)
                 {
-                    zz[i] = ccr[k_zigzag[i]];
+                    jpeg_write_block(o, by[k], qy8, &jpeg_h_dc_y,
+                                     &jpeg_h_ac_y, &pred_y);
                 }
-                r = jpeg_write_block(o, zz, qc, &dc_c, &ac_c, &pred_cr);
+                jpeg_write_block(o, bcb, qc8, &jpeg_h_dc_c, &jpeg_h_ac_c,
+                                 &pred_cb);
+                jpeg_write_block(o, bcr, qc8, &jpeg_h_dc_c, &jpeg_h_ac_c,
+                                 &pred_cr);
             }
         }
     }
-    if (r == FM_OK)
-    {
-        r = jpeg_flush_bits(o);
-    }
-    if (r == FM_OK)
-    {
-        r = jpeg_out_byte(o, 0xFF);
-    }
-    if (r == FM_OK)
-    {
-        r = jpeg_out_byte(o, 0xD9);
-    }
-    return r;
+    jpeg_flush_bits(o);
+    jpeg_out_byte(o, 0xFF);
+    jpeg_out_byte(o, 0xD9);
+    jpeg_out_flush(o);
 }
 
-static FM_Result jpeg_encode_common(const FM_Image *img, JpegOut *o)
+static FM_Result jpeg_encode_common(const FM_Image *img, JpegOut *o,
+                                    const FM_JpegEncodeOptions *opt)
 {
     FM_Result r;
 
@@ -1292,22 +1358,39 @@ static FM_Result jpeg_encode_common(const FM_Image *img, JpegOut *o)
     {
         return r;
     }
-    o->bits = 0;
-    o->nbits = 0;
-    return jpeg_encode(o, img);
+    jpeg_encode(o, img, (opt != NULL) ? (int)opt->quality : 0,
+                (opt != NULL && opt->subsample != 0u) ? 1 : 0);
+    return o->err;
 }
 
 FM_Result FM_JPEG_EncodeFile(FM_File *f, const FM_Image *img)
 {
     JpegOut o;
 
-    memset(&o, 0, sizeof(o));
+    jpeg_out_init(&o);
     o.file = f;
-    return jpeg_encode_common(img, &o);
+    return jpeg_encode_common(img, &o, NULL);
 }
 
-FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
-                           size_t *out_len)
+FM_Result FM_JPEG_EncodeSink(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt,
+                             FM_JpegSinkFn sink, void *ctx)
+{
+    JpegOut o;
+
+    if (sink == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    jpeg_out_init(&o);
+    o.sink = sink;
+    o.sink_ctx = ctx;
+    return jpeg_encode_common(img, &o, opt);
+}
+
+FM_Result Image_EncodeJPEGEx(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt, void *out,
+                             size_t out_cap, size_t *out_len)
 {
     JpegOut o;
     FM_Result r;
@@ -1316,15 +1399,21 @@ FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    memset(&o, 0, sizeof(o));
+    jpeg_out_init(&o);
     o.mem = (uint8_t *)out;
     o.mem_cap = out_cap;
-    r = jpeg_encode_common(img, &o);
+    r = jpeg_encode_common(img, &o, opt);
     if (r == FM_OK)
     {
         *out_len = o.mem_len;
     }
     return r;
+}
+
+FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
+                           size_t *out_len)
+{
+    return Image_EncodeJPEGEx(img, NULL, out, out_cap, out_len);
 }
 
 #else /* !FM_USE_JPEG */
@@ -1356,6 +1445,29 @@ FM_Result Image_EncodeJPEG(const FM_Image *img, void *out, size_t out_cap,
     (void)out;
     (void)out_cap;
     (void)out_len;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result Image_EncodeJPEGEx(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt, void *out,
+                             size_t out_cap, size_t *out_len)
+{
+    (void)img;
+    (void)opt;
+    (void)out;
+    (void)out_cap;
+    (void)out_len;
+    return FM_ERR_UNSUPPORTED;
+}
+
+FM_Result FM_JPEG_EncodeSink(const FM_Image *img,
+                             const FM_JpegEncodeOptions *opt,
+                             FM_JpegSinkFn sink, void *ctx)
+{
+    (void)img;
+    (void)opt;
+    (void)sink;
+    (void)ctx;
     return FM_ERR_UNSUPPORTED;
 }
 

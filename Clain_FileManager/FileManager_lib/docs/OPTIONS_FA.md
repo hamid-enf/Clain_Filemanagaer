@@ -160,6 +160,27 @@ CubeIDE ببینید. ستون‌های RAM و SDRAM اندازهٔ آرایه�
 `FM_QSPI_*`، و پوشه‌ها: `SIMPLE_VIDEO_FOLDER`، `SIMPLE_IMAGE_FOLDER`،
 `SIMPLE_AUDIO_FOLDER`.
 
+### ذخیرهٔ صدا و ویدیو
+
+این‌ها پیش‌فرض دارند و معمولاً لازم نیست دست بخورند. اگر خواستید عوض
+کنید، در `fm_board_config.h` تعریف کنید:
+
+| گزینه | پیش‌فرض | کار |
+|---|---|---|
+| `FM_AUDIO_ENC_OUT_BYTES` | 16384 | بافر خروجی انکودر صدا (از `FM_Alloc`، تا بسته‌شدن فایل) |
+| `FM_FLAC_ENC_BLOCK` | 4096 | نمونه در هر بلوک FLAC؛ کوچک‌تر = RAM کمتر، فشرده‌سازی کمی کمتر |
+| `FM_AUDIO_CONVERT_SAMPLES` | 4096 | اندازهٔ بلوک `Audio_Convert` |
+| `FM_JPEG_QUALITY` | 85 | کیفیت `Image_Save("x.jpg")` |
+| `FM_VIDEO_ENC_QUALITY` | 80 | کیفیت JPEG ویدیو وقتی صفر داده شود |
+| `FM_VIDEO_ENC_OUT_BYTES` | 32768 | بافر خروجی نویسندهٔ AVI؛ اگر از یک فریم بزرگ‌تر باشد، نوشتن سریع‌تر است |
+| `FM_VIDEO_ENC_MAX_BYTES` | حدود ۲ GB | بزرگ‌ترین فایل AVI |
+| `FM_VIDEO_CONVERT_AUDIO_BYTES` | 16384 | بافر صدای `Video_Convert` |
+
+انکودرهای صدا با `FM_USE_AUDIO` (و FLAC با `FM_USE_FLAC`)، نویسندهٔ AVI با
+`FM_USE_VIDEO` و انکودر JPEG با `FM_USE_JPEG` روشن و خاموش می‌شوند.
+حجم کد روی Cortex-M7 با `-O2`: انکودرهای صدا حدود ۲۱ KB، انکودر و دیکدر
+JPEG روی هم حدود ۱۱ KB، نویسندهٔ AVI حدود ۵ KB.
+
 ## ۵) برنامه: `main.c` و `defines.h`
 
 در `Core/Src/main.c`، بخش `USER CODE 2`، هر خط یک گروه کار است. برای

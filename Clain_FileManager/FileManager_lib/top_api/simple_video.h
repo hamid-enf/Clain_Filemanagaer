@@ -106,7 +106,12 @@
  *   SIMPLE_VIDEO_SAVE_FOLDER (پیش‌فرض /photos) می‌سازد و مسیر را لاگ
  *   می‌کند؛ با مسیر دلخواه، فرمت از پسوند انتخاب می‌شود.
  *
- * نویسندهٔ built-in: FMRV خام. encode به AVI/MP4 ادعا نمی‌شود.
+ * ذخیرهٔ ویدیو: SimpleVideo_RecStart("/videos/x.avi", w, h, fps, 0) یک
+ *   فایل MJPEG AVI می‌سازد (RecWrite / RecWritePixels / RecWriteJpeg /
+ *   RecWriteAudio / RecStop)، و SimpleVideo_Convert(src, dst, fn, ctx) هر
+ *   ویدیوی قابل‌پخش را با کالبک روی هر فریم به MJPEG AVI تبدیل می‌کند.
+ *   پسوند غیر از ‎.avi‎ = FMRV خام مثل قبل. انکودر H.264 / MP4 وجود ندارد
+ *   (برای میکروکنترلر عملی نیست).
  *
  * بافر فریم را در SDRAM بگذارید (32MB). H.264 از FM_Alloc هم کار می‌گیرد
  * — allocator را روی SDRAM بگذارید اگر heap داخلی کوچک است.
@@ -281,6 +286,24 @@ FM_Result SimpleVideo_RecWrite(const void *rgb888, size_t bytes)
 { (void)rgb888; (void)bytes; return FM_ERR_UNSUPPORTED; }
 FM_Result SimpleVideo_RecStop(void)
 { return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecSetQuality(uint8_t quality)
+{ (void)quality; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecSetAudio(uint32_t rate, uint16_t channels)
+{ (void)rate; (void)channels; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecWritePixels(const void *pixels,
+        FM_PixelFormat format)
+{ (void)pixels; (void)format; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecWriteJpeg(const void *jpeg, size_t bytes)
+{ (void)jpeg; (void)bytes; return FM_ERR_UNSUPPORTED; }
+FM_Result SimpleVideo_RecWriteAudio(const int16_t *pcm, size_t frames)
+{ (void)pcm; (void)frames; return FM_ERR_UNSUPPORTED; }
+FM_Bool SimpleVideo_RecActive(void)
+{ return FM_FALSE; }
+uint32_t SimpleVideo_RecFrames(void)
+{ return 0u; }
+FM_Result SimpleVideo_Convert(const char *src, const char *dst,
+        FM_VideoFrameEditFn process, void *ctx)
+{ (void)src; (void)dst; (void)process; (void)ctx; return FM_ERR_UNSUPPORTED; }
 const void *SimpleVideo_Frame(uint16_t *width,
         uint16_t *height,
         FM_PixelFormat *format,
@@ -3420,6 +3443,72 @@ FM_Result SimpleVideo_SaveFrame(const char *path)
     return FM_OK;
 }
 
+/* ------------------------------------------------------------------ */
+/* ذخیرهٔ ویدیو در فایل                                                  */
+/*                                                                      */
+/* فرمت از پسوند:                                                        */
+/*   ‎.avi‎   MJPEG در AVI (فشرده، با صدا؛ روی PC و گوشی و همین کتابخانه      */
+/*          پخش می‌شود) — فوری باز می‌شود، نتیجهٔ RecStart همان نتیجه است.   */
+/*   بقیه    FMRV خام (RGB888 بدون فشرده‌سازی، فقط همین کتابخانه) — مثل     */
+/*          قبل، با Poll بعدی باز می‌شود.                                 */
+/*                                                                      */
+/*   SimpleVideo_RecSetAudio(16000, 1);          // اختیاری، قبل از Start  */
+/*   SimpleVideo_RecStart("/videos/cam.avi", 320, 240, 15, 0);           */
+/*   هر فریم:                                                            */
+/*     SimpleVideo_RecWritePixels(fb, FM_PIXEL_RGB565);  // یا             */
+/*     SimpleVideo_RecWrite(rgb888, 320 * 240 * 3);      // یا             */
+/*     SimpleVideo_RecWriteJpeg(jpg, bytes);    // دوربین در حالت JPEG     */
+/*     SimpleVideo_RecWriteAudio(pcm, 16000 / 15);       // صدای همان فریم */
+/*   SimpleVideo_RecStop();                     // الزامی: ایندکس و طول     */
+/*                                                                      */
+/* فایل به فایل (هر ویدیویی که پخش می‌شود -> MJPEG AVI)، با کالبک روی هر    */
+/* فریم:  SimpleVideo_Convert("/videos/a.mp4", "/out/a.avi", fn, ctx);     */
+/* ------------------------------------------------------------------ */
+
+static FM_VideoFileWriter sv_avi;
+static FM_Bool  sv_avi_active;
+static uint8_t  sv_rec_quality;       /* 0 = پیش‌فرض کتابخانه (80) */
+static uint32_t sv_rec_audio_rate;    /* 0 = بدون صدا             */
+static uint16_t sv_rec_audio_ch;
+
+static FM_Bool simple_video_is_avi(const char *path)
+{
+    size_t n = strlen(path);
+
+    if (n < 4u || path[n - 4u] != '.')
+    {
+        return FM_FALSE;
+    }
+    return ((path[n - 3u] | 0x20) == 'a' && (path[n - 2u] | 0x20) == 'v' &&
+            (path[n - 1u] | 0x20) == 'i') ? FM_TRUE : FM_FALSE;
+}
+
+/* کیفیت JPEG فریم‌ها، 1 تا 100 (0 = پیش‌فرض 80). ماندگار؛ روی RecStart
+ * بعدی و روی SimpleVideo_Convert اثر دارد. 60 = حجم کم، 90 = تقریباً
+ * بدون افت. */
+FM_Result SimpleVideo_RecSetQuality(uint8_t quality)
+{
+    if (quality > 100u)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    sv_rec_quality = quality;
+    return FM_OK;
+}
+
+/* تراک صدای فایل ‎.avi‎ بعدی: نرخ نمونه‌برداری و 1 یا 2 کانال؛ rate = 0
+ * یعنی بدون صدا (پیش‌فرض). ماندگار. */
+FM_Result SimpleVideo_RecSetAudio(uint32_t rate, uint16_t channels)
+{
+    if (rate != 0u && channels != 1u && channels != 2u)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    sv_rec_audio_rate = rate;
+    sv_rec_audio_ch = (rate != 0u) ? channels : 0u;
+    return FM_OK;
+}
+
 FM_Result SimpleVideo_RecStart(const char *path, uint16_t width,
                                uint16_t height, uint32_t fps,
                                uint32_t expected_frames)
@@ -3427,6 +3516,37 @@ FM_Result SimpleVideo_RecStart(const char *path, uint16_t width,
     if (path == NULL || width == 0u || height == 0u || fps == 0u)
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (sv_avi_active || sv.rec_active)
+    {
+        return FM_ERR_BUSY;
+    }
+    if (simple_video_is_avi(path))
+    {
+        FM_VideoSaveConfig c;
+        FM_Result r;
+
+        memset(&c, 0, sizeof(c));
+        c.width = width;
+        c.height = height;
+        c.fps = fps;
+        c.quality = sv_rec_quality;
+        c.audio_rate = sv_rec_audio_rate;
+        c.audio_channels = sv_rec_audio_ch;
+        r = VideoFileWriter_Open(&sv_avi, path, &c);
+        if (r == FM_OK)
+        {
+            sv_avi_active = FM_TRUE;
+            FM_Log("SimpleVideo: recording MJPEG AVI -> %s (%ux%u, %lu fps)\n",
+                   path, (unsigned)width, (unsigned)height,
+                   (unsigned long)fps);
+        }
+        else
+        {
+            FM_Log("SimpleVideo: rec start failed (%s): %s (%d)\n", path,
+                   File_GetErrorString(r), (int)r);
+        }
+        return r;
     }
     (void)strncpy(sv.pending_path, path, FM_PATH_MAX - 1u);
     sv.pending_path[FM_PATH_MAX - 1u] = '\0';
@@ -3438,8 +3558,17 @@ FM_Result SimpleVideo_RecStart(const char *path, uint16_t width,
     return FM_OK;
 }
 
+/* یک فریم RGB888 (عرض * ارتفاع * 3 بایت). */
 FM_Result SimpleVideo_RecWrite(const void *rgb888, size_t bytes)
 {
+    if (sv_avi_active)
+    {
+        if (bytes != (size_t)sv_avi.config.width * sv_avi.config.height * 3u)
+        {
+            return FM_ERR_INVALID_ARGUMENT;
+        }
+        return VideoFileWriter_WriteFrame(&sv_avi, rgb888, FM_PIXEL_RGB888);
+    }
     if (!sv.rec_active)
     {
         return FM_ERR_NOT_READY;
@@ -3447,10 +3576,127 @@ FM_Result SimpleVideo_RecWrite(const void *rgb888, size_t bytes)
     return VideoWriter_WriteFrame(&sv.rec, rgb888, bytes);
 }
 
+/* یک فریم با هر فرمت پیکسل (مثلاً FM_PIXEL_RGB565 مستقیم از فریم‌بافر
+ * LCD)، به اندازه‌ای که به RecStart داده شد. فقط برای ‎.avi‎. */
+FM_Result SimpleVideo_RecWritePixels(const void *pixels,
+                                     FM_PixelFormat format)
+{
+    if (!sv_avi_active)
+    {
+        return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
+    }
+    return VideoFileWriter_WriteFrame(&sv_avi, pixels, format);
+}
+
+/* یک فریم که خودش JPEG است (FF D8 ... FF D9) — دوربین در حالت JPEG یا
+ * JPEG سخت‌افزاری؛ بدون هیچ پردازشی ذخیره می‌شود. فقط برای ‎.avi‎. */
+FM_Result SimpleVideo_RecWriteJpeg(const void *jpeg, size_t bytes)
+{
+    if (!sv_avi_active)
+    {
+        return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
+    }
+    return VideoFileWriter_WriteJpeg(&sv_avi, jpeg, bytes);
+}
+
+/* صدای فایل: `frames` فریم PCM شانزده‌بیتی با مشخصات RecSetAudio. بعد از
+ * هر فریم تصویر، صدای همان بازه را بدهید (نرخ / fps فریم). */
+FM_Result SimpleVideo_RecWriteAudio(const int16_t *pcm, size_t frames)
+{
+    if (!sv_avi_active)
+    {
+        return sv.rec_active ? FM_ERR_UNSUPPORTED : FM_ERR_NOT_READY;
+    }
+    return VideoFileWriter_WriteAudio(&sv_avi, pcm, frames);
+}
+
+/* پایان ذخیره. برای ‎.avi‎ همین‌جا بسته می‌شود و نتیجه برمی‌گردد (اولین
+ * خطای نوشتن، اگر بوده). برای FMRV مثل قبل با Poll بعدی. */
 FM_Result SimpleVideo_RecStop(void)
 {
+    if (sv_avi_active)
+    {
+        uint32_t frames = sv_avi.frames;
+        FM_Result r = VideoFileWriter_Close(&sv_avi);
+
+        sv_avi_active = FM_FALSE;
+        if (r == FM_OK)
+        {
+            FM_Log("SimpleVideo: saved %lu frames\n", (unsigned long)frames);
+        }
+        else
+        {
+            FM_Log("SimpleVideo: closing the recording failed: %s (%d)\n",
+                   File_GetErrorString(r), (int)r);
+        }
+        return r;
+    }
     sv.pending_cmd = SV_CMD_REC_STOP;
     return FM_OK;
+}
+
+/* ذخیره فعال است؟ و چند فریم تا حالا نوشته شده (فقط ‎.avi‎). */
+FM_Bool SimpleVideo_RecActive(void)
+{
+    return (sv_avi_active || sv.rec_active) ? FM_TRUE : FM_FALSE;
+}
+
+uint32_t SimpleVideo_RecFrames(void)
+{
+    return sv_avi_active ? sv_avi.frames : 0u;
+}
+
+/* وسط تبدیل، بقیهٔ برنامه (پخش موزیک، ...) زنده می‌ماند. */
+static FM_Bool simple_video_convert_tick(void *ctx, uint32_t done,
+                                         uint32_t total)
+{
+    (void)ctx;
+    (void)done;
+    (void)total;
+#ifdef FM_TOPAPI_SIMPLE_IDLE_MUX_H
+    simple_idle_dispatch();      /* موزیک (SimpleAudio) و ... */
+#endif
+    return FM_TRUE;
+}
+
+/*
+ * فایل به فایل، بدون نمایش: src (هر ویدیویی که این کتابخانه دیکد می‌کند)
+ * فریم‌به‌فریم خوانده می‌شود، هر فریم به تابع `process` شما داده می‌شود
+ * (RGB888، سطر بالا اول؛ درجا رویش بکشید یا فیلتر کنید؛ NULL = بدون
+ * تغییر) و در dst به‌صورت MJPEG AVI نوشته می‌شود، با همان صدا. تا پایان
+ * فایل برنمی‌گردد. وقتی ویدیویی در حال پخش است FM_ERR_BUSY می‌دهد
+ * (دو دیکدر هم‌زمان، حافظه را دو برابر می‌خواهد).
+ *
+ *   static void stamp(void *ctx, uint8_t *rgb, uint16_t w, uint16_t h,
+ *                     uint32_t frame)
+ *   {
+ *       for (uint32_t x = 0; x < 2u * w; x++)   // دو سطر قرمز بالای تصویر
+ *       { rgb[3u * x] = 255; rgb[3u * x + 1u] = 0; rgb[3u * x + 2u] = 0; }
+ *   }
+ *   SimpleVideo_Convert("/videos/a.mp4", "/out/a.avi", stamp, NULL);
+ *
+ * برای اندازهٔ دیگر، صدای پردازش‌شده، نوار پیشرفت یا لغو: Video_Convert با
+ * FM_VideoConvertConfig.
+ */
+FM_Result SimpleVideo_Convert(const char *src, const char *dst,
+                              FM_VideoFrameEditFn process, void *ctx)
+{
+    FM_VideoConvertConfig cc;
+
+    if (src == NULL || dst == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (sv.running)
+    {
+        return FM_ERR_BUSY;
+    }
+    memset(&cc, 0, sizeof(cc));
+    cc.quality = sv_rec_quality;
+    cc.process = process;
+    cc.process_ctx = ctx;
+    cc.progress = simple_video_convert_tick;
+    return Video_Convert(src, dst, &cc, NULL);
 }
 
 const void *SimpleVideo_Frame(uint16_t *width, uint16_t *height,

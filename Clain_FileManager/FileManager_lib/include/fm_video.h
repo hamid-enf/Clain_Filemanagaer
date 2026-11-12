@@ -303,6 +303,146 @@ FM_Result VideoWriter_WriteFrame(FM_VideoWriter *w, const void *frame,
                                  size_t size);
 FM_Result VideoWriter_Close(FM_VideoWriter *w);
 
+/* ------------------------------------------------------------------ */
+/* Saving video: Motion-JPEG in an AVI file (fm_video_enc.c)           */
+/* ------------------------------------------------------------------ */
+/*
+ * The file is an AVI with "MJPG" pictures and, when asked for, a 16-bit
+ * PCM sound track: PCs, phones and video editors play it, and so does
+ * this library (Video_Open, SimpleVideo).  Every frame is a JPEG of its
+ * own, which is what a microcontroller can encode; H.264 and the like
+ * are not written (see the note at the top of fm_video_enc.c).
+ *
+ *     FM_VideoFileWriter w;
+ *     FM_VideoSaveConfig c = {0};
+ *     c.width = 480; c.height = 272; c.fps = 15;
+ *     c.audio_rate = 16000; c.audio_channels = 1;      // or 0: no sound
+ *     VideoFileWriter_Open(&w, "/video/cam.avi", &c);
+ *     for (...) {
+ *         VideoFileWriter_WriteFrame(&w, pixels, FM_PIXEL_RGB565);
+ *         VideoFileWriter_WriteAudio(&w, pcm, frames_of_sound);
+ *     }
+ *     VideoFileWriter_Close(&w);       // required: writes index + lengths
+ *
+ * Give the sound that belongs to a picture right after that picture
+ * (audio_rate / fps sample frames per picture); players then find both
+ * close together in the file.
+ *
+ * Size: about width * height / 8 bytes a frame at quality 80 for camera
+ * pictures (480x272: 15-20 KB), flat graphics far less.  A file stops
+ * accepting data at FM_VIDEO_ENC_MAX_BYTES (just under 2 GB):
+ * FM_ERR_TOO_LARGE; close it and start the next one.
+ *
+ * Errors: the first failed write stays the answer of every later call
+ * and of Close.  Close still completes the file as far as it got.
+ */
+typedef struct
+{
+    uint16_t width;
+    uint16_t height;
+    uint32_t fps;             /* frames per second ...                 */
+    uint32_t fps_den;         /* ... divided by this (0 or 1 = whole
+                               * number; 30000 / 1001 = 29.97)         */
+    uint8_t  quality;         /* JPEG 1..100; 0 = FM_VIDEO_ENC_QUALITY
+                               * (80)                                  */
+    uint8_t  chroma_full;     /* 0 = 4:2:0 (usual for video), 1 = 4:4:4
+                               * (sharper coloured text, larger)       */
+    uint32_t audio_rate;      /* 0 = no sound track                    */
+    uint16_t audio_channels;  /* 1 or 2                                */
+} FM_VideoSaveConfig;
+
+typedef struct
+{
+    FM_File   file;
+    FM_File   index;              /* "<name>.idx" while writing        */
+    char      index_path[FM_PATH_MAX];
+    FM_VideoSaveConfig config;
+    uint8_t  *buf;
+    uint8_t  *ibuf;
+    uint32_t  buf_cap;
+    uint32_t  buf_len;
+    uint32_t  ibuf_len;
+    uint64_t  buf_pos;
+    uint64_t  movi_pos;
+    uint64_t  audio_bytes;
+    uint32_t  frames;             /* pictures written so far           */
+    uint32_t  index_entries;
+    uint32_t  largest_frame;
+    uint32_t  largest_audio;
+    FM_Result error;
+    FM_Bool   opened;
+} FM_VideoFileWriter;
+
+FM_Result VideoFileWriter_Open(FM_VideoFileWriter *w, const char *path,
+                               const FM_VideoSaveConfig *cfg);
+/* One picture of config.width x config.height in any FM_PixelFormat
+ * (RGB565 straight from a frame buffer, RGB888, ...).  Needs FM_USE_JPEG. */
+FM_Result VideoFileWriter_WriteFrame(FM_VideoFileWriter *w,
+                                     const void *pixels,
+                                     FM_PixelFormat format);
+/* One picture that is already a JPEG file (FF D8 ... FF D9) of the size
+ * the writer was opened with: a camera in JPEG mode, the JPEG
+ * peripheral.  Stored as it is; FM_ERR_INVALID_FORMAT when it does not
+ * start like a JPEG. */
+FM_Result VideoFileWriter_WriteJpeg(FM_VideoFileWriter *w, const void *jpeg,
+                                    size_t size);
+/* `frames` sample frames of interleaved 16-bit PCM for the sound track.
+ * FM_ERR_UNSUPPORTED when the file was opened with audio_rate 0. */
+FM_Result VideoFileWriter_WriteAudio(FM_VideoFileWriter *w,
+                                     const int16_t *pcm, size_t frames);
+FM_Result VideoFileWriter_Close(FM_VideoFileWriter *w);
+
+/*
+ * Video_Convert: decode `src` (any video this build plays: AVI, MP4,
+ * MKV, FLV, FMRV with a decoder for its pictures) and write it to `dst`
+ * as MJPEG AVI, sound track included when it can be decoded.  Not tied
+ * to playback: it runs as fast as the processor and the card allow and
+ * returns when the file is complete.
+ *
+ *   width, height   size of the new video; 0, 0 = as the source
+ *   process         called with every decoded frame (RGB888, top row
+ *                   first) before it is encoded: draw on it, filter it
+ *   audio_process   the same for the sound (interleaved 16-bit PCM)
+ *   progress        called after every frame; return FM_FALSE to stop
+ *                   (FM_ERR_CANCELLED, `dst` is removed)
+ *
+ * Memory (FM_Alloc, for the duration of the call): one RGB888 frame
+ * (width * height * 3 bytes), what the picture decoder itself needs, the
+ * writer's buffer and FM_VIDEO_CONVERT_AUDIO_BYTES for sound.
+ * On any failure `dst` is removed.  cfg may be NULL (all defaults).
+ * The frame rate written is the whole number Video_GetInfo reports
+ * (29.97 becomes 30).
+ */
+typedef void (*FM_VideoFrameEditFn)(void *ctx, uint8_t *rgb888,
+                                    uint16_t width, uint16_t height,
+                                    uint32_t frame_index);
+typedef FM_Bool (*FM_VideoProgressFn)(void *ctx, uint32_t frames_done,
+                                      uint32_t frames_total);
+/* The audio callback type of fm_audio.h, repeated so that this header
+ * stands alone (C11 allows the identical typedef twice). */
+typedef void (*FM_VideoAudioEditFn)(void *ctx, int16_t *pcm, size_t samples,
+                                    uint32_t sample_rate,
+                                    uint16_t channels);
+
+typedef struct
+{
+    uint16_t width;
+    uint16_t height;
+    uint8_t  quality;
+    uint8_t  chroma_full;
+    FM_Bool  no_audio;            /* FM_TRUE: drop the sound track     */
+    FM_VideoFrameEditFn process;
+    void    *process_ctx;
+    FM_VideoAudioEditFn audio_process;
+    void    *audio_ctx;
+    FM_VideoProgressFn progress;
+    void    *progress_ctx;
+} FM_VideoConvertConfig;
+
+FM_Result Video_Convert(const char *src, const char *dst,
+                        const FM_VideoConvertConfig *cfg,
+                        uint32_t *frames_out);
+
 FM_END_DECLS
 
 #endif /* FM_VIDEO_H */

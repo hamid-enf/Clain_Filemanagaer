@@ -20394,6 +20394,12 @@ static void suite_leak_check(const char *suite)
 }
 
 #include "audit_v2_tests.h"
+#if FM_USE_AUDIO
+#include "audio_save_tests.h"
+#endif
+#if FM_USE_VIDEO && FM_USE_MJPEG && FM_USE_JPEG && FM_USE_IMAGE
+#include "video_save_tests.h"
+#endif
 
 #define RUN_SUITE(fn) do { fn(); suite_leak_check(#fn); } while (0)
 
@@ -20539,6 +20545,12 @@ int main(void)
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audit_v2_audio);
+#endif
+#if FM_USE_AUDIO
+    RUN_SUITE(test_audio_save);
+#endif
+#if FM_USE_VIDEO && FM_USE_MJPEG && FM_USE_JPEG && FM_USE_IMAGE
+    RUN_SUITE(test_video_save);
 #endif
 #if FM_USE_THREADS && FM_HOST_BUILD
     RUN_SUITE(test_threads);

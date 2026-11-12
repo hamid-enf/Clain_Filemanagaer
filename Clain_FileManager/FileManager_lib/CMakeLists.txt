@@ -127,7 +127,7 @@ set(FM_SOURCES
     src/fm_logger.c src/fm_explorer.c
     src/fm_media.c src/fm_async.c src/fm_fmfs.c
     src/fm_image.c src/fm_jpeg.c src/fm_png.c
-    src/fm_audio.c src/fm_video.c
+    src/fm_audio.c src/fm_audio_enc.c src/fm_video.c src/fm_video_enc.c
     src/fm_eeprom.c src/fm_usb_msc.c src/fm_device.c
     src/fm_h264.c src/fm_mjpeg.c src/fm_alloc.c
     src/fm_flac.c src/fm_vorbis.c src/fm_opus.c
