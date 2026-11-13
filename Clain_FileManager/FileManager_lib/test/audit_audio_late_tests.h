@@ -56,7 +56,8 @@ static void test_audit_v5_audio_late(void)
     }
 #if FM_USE_MEDIA_DETECT
     TEST("AUD5-03: short ID3 is not sufficient to identify MP3");
-    r = Media_DetectBuffer("ID3", 3, NULL) != FM_MEDIA_MP3 ? FM_OK : FM_ERR_INTERNAL;
+    r = (Media_DetectBuffer("ID3", 3, NULL) == FM_MEDIA_UNKNOWN &&
+         Media_DetectBuffer("ID3", 3, "x.flac") == FM_MEDIA_FLAC) ? FM_OK : FM_ERR_INTERNAL;
     CHECK_RESULT(r, "short tag");
     TEST("S-03: incomplete ID3 tag uses extension or unknown");
     {

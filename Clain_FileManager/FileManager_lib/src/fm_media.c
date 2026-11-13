@@ -149,6 +149,12 @@ FM_MediaType Media_DetectBuffer(const void *buf, size_t len,
         return by_ext;
     }
 
+    /* An ID3 prefix is not enough to identify the underlying format. */
+    if (len >= 3u && len < 10u && p[0] == 'I' && p[1] == 'D' && p[2] == '3')
+    {
+        return by_ext;
+    }
+
     /* Magic numbers win over extension. */
     /* An ID3v2 tag may sit in front of any audio stream, not only an MP3
      * one: taggers write it into FLAC, Ogg and WAV files too, and the
