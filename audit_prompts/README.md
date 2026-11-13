@@ -1,5 +1,10 @@
 # External audit prompts — five parts, one auditor each
 
+> **Historical pin:** these prompts audit `6fe596d`, not current HEAD. The
+> delayed audio report is now `ReportV41.txt` (audited `fc31b25`); its four
+> findings were addressed in `f255176`. In particular, `04_audio.md` is not
+> a current next-round prompt. A new round needs a new pin and updated jobs.
+
 ## راهنمای کوتاه (فارسی)
 
 - پنج فایل، پنج ایجنت: به هر ایجنت **فقط یک فایل** بدهید و هیچ چیز دیگر. هر

@@ -22,7 +22,7 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
 - Commit: `6fe596d` (`6fe596d445c17569dace9fe490929b8d4f3b0fe9`). Audit exactly
   this commit (`git checkout 6fe596d`) and quote it in your report. Later
-  commits on the branch update the audit prompts and library README, not the code under audit.
+  commits on the branch may change the code: audit exactly the pinned commit.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
   (the CubeMX firmware project of the reference board), and `ReportV2.txt`,

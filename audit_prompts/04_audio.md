@@ -1,5 +1,11 @@
 # External audit V5 — audio
 
+> **Historical prompt:** the delayed V5 audio report arrived as `ReportV41.txt`
+> (it audited `fc31b25`) and fixes were applied in `f255176`. This prompt
+> remains pinned to `6fe596d`, before those fixes; statements below that no
+> audio report arrived describe the earlier state, not the current one. Do
+> not use it as a prompt for auditing the current audio code.
+
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
 and a **fix** for it. You do not change the repository.
@@ -22,7 +28,7 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
 - Commit: `6fe596d` (`6fe596d445c17569dace9fe490929b8d4f3b0fe9`). Audit exactly
   this commit (`git checkout 6fe596d`) and quote it in your report. Later
-  commits on the branch update the audit prompts and library README, not the code under audit.
+  commits on the branch may change the code: audit exactly the pinned commit.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
   (the CubeMX firmware project of the reference board), and `ReportV2.txt`,
