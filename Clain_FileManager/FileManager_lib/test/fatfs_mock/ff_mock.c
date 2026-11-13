@@ -29,6 +29,7 @@ typedef struct {
 } MockFile;
 
 static FATFS *g_vol[FF_VOLUMES];
+static int g_locks;     /* objects open now: the _FS_LOCK table */
 static MockFile g_files[MOCK_MAX_FILES];
 static int g_fail_mounts;
 
@@ -41,6 +42,51 @@ void ff_mock_reset(void)
 {
     memset(g_files, 0, sizeof(g_files));
     memset(g_vol, 0, sizeof(g_vol));
+    g_locks = 0;
+}
+
+/* One more object open.  Real FatFS shares one entry between several
+ * read-only opens of one file; the mock counts every open, which is the
+ * stricter of the two. */
+static FRESULT lock_take(void)
+{
+    if (MOCK_FS_LOCK > 0 && g_locks >= MOCK_FS_LOCK)
+    {
+        return FR_TOO_MANY_OPEN_FILES;
+    }
+    g_locks++;
+    return FR_OK;
+}
+
+static void lock_give(void)
+{
+    if (g_locks > 0) g_locks--;
+}
+
+static int name_eq_n(const char *a, const char *b, size_t n)
+{
+    for (; n > 0; a++, b++, n--)
+    {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return 0;
+        if (x == '\0') return 1;
+    }
+    return 1;
+}
+
+/* names on a FAT volume compare without case */
+static int name_eq(const char *a, const char *b)
+{
+    for (;; a++, b++)
+    {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return 0;
+        if (x == '\0') return 1;
+    }
 }
 
 int ff_mock_file_count(void)
@@ -92,7 +138,7 @@ static MockFile *find_file(const char *path)
     if (name[0] == '\0') return NULL;
     for (i = 0; i < MOCK_MAX_FILES; i++)
         if (g_files[i].used && g_files[i].vol == vol_of(path) &&
-            strcmp(g_files[i].name, name) == 0)
+            name_eq(g_files[i].name, name))
             return &g_files[i];
     return NULL;
 }
@@ -147,6 +193,7 @@ FRESULT f_mount(FATFS *fs, const TCHAR *path, BYTE opt)
     if (vol_of(path) < 0) return FR_INVALID_DRIVE;
     if (fs != NULL && g_fail_mounts) return FR_DISK_ERR;
     g_vol[vol_of(path)] = fs;                   /* NULL = deregister  */
+    g_locks = 0;                                /* clear_lock()        */
     return FR_OK;
 }
 
@@ -179,6 +226,10 @@ FRESULT f_open(FIL *fp, const TCHAR *path, BYTE mode)
         if (f == NULL) return FR_NO_FILE;
     }
 
+    {
+        FRESULT lr = lock_take();
+        if (lr != FR_OK) return lr;
+    }
     fp->mo_file = (int)(f - g_files);
     fp->fmode = mode;
     fp->is_open = 1;
@@ -190,6 +241,7 @@ FRESULT f_close(FIL *fp)
 {
     if (fp == NULL || !fp->is_open) return FR_INVALID_OBJECT;
     fp->is_open = 0;
+    lock_give();
     return FR_OK;
 }
 
@@ -271,6 +323,8 @@ FRESULT f_stat(const TCHAR *path, FILINFO *fno)
     MockFile *f;
     FRESULT fr = volume_ok(path, NULL);
     if (fr != FR_OK) return fr;
+    /* the root has no directory entry: real f_stat("0:/") says so */
+    if (name_ok(path) && strip(path)[0] == '\0') return FR_INVALID_NAME;
     f = find_file(path);
     if (f == NULL) return FR_NO_FILE;
     if (fno) {
@@ -293,8 +347,8 @@ FRESULT f_unlink(const TCHAR *path)
         int i, prefix = (int)strlen(f->name);
         for (i = 0; i < MOCK_MAX_FILES; i++)
             if (g_files[i].used && g_files[i].vol == f->vol &&
-                strncmp(g_files[i].name, f->name,
-                                           (size_t)prefix) == 0 &&
+                name_eq_n(g_files[i].name, f->name,
+                                           (size_t)prefix) &&
                 g_files[i].name[prefix] == '/')
                 return FR_DENIED;               /* dir not empty */
     }
@@ -310,10 +364,41 @@ FRESULT f_rename(const TCHAR *path_old, const TCHAR *path_new)
     src = find_file(path_old);
     if (src == NULL) return FR_NO_FILE;
     dst = find_file(path_new);
+#ifdef MOCK_FATFS_MODERN
+    /* from R0.13: the new name may be the object itself (a change of
+     * case); up to R0.12c that is FR_EXIST like any other name in use */
+    if (dst != NULL && dst != src) return FR_EXIST;
+#else
     if (dst != NULL) return FR_EXIST;
+#endif
     {
         const char *nname = strip(path_new);
-        if (strlen(nname) >= sizeof(src->name)) return FR_INVALID_NAME;
+        size_t olen = strlen(src->name);
+        size_t nlen = strlen(nname);
+        int i;
+
+        if (nlen >= sizeof(src->name)) return FR_INVALID_NAME;
+        /* The files are kept by their whole path here; on a real volume
+         * what is in a directory moves with it.  (Without this a renamed
+         * directory was empty, and its files were left under a name that
+         * no longer existed -- no test of a directory rename meant
+         * anything.) */
+        if (src->is_dir) {
+            for (i = 0; i < MOCK_MAX_FILES; i++) {
+                MockFile *c = &g_files[i];
+                char moved[sizeof(c->name)];
+
+                if (!c->used || c == src || c->vol != src->vol ||
+                    !name_eq_n(c->name, src->name, olen) ||
+                    c->name[olen] != '/')
+                    continue;
+                if (nlen + strlen(c->name + olen) >= sizeof(moved))
+                    return FR_INVALID_NAME;
+                memcpy(moved, nname, nlen);
+                strcpy(moved + nlen, c->name + olen);
+                strcpy(c->name, moved);
+            }
+        }
         strcpy(src->name, nname);
     }
     return FR_OK;
@@ -357,6 +442,10 @@ FRESULT f_opendir(DIR *dp, const TCHAR *path)
         }
         strcpy(dp->path, p);                    /* "" = root */
     }
+    {
+        FRESULT lr = lock_take();
+        if (lr != FR_OK) return lr;
+    }
     dp->cursor = -1;                            /* emit "." ".." first */
     dp->is_open = 1;
     return FR_OK;
@@ -387,7 +476,7 @@ FRESULT f_readdir(DIR *dp, FILINFO *fno)
         /* direct children only */
         if (dp->path[0] != '\0') {
             size_t plen = strlen(dp->path);
-            if (strncmp(f->name, dp->path, plen) != 0) continue;
+            if (!name_eq_n(f->name, dp->path, plen)) continue;
             if (f->name[plen] != '/') continue;
             rel = f->name + plen + 1;
         } else {
@@ -411,6 +500,7 @@ FRESULT f_closedir(DIR *dp)
 {
     if (dp == NULL || !dp->is_open) return FR_INVALID_OBJECT;
     dp->is_open = 0;
+    lock_give();
     return FR_OK;
 }
 

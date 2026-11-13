@@ -122,10 +122,30 @@ FM_Result FS_Find(const char *name, FM_FS **out);
 /* ------------------------------------------------------------------ */
 /* Mount management                                                    */
 /* ------------------------------------------------------------------ */
+/* FS_Mount: `fs` comes from FMFS_Init / LittleFS_Init / FatFS_Init /
+ * PosixFS_Init (or is a file system of your own with at least the file
+ * and directory functions filled in).  An FM_FS without them -- zeroed,
+ * never initialised -- is FM_ERR_INVALID_ARGUMENT; it used to mount, and
+ * the first File_Open through it called a NULL pointer. */
 FM_Result FS_Mount(const char *mount_path, FM_FS *fs);
 /* FS_Unmount and FS_Format return FM_ERR_BUSY while a file or directory
  * of the volume is open, or (FM_USE_THREADS) while another task is in
- * the middle of an operation on it. */
+ * the middle of an operation on it.
+ *
+ * FS_Format leaves the volume mounted and empty, ready for use (on
+ * LittleFS it is unmounted, formatted and mounted again inside the
+ * call).  A volume that cannot be mounted at all has no mount path to
+ * format: LittleFS_FormatStorage() (fm_littlefs.h), or mount with
+ * auto-format on.
+ *
+ * FS_Check: FM_OK, or FM_ERR_CORRUPTED / FM_ERR_IO.  What is looked at
+ * depends on the file system.  FMFS: the table in use reads back with
+ * its checksum, and as a whole it makes sense (no file outside the data
+ * area, no two files on the same bytes, every entry in a folder that
+ * exists).  LittleFS: every metadata block of the volume is read and
+ * verified; the CONTENT of files is not (littlefs keeps no checksum of
+ * it).  FatFS / POSIX: nothing is examined, the answer is always FM_OK
+ * (FatFs has no checker: put the card in a PC for chkdsk / fsck). */
 FM_Result FS_Unmount(const char *mount_path);
 FM_Result FS_Format(const char *mount_path);
 FM_Result FS_Check(const char *mount_path);
@@ -150,7 +170,13 @@ FM_Result PosixFS_Init(FM_FS *fs);
  * that fails -- gives it back.  Call FMFS_Init() before each FS_Mount():
  * an FM_FS that is mounted again without it gets its old context only
  * if no other FM_FS has taken it meanwhile (FM_ERR_NOT_READY otherwise).
- * LittleFS_Init() follows the same rule. */
+ * LittleFS_Init() and FatFS_Init() follow the same rule.
+ *
+ * When all FM_MAX_FS contexts are handed out, *_Init() takes over the
+ * oldest one that never got as far as a mount (its FS_Mount was refused
+ * before the driver was asked, or never called); a mounted one is never
+ * taken.  Only with FM_MAX_FS volumes of that kind really mounted does
+ * *_Init() fail (FM_ERR_NO_MEMORY). */
 FM_Result FMFS_Init(FM_FS *fs);
 
 /* Compact the FMFS data area: slide the live files together from the

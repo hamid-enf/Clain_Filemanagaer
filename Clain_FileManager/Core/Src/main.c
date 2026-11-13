@@ -130,7 +130,14 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* The 1 ms tick gets the highest priority (CubeMX gives it the lowest,
+   * 15).  Every HAL timeout counts HAL_GetTick(); code that waits with
+   * one inside an interrupt handler -- the USB mass-storage callbacks
+   * read the SD card / the QSPI flash from OTG_FS_IRQHandler when USB is
+   * not polled from the main loop -- waits for ever if the tick cannot
+   * interrupt that handler: a card pulled out during a transfer froze
+   * the MCU.  See also USB_OTG_FS_MspInit 1 in usbd_conf.c. */
+  HAL_InitTick(0U);
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */

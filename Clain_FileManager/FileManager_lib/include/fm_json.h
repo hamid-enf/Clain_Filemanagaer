@@ -142,6 +142,9 @@ FM_Result JsonWriter_String(FM_JsonWriter *w, const char *value);
 FM_Result JsonWriter_Int(FM_JsonWriter *w, int32_t value);
 FM_Result JsonWriter_UInt(FM_JsonWriter *w, uint32_t value);
 FM_Result JsonWriter_Int64(FM_JsonWriter *w, int64_t value);
+/* 0..6 decimals.  NaN and +-infinity are written as null (JSON has no
+ * number for them); a value beyond +-9e9 is written as +-8999999488,
+ * the float next to 9e9. */
 FM_Result JsonWriter_Float(FM_JsonWriter *w, float value, int decimals);
 FM_Result JsonWriter_Bool(FM_JsonWriter *w, FM_Bool value);
 FM_Result JsonWriter_Null(FM_JsonWriter *w);

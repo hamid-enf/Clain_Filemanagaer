@@ -78,6 +78,28 @@ for f in $(find . -name '*.c' \
     fi
 done
 
+# Vendored sources as a firmware project compiles them (its own symbols,
+# no -D of ours): littlefs must not print through printf() behind
+# FM_DEBUG_LEVEL, and stb_vorbis must not bring the FILE * functions.
+for pair in "third_party/littlefs/lfs.c:printf puts putchar" \
+            "third_party/stb/stb_vorbis.c:fopen fread fseek ftell fclose"; do
+    src=${pair%%:*}
+    banned=${pair#*:}
+    if ! $CC $DEFS -std=gnu11 -w -O1 -Iinclude -Isrc -c "$src" -o "$TMP/v.o" 2>"$TMP/err"; then
+        echo "FAIL $src: does not compile with the symbols of a CubeMX project"
+        grep -m3 'error' "$TMP/err" | sed 's/^/     /'
+        rc=1
+        continue
+    fi
+    for sym in $banned; do
+        if nm -u "$TMP/v.o" | grep -q -E "[[:space:]]_?$sym\$"; then
+            echo "FAIL $src: a firmware build of it calls $sym()"
+            rc=1
+        fi
+    done
+done
+[ $rc -eq 0 ] && echo "cubeide: littlefs prints nothing by itself, stb_vorbis has no FILE * code"
+
 # دو main() در یک پروژه: هیچ .c داخل پوشه‌های فرم‌ور نباید main تعریف کند
 for f in $(grep -l -E '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' \
                src/*.c backends/*.c top_api/*.c 2>/dev/null); do

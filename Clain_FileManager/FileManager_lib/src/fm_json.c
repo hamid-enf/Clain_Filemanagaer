@@ -614,7 +614,16 @@ static FM_Result token_resolve(const FM_Json *doc, const char *key,
             }
             while (*p >= '0' && *p <= '9')
             {
-                idx = idx * 10 + (size_t)(*p - '0');
+                size_t digit = (size_t)(*p - '0');
+
+                /* an index too large for size_t names no element; it
+                 * used to wrap around, so "a[4294967296]" on a 32-bit
+                 * target was "a[0]" */
+                if (idx > ((size_t)-1 - digit) / 10u)
+                {
+                    return FM_ERR_NOT_FOUND;
+                }
+                idx = idx * 10u + digit;
                 p++;
             }
             if (*p != ']')
@@ -1686,6 +1695,9 @@ FM_Result JsonWriter_UInt(FM_JsonWriter *w, uint32_t value)
     return FM_OK;
 }
 
+/* FLT_MAX without <float.h> */
+#define FM_JSON_FLT_MAX 3.402823466e+38f
+
 static void u64_to_str(uint64_t v, char *out)
 {
     char tmp[24];
@@ -1767,6 +1779,15 @@ FM_Result JsonWriter_Float(FM_JsonWriter *w, float value, int decimals)
         FM_Result r = w_value_start(w);
         if (r != FM_OK) return r;
     }
+    /* JSON has no number for "not a number" or for infinity; the value
+     * is written as null, which is what every reader expects there.
+     * (The cast to an integer below is undefined for them: NaN came out
+     * as 1511828489.4294966488, infinity as a finite number.) */
+    if (value != value || value > FM_JSON_FLT_MAX || value < -FM_JSON_FLT_MAX)
+    {
+        (void)w_put_str(w, "null");
+        return w->err;
+    }
     if (value < 0)
     {
         if (w_put(w, '-') != FM_OK)
@@ -1791,7 +1812,9 @@ FM_Result JsonWriter_Float(FM_JsonWriter *w, float value, int decimals)
     }
     ip = scaled / div;
     fp = scaled % div;
-    u32_to_str((uint32_t)ip, int_s);
+    /* the integer part reaches 9e9: 64 bits (it was printed through 32,
+     * so every value from 4294967296 up came out modulo 2^32) */
+    u64_to_str((uint64_t)ip, int_s);
     (void)w_put_str(w, int_s);
     if (decimals > 0)
     {

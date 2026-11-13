@@ -22,7 +22,8 @@ newer upstream version has to carry them over.
 |---|---|
 | picojpeg | chroma sampled 1x2 (ffmpeg's 4:2:2 and 4:4:4 Motion JPEG: `gChromaV2`, `gMCUOrg[8]`, two halves of `gCbG`); one-component frames with any sampling factors; the green channel computed from Cb and Cr together (saturated blue used to get green in it) |
 | h264bsd | memory through `FM_Alloc` / `FM_Free`; a strict-aliasing barrier; parameter sets freed on the error paths; a reason code for failed parameter sets; an unsigned shift in the Exp-Golomb reader (`h264bsd_vlc.c`, undefined behaviour on damaged input) |
-| stb_vorbis | memory through the library allocator; table built once; bounds on the three setup lengths and on sparse codebooks; unsigned shifts and adds where a signed one overflowed |
+| stb_vorbis | memory through the library allocator; table built once; bounds on the three setup lengths and on sparse codebooks; unsigned shifts and adds where a signed one overflowed; `STB_VORBIS_NO_STDIO` unless `STB_VORBIS_YES_STDIO` is defined (the library never uses the `FILE *` functions; a firmware project defines no symbol, so they were linked into it with `fopen` and friends) |
+| littlefs | `lfs_util.h` only: the debug / warning / error messages are off unless `LFS_YES_MESSAGES` is defined.  They went to `printf()` in a firmware build whatever `FM_DEBUG_LEVEL` said (the host `Makefile` always passed `-DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR`; a CubeIDE project passes nothing) |
 | dr_flac | no source change.  It is compiled inside `src/fm_flac.c` with `DR_FLAC_NO_STDIO` and `DRFLAC_API static`: no file I/O of its own and no exported `drflac_*` symbol, so an application can link its own dr_flac.  It decodes up to 24 bits a sample; wider streams are refused by `fm_flac.c` as unsupported |
 
 ## littlefs

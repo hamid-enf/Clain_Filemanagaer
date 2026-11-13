@@ -8,10 +8,16 @@
  *
  * Build the adapter with:  -DFM_USE_FATFS=1  (and your FatFS include path)
  *
- * The adapter provides the disk_read/disk_write/disk_ioctl/... bridge that
- * maps a FatFS drive number (pdrv) to an FM_Storage driver.  If you already
- * have your own diskio (e.g. Cube's user_diskio.c), build with
- * -DFM_FATFS_PROVIDE_DISKIO=0 and bind storages with FatFS_BindStorage().
+ * Who provides disk_read / disk_write / disk_ioctl (FM_FATFS_PROVIDE_DISKIO):
+ *   0  the project does (Cube's sd_diskio.c).  This is the default, it
+ *      is what FM_SD_DISKIO = CUBEMX in fm_board_config.h means.
+ *      FatFS_BindStorage() answers FM_ERR_UNSUPPORTED then: there is
+ *      nothing to bind.
+ *   1  this adapter does, mapping a FatFS drive number to an FM_Storage
+ *      driver bound with FatFS_BindStorage().  Selected by FM_SD_DISKIO =
+ *      FILEMANAGER, or by -DFM_FATFS_PROVIDE_DISKIO=1.  The project
+ *      still provides get_fattime() (Cube's fatfs.c has one) unless its
+ *      ffconf.h sets _FS_NORTC / FF_FS_NORTC to 1.
  *
  * Usage:
  *     FM_Storage storage;
@@ -38,12 +44,15 @@ FM_BEGIN_DECLS
 /* CUBEMX (پیش‌فرض): sd_diskio.c کیوب در بیلد می‌ماند؛ diskio نمی‌دهیم.
  * FILEMANAGER: diskio کتابخانه — فقط اگر خودتان sd_diskio را از بیلد
  * بردارید؛ لازم نیست. */
+/* A value given on the command line (-DFM_FATFS_PROVIDE_DISKIO=0/1)
+ * stands; it used to be thrown away here.  Without one it follows
+ * FM_SD_DISKIO. */
+#ifndef FM_FATFS_PROVIDE_DISKIO
 #if defined(FM_SD_DISKIO) && (FM_SD_DISKIO == FILEMANAGER)
-#undef FM_FATFS_PROVIDE_DISKIO
 #define FM_FATFS_PROVIDE_DISKIO 1
 #else
-#undef FM_FATFS_PROVIDE_DISKIO
 #define FM_FATFS_PROVIDE_DISKIO 0
+#endif
 #endif
 
 /* Initialize the adapter for the given FatFS drive number (0..FF_VOLUMES-1).
@@ -55,7 +64,12 @@ FM_BEGIN_DECLS
  * in) for as long as no other FM_FS has been given its slot in between;
  * once that happened FS_Mount answers FM_ERR_NOT_READY and FatFS_Init
  * has to be called again.  An FM_FS that is initialised and then never
- * mounted keeps its slot until it is initialised again. */
+ * mounted keeps its slot until it is initialised again -- or until all
+ * FM_MAX_FS slots are handed out and one more FatFS_Init comes: that
+ * one takes over the oldest slot that is not in a mount (such slots
+ * used to be lost for good: FM_MAX_FS calls that were never followed by
+ * a successful mount, and every later FatFS_Init was
+ * FM_ERR_NO_MEMORY).  A mounted volume never loses its slot. */
 FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv);
 
 /* Map a FatFS drive number to an FM_Storage driver.  Call before mounting

@@ -35,6 +35,18 @@ typedef char     TCHAR;
 #define _FFCONF     68300
 #endif
 
+/* The table of open objects (files and directories together), as the
+ * real ffconf.h has it.  16 is what the firmware project ships;
+ * -DMOCK_FS_LOCK=2 gives what CubeMX generates. */
+#ifndef MOCK_FS_LOCK
+#define MOCK_FS_LOCK 16
+#endif
+#ifdef MOCK_FATFS_MODERN
+#define FF_FS_LOCK  MOCK_FS_LOCK
+#else
+#define _FS_LOCK    MOCK_FS_LOCK
+#endif
+
 #define FF_MAX_SS   512
 #define FF_MAX_LFN  255
 /* One volume, like a CubeMX project with just the SD card.  Build with

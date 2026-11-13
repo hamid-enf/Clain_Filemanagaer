@@ -245,6 +245,29 @@ FM_Result Text_Find(const char *path, const char *needle, size_t *line_out)
     return FM_ERR_NOT_FOUND;
 }
 
+/* "<path>.fm_tmp", the file the three editing functions below build the
+ * new content in before it replaces `path`.  The name has to fit as a
+ * whole.  It used to be cut to the buffer: for a path of 153 to 159
+ * characters the "temporary" name was then a prefix of ".fm_tmp" short
+ * of the real one -- at 159 characters `path` itself, so the function
+ * truncated the file it was reading and then deleted it; a few
+ * characters shorter it was the name of whatever other file is called
+ * "<path>." or "<path>.fm", which was overwritten and deleted. */
+static FM_Result text_tmp_name(const char *path, char *tmp, size_t tmp_size)
+{
+    static const char suffix[] = ".fm_tmp";
+    size_t len = strlen(path);
+
+    if (len + sizeof(suffix) > tmp_size)
+    {
+        FM_Core_SetLastError(FM_ERR_TOO_LARGE);
+        return FM_ERR_TOO_LARGE;
+    }
+    memcpy(tmp, path, len);
+    memcpy(tmp + len, suffix, sizeof(suffix));
+    return FM_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* Streaming replace                                                   */
 /* ------------------------------------------------------------------ */
@@ -268,9 +291,11 @@ FM_Result Text_Replace(const char *path, const char *old_sub,
     }
     old_len = strlen(old_sub);
 
-    (void)strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-    (void)strncat(tmp, ".fm_tmp", sizeof(tmp) - strlen(tmp) - 1);
+    r = text_tmp_name(path, tmp, sizeof(tmp));
+    if (r != FM_OK)
+    {
+        return r;
+    }
 
     src = File_Open(path, FM_OPEN_READ);
     if (src == NULL)
@@ -384,9 +409,11 @@ FM_Result Text_InsertLine(const char *path, size_t at_line, const char *line)
         return FM_ERR_INVALID_ARGUMENT;
     }
 
-    (void)strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-    (void)strncat(tmp, ".fm_tmp", sizeof(tmp) - strlen(tmp) - 1);
+    r = text_tmp_name(path, tmp, sizeof(tmp));
+    if (r != FM_OK)
+    {
+        return r;
+    }
 
     src = File_Open(path, FM_OPEN_READ);
     if (src == NULL)
@@ -487,9 +514,11 @@ FM_Result Text_DeleteLine(const char *path, size_t line)
         return FM_ERR_INVALID_ARGUMENT;
     }
 
-    (void)strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-    (void)strncat(tmp, ".fm_tmp", sizeof(tmp) - strlen(tmp) - 1);
+    r = text_tmp_name(path, tmp, sizeof(tmp));
+    if (r != FM_OK)
+    {
+        return r;
+    }
 
     src = File_Open(path, FM_OPEN_READ);
     if (src == NULL)

@@ -105,7 +105,12 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
     HAL_NVIC_SetPriority(OTG_FS_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
   /* USER CODE BEGIN USB_OTG_FS_MspInit 1 */
-
+    /* Below the 1 ms tick (priority 0, main.c SysInit) and below the
+     * SD card, DMA and audio interrupts: the mass-storage callbacks run
+     * in this handler and wait for the medium with HAL timeouts.  At
+     * priority 0 (the line CubeMX writes above) nothing could interrupt
+     * them, the tick did not count, and a stalled card was a frozen MCU. */
+    HAL_NVIC_SetPriority(OTG_FS_IRQn, 6, 0);
   /* USER CODE END USB_OTG_FS_MspInit 1 */
   }
 }

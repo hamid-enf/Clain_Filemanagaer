@@ -181,6 +181,10 @@ typedef struct
     uint32_t     slot_size;     /* bytes from table A to table B         */
     uint32_t     journal_size;  /* bytes from journal record A to B      */
     FMFS_Move    move;
+    /* The pool (see FMFS_Init): a mount of this context has begun or is
+     * in place; and the order in which contexts were handed out. */
+    uint8_t      pool_busy;
+    uint32_t     pool_age;
 } FMFS_Context;
 
 typedef struct
@@ -205,6 +209,7 @@ typedef char fmfs_dir_handle_fits[
     (sizeof(FMFS_DirHandle) <= FM_FS_DIRHANDLE_SIZE) ? 1 : -1];
 
 static FMFS_Context g_fmfs[FM_MAX_FS];
+static uint32_t g_fmfs_age;
 
 static uint16_t fmfs_rd16(const uint8_t *p)
 {
@@ -523,6 +528,95 @@ static FM_Result fmfs_get_record(const FMFS_Context *ctx,
     return FM_OK;
 }
 
+/* The table in ctx->entries as a whole, with the data area it claims
+ * ([data_start, data_next)).  A record can be well formed by itself and
+ * still be one no FMFS ever wrote:
+ *
+ *   - a file whose bytes begin before the data area lies over the
+ *     tables and the journal: the first write to that file destroys the
+ *     volume;
+ *   - two files that share bytes: a write to one changes the other;
+ *   - a file that ends behind data_next: the next file to be placed is
+ *     put on top of it.
+ *
+ * A checksum does not catch these (it is computed over whatever is
+ * there), so they are tested: FM_ERR_CORRUPTED at mount and from
+ * FS_Check.  `strict` adds what holds for a version 2 table only, which
+ * is written in one piece: every name once, every entry inside a
+ * directory that exists.  (A version 1 table is rewritten record by
+ * record; a reset in the middle can leave a child without its parent,
+ * and such a volume was always mounted.  For the same reason its
+ * loader moves a stale data_next up instead of failing here.) */
+static FM_Result fmfs_table_valid(const FMFS_Context *ctx,
+                                  uint64_t data_start, uint64_t data_next,
+                                  FM_Bool strict)
+{
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+    {
+        const FMFS_Entry *e = &ctx->entries[i];
+
+        if (!e->used)
+        {
+            continue;
+        }
+        if (e->type == FM_ITEM_FILE && e->size != 0u)
+        {
+            /* (offset + size cannot wrap: fmfs_get_record) */
+            if (e->offset < data_start || e->offset + e->size > data_next)
+            {
+                return FM_ERR_CORRUPTED;
+            }
+            for (j = i + 1u; j < FM_FMFS_MAX_ENTRIES; j++)
+            {
+                const FMFS_Entry *o = &ctx->entries[j];
+
+                if (o->used && o->type == FM_ITEM_FILE && o->size != 0u &&
+                    e->offset < o->offset + o->size &&
+                    o->offset < e->offset + e->size)
+                {
+                    return FM_ERR_CORRUPTED;
+                }
+            }
+        }
+        if (strict && i != 0u)
+        {
+            char parent[FM_PATH_MAX];
+            FM_Bool parent_ok = FM_FALSE;
+
+            if (e->path[0] == '\0' ||
+                fmfs_parent_path(e->path, parent, sizeof(parent)) != FM_OK)
+            {
+                return FM_ERR_CORRUPTED;    /* a second root */
+            }
+            for (j = 0; j < FM_FMFS_MAX_ENTRIES; j++)
+            {
+                const FMFS_Entry *o = &ctx->entries[j];
+
+                if (!o->used || j == i)
+                {
+                    continue;
+                }
+                if (strcmp(o->path, e->path) == 0)
+                {
+                    return FM_ERR_CORRUPTED;    /* one name twice */
+                }
+                if (o->type == FM_ITEM_DIR && strcmp(o->path, parent) == 0)
+                {
+                    parent_ok = FM_TRUE;
+                }
+            }
+            if (!parent_ok)
+            {
+                return FM_ERR_CORRUPTED;
+            }
+        }
+    }
+    return FM_OK;
+}
+
 static uint16_t fmfs_used_count(const FMFS_Context *ctx)
 {
     uint16_t count = 0;
@@ -630,7 +724,33 @@ static FM_Result fmfs_load_v1(FMFS_Context *ctx)
     {
         return FM_ERR_CORRUPTED;
     }
-    return FM_OK;
+    /* A version 1 save writes the records first and the header last: a
+     * reset between the two leaves a file that ends behind the
+     * data_next of the old header.  That file is whole; only the mark
+     * is stale, and it is put right here: the volume mounts instead of
+     * being refused below, and the code that works out the free tail
+     * from data_next (growing a file on a full volume) starts behind
+     * the file.  (New files are placed by the live entries, not by the
+     * mark, so the plain case never wrote over such a file.) */
+    {
+        uint64_t end = 0;
+
+        for (i = 0; i < FM_FMFS_MAX_ENTRIES; i++)
+        {
+            const FMFS_Entry *e = &ctx->entries[i];
+
+            if (e->used && e->type == FM_ITEM_FILE && e->size != 0u &&
+                e->offset + e->size > end)
+            {
+                end = e->offset + e->size;  /* <= capacity: get_record */
+            }
+        }
+        if (end > ctx->data_next)
+        {
+            ctx->data_next = end;
+        }
+    }
+    return fmfs_table_valid(ctx, ctx->data_start, ctx->data_next, FM_FALSE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -915,6 +1035,10 @@ static FM_Result fmfs_table_read(FMFS_Context *ctx, uint8_t slot,
     }
     if (load)
     {
+        if (fmfs_table_valid(ctx, t.data_start, t.data_next, FM_TRUE) != FM_OK)
+        {
+            return FM_ERR_CORRUPTED;
+        }
         ctx->safe = 1;
         ctx->active = slot;
         ctx->seq = t.seq;
@@ -2213,6 +2337,10 @@ static FMFS_Context *fmfs_claim(FM_FS *fs)
     {
         ctx = NULL;
     }
+    if (ctx != NULL)
+    {
+        ctx->pool_busy = 1u;
+    }
     FM_Unlock();
     return ctx;
 }
@@ -2222,6 +2350,7 @@ static void fmfs_release(FMFS_Context *ctx)
     FM_Lock();
     ctx->storage = NULL;
     ctx->owner = NULL;
+    ctx->pool_busy = 0u;
     FM_Unlock();
 }
 
@@ -2300,7 +2429,16 @@ static FM_Result fmfs_unmount(FM_FS *fs)
 
 static FM_Result fmfs_format(FM_FS *fs)
 {
-    return fmfs_reset(fmfs_ctx(fs));
+    FMFS_Context *ctx = fmfs_ctx(fs);
+
+    /* FS_Format() only gets here for a mounted volume.  A direct call
+     * on an FM_FS that is not mounted has no storage to format: it used
+     * to read the block size through a NULL pointer. */
+    if (ctx == NULL || ctx->owner != fs || ctx->storage == NULL)
+    {
+        return FM_ERR_NOT_MOUNTED;
+    }
+    return fmfs_reset(ctx);
 }
 
 static FM_Result fmfs_check(FM_FS *fs)
@@ -2318,6 +2456,12 @@ static FM_Result fmfs_check(FM_FS *fs)
                                       (uint64_t)ctx->active * ctx->slot_size,
                                       FM_FALSE, NULL);
 
+        if (r == FM_OK)
+        {
+            /* and the table that is in use makes sense as a whole */
+            r = fmfs_table_valid(ctx, ctx->data_start, ctx->data_next,
+                                 FM_TRUE);
+        }
         return (r == FM_ERR_NOT_FOUND) ? FM_ERR_CORRUPTED : r;
     }
     return fmfs_load(ctx);
@@ -2991,7 +3135,11 @@ static FM_Result fmfs_get_free(FM_FS *fs, uint64_t *free_bytes,
 static FM_Result fmfs_get_type(FM_FS *fs, char *type, size_t type_size)
 {
     (void)fs;
-    if (type == NULL || type_size < sizeof("FMFS"))
+    if (type == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (type_size < sizeof("FMFS"))
     {
         return FM_ERR_TOO_LARGE;
     }
@@ -3097,10 +3245,30 @@ FM_Result FMFS_Init(FM_FS *fs)
             ctx = &g_fmfs[i];
         }
     }
+    /* None free.  A context that an earlier FMFS_Init() handed out and
+     * that never got as far as a mount (FS_Mount() refused before the
+     * driver was asked, or never called) is in use by nobody, and
+     * nothing gave it back: FM_MAX_FS of them ended every later
+     * FMFS_Init() with FM_ERR_NO_MEMORY.  The oldest one is taken over;
+     * its FM_FS answers FM_ERR_NOT_READY to FS_Mount() until it is
+     * initialised again (the rule anyway: FMFS_Init() before each
+     * FS_Mount()). */
+    if (ctx == NULL)
+    {
+        for (i = 0; i < FM_MAX_FS; i++)
+        {
+            if (!g_fmfs[i].pool_busy &&
+                (ctx == NULL || g_fmfs[i].pool_age < ctx->pool_age))
+            {
+                ctx = &g_fmfs[i];
+            }
+        }
+    }
     if (ctx != NULL)
     {
         memset(ctx, 0, sizeof(*ctx));
         ctx->owner = fs;
+        ctx->pool_age = ++g_fmfs_age;
     }
     FM_Unlock();
     if (ctx == NULL)

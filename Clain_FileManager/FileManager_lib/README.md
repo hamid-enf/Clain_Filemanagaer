@@ -188,6 +188,42 @@ File_WriteText("/boot/status.txt", "ready");
 
 The hardware callbacks remain device-specific, but registration, mounting, metadata and all file operations stay behind the same API.
 
+Rules that hold for every storage and file system:
+
+* **`Storage_Unmount` / `Storage_Format` are `FM_ERR_BUSY` while a file
+  system is mounted on the storage.**  `FS_Unmount` first (it unmounts
+  the storage too); to empty a mounted volume use `FS_Format`.
+* **`FS_Mount` of an `FM_FS` that was never initialised** (all zero, or
+  the `*_Init` call failed and its result was not checked) is
+  `FM_ERR_INVALID_ARGUMENT`.
+* **`FM_MAX_FS` (4) volumes per kind of file system.**  `FMFS_Init`,
+  `LittleFS_Init` and `FatFS_Init` each hand out one of 4 contexts;
+  `FS_Unmount` and a failed `FS_Mount` give it back.  When all are
+  handed out, the next `*_Init` takes over the oldest one that is not in
+  a mount -- the `FM_FS` that had it answers `FM_ERR_NOT_READY` to
+  `FS_Mount` until it is initialised again.  A mounted volume never
+  loses its context.
+* **`FS_Format` leaves the volume mounted and empty.**  A LittleFS
+  volume that does not mount (auto-format off, medium blank or damaged)
+  has no mount path to format: `LittleFS_FormatStorage(&storage)`, then
+  `FS_Mount` with the same `FM_FS`.
+* **`FS_Check`** verifies the metadata, not the content of files: on
+  FMFS the table (checksum, and that it makes sense as a whole); on
+  LittleFS every metadata block of the volume.  On FatFS and POSIX it
+  examines nothing and answers `FM_OK`.
+* **LittleFS geometry.**  A storage whose erase unit is smaller than
+  128 bytes (RAM, SDRAM: 1) gets blocks that are a multiple of the unit
+  and at least 512 bytes; a storage with room for fewer than 2 blocks is
+  `FM_ERR_NO_SPACE` at mount.
+* **`FM_Qspi_Write` erases only when it has to.**  Per sector: bytes
+  that are already there cost nothing; bytes that are still `0xFF` are
+  programmed in place (no erase -- this is how LittleFS appends); a
+  whole sector is erased and programmed; anything else is
+  read-modify-erase-write through the sector buffer given to
+  `FM_Qspi_Init` (`FM_ERR_UNSUPPORTED` without one).  After a soft reset
+  of the chip the driver enters 4-byte address mode again (parts above
+  16 MB), and an erase that timed out is repeated, not reported as done.
+
 ## EEPROM and USB
 
 EEPROMs can be used directly for byte operations:
@@ -229,6 +265,21 @@ Changing a switch (`make FM_USE_JSON=0`, `CFLAGS_EXTRA=...`, `CC=clang`)
 rebuilds the objects by itself: the compiler and its flags are kept in
 `.fm_build_flags` and every object depends on it (GNU make 4.2 or newer;
 with an older make run `make clean` first).
+
+A header that changes rebuilds the objects that include it (`-MMD -MP`
+dependency files next to the objects; `tools/check_deps.sh` checks it).
+
+**One set of options for the library and the application.**
+`FileManager_Init()` is a macro: it passes the sizes the *application*
+sees for `FM_File`, `FM_Dir`, `FM_Storage`, `FM_FS` and `FM_DirEntry` to
+`FileManager_InitChecked()`, which compares them with the sizes the
+*library* was compiled with.  If they differ -- a prebuilt
+`libfilemanager.a` and an application with another `FM_PATH_MAX`,
+`FM_NAME_MAX` or `FM_USE_*` set -- it returns `FM_ERR_INTERNAL` (-26)
+and initialises nothing, instead of letting the two sides write over
+each other's structures later.  Check its result.  The check sees only
+options that change one of those five sizes.  `-DFM_NO_ABI_CHECK=1`
+removes the macro; `(FileManager_Init)()` calls the plain function.
 
 **What the tests are, and are not.**  Everything above runs on a PC: the
 suite as a 64-bit and as a 32-bit program, under ASan / UBSan / TSan and
@@ -289,7 +340,25 @@ Project settings (Properties > C/C++ Build > Settings > MCU GCC Compiler):
 compiles every `.c` outside the four firmware folders with the macros of
 a CubeMX project and **no include path at all**, and fails if one of
 them leaves a symbol behind or does not compile.  A new host-only `.c`
-without the guard fails that check.
+without the guard fails that check.  It also fails when a vendored
+source would pull `printf` / `fopen` into the firmware: the littlefs
+trace / debug / warn / error messages are compiled only with
+`-DLFS_YES_MESSAGES`, and the `FILE *` half of stb_vorbis only with
+`-DSTB_VORBIS_YES_STDIO`.
+
+**Three settings of the CubeMX project the library depends on.**  They
+are in generated files; `sh tools/check_board.sh` (part of `make check`,
+`BOARD=<project folder>`, silent when there is no project next to the
+library) reads the first two back:
+
+| Setting | Where | Needed | Why |
+|---|---|---|---|
+| `_FS_LOCK` | `FATFS/Target/ffconf.h` | 0, or at least 12 (`FM_MAX_OPEN_FILES` 8 + `FM_MAX_OPEN_DIRS` 4); the project has 16 | CubeMX writes 2: a third open object is `FR_TOO_MANY_OPEN_FILES`, so `Directory_Copy` of a folder with one file failed with `FM_ERR_NO_MEMORY`.  The adapter stops the build with an `#error` below 12 (`-DFM_FATFS_ALLOW_SMALL_LOCK=1` to build anyway). **This line is outside the `USER CODE` blocks: CubeMX puts 2 back when it regenerates the project.**  Set the `FS_LOCK` parameter of the FATFS middleware in CubeMX to 16 as well, so that a regeneration writes 16. |
+| 1 ms tick priority | `HAL_InitTick(0U)` in `Core/Src/main.c` (`USER CODE BEGIN SysInit`) | numerically lower (= more urgent) than the USB interrupt | With USB mass storage served inside the USB interrupt (`UsbMsc_Storage*` called by the ST device stack), the SD driver waits with `HAL_GetTick()` timeouts in that interrupt.  A tick that cannot interrupt it never counts: a card that stops answering hangs the board for good. |
+| `OTG_FS_IRQn` priority | `USB_DEVICE/Target/usbd_conf.c` (`USER CODE BEGIN USB_OTG_FS_MspInit 1`), set to 6 | numerically higher than the tick and than `SDMMC1_IRQn` (1) | same reason: the SD interrupt has to get through while the USB interrupt waits for it. |
+
+The `UsbSd_Poll()` way of serving the PC (from the main loop) never had
+the problem of the last two rows.  None of this is tested on hardware.
 
 ### CMake (STM32 / ESP32 / desktop)
 
@@ -361,8 +430,12 @@ needs a compiler that can do that: `pip install ziglang` (used as
 `python3 -m ziglang cc`), `zig` on the PATH, or a `gcc -m32` with its
 32-bit libraries.  Without one it prints `SKIP` and the rest of
 `make check` still runs.
-`make matrix` / `make matrix-asan` build and run 49 feature and
-debug-level combinations; `make tsan` runs the threaded suite under
+It also runs the host tests of the board glue (`make usbmsctest
+saveexamplestest audiorecordtest videohooks hwjpegtest tapstest`) and the
+`tools/check_*.sh` scripts named in this file.
+`make matrix` / `make matrix-asan` build and run every feature and
+debug-level combination listed in `tools/check_matrix.sh` (57), each from
+scratch; `make tsan` runs the threaded suite under
 ThreadSanitizer.
 
 ## Audio: WAV + MP3
@@ -629,9 +702,15 @@ Notes:
   Set either option to 0 to switch the checkpoints off.
   The distance is in bytes, so in time it depends on the format: 256 KB
   is about 1.5 s of 44.1 kHz stereo WAV, 6 s of 44.1 kHz stereo ADPCM and
-  **64 s of 8 kHz mono ADPCM**.  A recording shorter than that is an empty
-  file after a power loss (on FAT its size is still 0); for low rates
-  make `FM_AUDIO_ENC_SYNC_BYTES` smaller.
+  **64 s of 8 kHz mono ADPCM**.  A recording shorter than that has 0 in
+  its header lengths after a power loss: on FAT the file size is still 0
+  (nothing to play); where the bytes did reach the medium this library
+  and libav play them to the end of the file, a reader that trusts the
+  header shows an empty track.  Count on nothing before the first
+  checkpoint; for low rates make `FM_AUDIO_ENC_SYNC_BYTES` smaller.
+  A FLAC file that was cut ends inside a frame: this library plays the
+  whole frames and reports the end, libav plays the same frames and then
+  reports "invalid data".
   (A WAV whose `data` length is 0 with sound behind it -- from another
   recorder, or a stream -- is played to the end of the file.)
 * **Write error / card full.**  The first error stays the answer of every
@@ -693,9 +772,13 @@ it was, mind it when the object lives on a small stack.
 `Text_Replace`, `File_Insert`/`File_DeleteRange`/`File_ReplaceRange` and
 the crash-safe logger all rely on **rename-over** semantics: renaming
 onto an existing file replaces it.  This is provided uniformly by every
-adapter — POSIX (native), FMFS, LittleFS and FatFS (the adapter removes
-the destination first; a non-empty directory destination is refused with
-`FM_ERR_NOT_EMPTY`).  A same-path rename is a no-op, and adapters that
+adapter — POSIX (native), FMFS, LittleFS and FatFS; a non-empty
+directory destination is refused with `FM_ERR_NOT_EMPTY`.  The FatFS
+adapter moves a destination file aside (`~fmrn.tmp` in the same folder),
+renames, and only then deletes it, so a rename that fails loses nothing;
+and because FAT names ignore case, `a.txt` -> `A.TXT` (or a long name ->
+its 8.3 alias) is recognised as the same entry and simply gets the new
+name.  A same-path rename is a no-op, and adapters that
 do not implement rename at all are handled safely: `File_Move` /
 `Directory_Move` fall back to copy + delete and `File_Rename` /
 `Directory_Rename` return `FM_ERR_UNSUPPORTED`.
@@ -722,7 +805,27 @@ do not implement rename at all are handled safely: `File_Move` /
   the callback must not add or remove entries in the tree it is shown.
 * **Long names.** An entry name that does not fit `FM_NAME_MAX` (64)
   makes the listing of its directory fail with `FM_ERR_TOO_LARGE`.  For
-  cards written on a PC set `FM_NAME_MAX` to 256.
+  cards written on a PC set `FM_NAME_MAX` to 256.  The library does not
+  make such a name itself: creating, renaming, copying or moving to a
+  name of `FM_NAME_MAX` characters or more is `FM_ERR_TOO_LARGE` on
+  every file system.
+* **`Directory_Rename`** renames a directory, nothing else: a file is
+  `FM_ERR_NOT_DIRECTORY`, a mount point or a destination inside the
+  directory itself `FM_ERR_INVALID_ARGUMENT`, a directory with an open
+  file on or below it `FM_ERR_BUSY`.  `Directory_Move` on one volume
+  follows the same rules.
+* **`Text_Replace` / `Text_InsertLine` / `Text_DeleteLine`** work
+  through `<path>.fm_tmp`; a path longer than `FM_PATH_MAX` - 8
+  characters is `FM_ERR_TOO_LARGE` and the file is not touched.
+* **FatFS.**  `File_GetInfo` / `Directory_Exists` of the mount point
+  itself work (a directory).  `FM_OPEN_WRITE | FM_OPEN_TRUNCATE` without
+  `FM_OPEN_CREATE` does not create a missing file (`FM_ERR_NOT_FOUND`),
+  as on the other file systems.
+* **`Path_Join`** may write its result over either argument.
+* **NaN and infinity.**  `JsonWriter_Float` writes `null` for them (JSON
+  has no such numbers) and clamps beyond +-9e9; `Logger_Write` writes
+  `nan` / `inf` / `-inf` in CSV and `null` in JSON lines.  A JSON array
+  index too large for `size_t` names no element (`FM_ERR_NOT_FOUND`).
 * **Explorer.** A listing holds at most `FM_MAX_EXPLORER_ITEMS` entries;
   `Explorer_IsTruncated()` says when the directory has more.
 * **`Text_ReadLine`** removes the `\r` of a `\r\n` line end; a `\r`
@@ -881,6 +984,13 @@ uint8_t small[80 * 45 * 3];
 Video_DecodeFrameScaled(&v, small, sizeof(small), 80, 45, FM_SCALE_BILINEAR);
 ```
 
+Bilinear maps pixel centres onto pixel centres and mixes the four source
+pixels around each destination pixel (the edge pixel is repeated).  It
+does not average the pixels in between: when a picture is made smaller
+by more than a factor of 2, source pixels are skipped, as with nearest
+(a resizer that filters first, like Pillow's, gives a smoother result
+there).
+
 ## Media player
 
 A convenience layer over audio/video: scan a folder, step through tracks and
@@ -1013,6 +1123,16 @@ host run cannot show is real interrupt/priority behaviour on the target.
   RAM/SDRAM storage a volume whose metadata cannot be read (both tables
   on version 2) is formatted at mount; on any other storage the mount
   fails with `FM_ERR_CORRUPTED` and nothing is erased.
+- **A table that makes no sense is refused.**  A table can pass its
+  checksum and still be nonsense: a file that starts in the metadata
+  area, two files on the same bytes; on version 2 also a file behind the
+  end of the used area, one name twice, an entry whose folder does not
+  exist, a second root.  `FS_Mount` and `FS_Check` answer
+  `FM_ERR_CORRUPTED` for these (on RAM / SDRAM the volume is formatted
+  at mount, as for any unreadable table).  Before, the first write went
+  wherever the table pointed.  One case is repaired instead: a version 1
+  volume where a reset fell between saving the entries and saving the
+  header mounts, and the end mark is moved behind the last file.
 - **Space is reclaimed automatically.**  A file that grows takes the
   space behind it, else moves into the largest hole deleted files left,
   and only then is the data area compacted (and, if needed, the free

@@ -37,6 +37,18 @@ FM_Result Directory_Create(const char *path);
 FM_Result Directory_Delete(const char *path);            /* empty only  */
 FM_Result Directory_DeleteRecursive(const char *path);
 FM_Result Directory_Exists(const char *path, FM_Bool *exists);
+/* Rename / move a directory within one volume (the tree below it moves
+ * with it).  Not a rename:
+ *   FM_ERR_NOT_DIRECTORY     old_path is a file (use File_Rename)
+ *   FM_ERR_INVALID_ARGUMENT  old_path is a mount point, or new_path
+ *                            lies inside old_path
+ *   FM_ERR_UNSUPPORTED       the two are on different volumes (use
+ *                            Directory_Move)
+ *   FM_ERR_BUSY              a file on or below old_path is open
+ *   FM_ERR_TOO_LARGE         the new name has FM_NAME_MAX characters or
+ *                            more
+ * Onto its own name is FM_OK and changes nothing.  Directory_Move on one
+ * volume is this call. */
 FM_Result Directory_Rename(const char *old_path, const char *new_path);
 FM_Result Directory_GetInfo(const char *path, FM_FileInfo *info);
 

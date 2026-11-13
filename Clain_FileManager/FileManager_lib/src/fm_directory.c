@@ -193,6 +193,14 @@ FM_Result Directory_Create(const char *path)
         FM_VFS_Unpin(mount);
         return FM_ERR_UNSUPPORTED;
     }
+    if (FM_Path_NameTooLong(rel, FM_TRUE))
+    {
+        /* this call makes the parents too: none of the names it would
+         * make may be one that cannot be listed afterwards */
+        FM_VFS_Unpin(mount);
+        FM_Core_SetLastError(FM_ERR_TOO_LARGE);
+        return FM_ERR_TOO_LARGE;
+    }
 
     /* Fast path: try the full path first. */
     FM_FS_CALL(mount, r, mkdir(mount->fs, rel));
@@ -343,7 +351,62 @@ FM_Result Directory_Rename(const char *old_path, const char *new_path)
         FM_VFS_Unpin(m1);
         return FM_ERR_UNSUPPORTED;
     }
-    FM_FS_CALL(m1, r, rename(m1->fs, r1, r2));
+    /* This used to hand both names to the backend as they came.  So it
+     * renamed a plain file, renamed a folder with a file open inside it
+     * (File_Rename refuses that: the handle goes on writing where nobody
+     * finds it), and moved a folder into itself -- on LittleFS that
+     * worked, and left a loop no walk could leave and no path could
+     * reach. */
+    {
+        const char *a = r1;
+        const char *b = r2;
+        FM_Bool nocase = FM_Mount_NoCase(m1);
+        size_t i;
+
+        while (*a == '/') a++;
+        while (*b == '/') b++;
+        if (*a == '\0')
+        {
+            r = FM_ERR_INVALID_ARGUMENT;    /* the mount point itself */
+        }
+        else if (m1->fs->ops.stat != NULL)
+        {
+            FM_FileInfo info;
+
+            FM_FS_CALL(m1, r, stat(m1->fs, r1, &info));
+            if (r == FM_OK && info.type != FM_ITEM_DIR)
+            {
+                r = FM_ERR_NOT_DIRECTORY;
+            }
+        }
+        for (i = 0u; r == FM_OK; i++)
+        {
+            char x = a[i];
+            char y = b[i];
+
+            if (nocase)
+            {
+                if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+            }
+            if (x == '\0')
+            {
+                if (y == '/' && b[i + 1u] != '\0')
+                {
+                    r = FM_ERR_INVALID_ARGUMENT;    /* into itself */
+                }
+                break;
+            }
+            if (x != y)
+            {
+                break;
+            }
+        }
+    }
+    if (r == FM_OK)
+    {
+        r = FM_File_RenameResolved(m1, r1, r2);
+    }
     FM_VFS_Unpin(m1);
     FM_Core_SetLastError(r);
     return r;
@@ -1152,6 +1215,34 @@ static FM_Result dir_relation(const char *a, const char *b, int *rel)
             nb[--lb] = '\0';
         }
     }
+    {
+        /* on a FAT volume "/sd/Dir" and "/sd/dir" are one folder */
+        FM_MountEntry *m = NULL;
+        FM_MountEntry *m2 = NULL;
+        char rel_a[FM_PATH_MAX];
+
+        if (FM_VFS_Resolve(na, &m, rel_a, sizeof(rel_a)) == FM_OK &&
+            FM_VFS_Resolve(nb, &m2, rel_a, sizeof(rel_a)) == FM_OK &&
+            m == m2 && FM_Mount_NoCase(m))
+        {
+            size_t i;
+
+            for (i = 0u; na[i] != '\0'; i++)
+            {
+                if (na[i] >= 'A' && na[i] <= 'Z')
+                {
+                    na[i] = (char)(na[i] - 'A' + 'a');
+                }
+            }
+            for (i = 0u; nb[i] != '\0'; i++)
+            {
+                if (nb[i] >= 'A' && nb[i] <= 'Z')
+                {
+                    nb[i] = (char)(nb[i] - 'A' + 'a');
+                }
+            }
+        }
+    }
     if (strcmp(na, nb) == 0)
     {
         *rel = 1;
@@ -1241,7 +1332,9 @@ FM_Result Directory_Move(const char *src, const char *dst,
     if (FM_VFS_Resolve(dst, &m2, r2, sizeof(r2)) == FM_OK && m1 == m2 &&
         m1->fs->ops.rename != NULL)
     {
-        FM_FS_CALL(m1, r, rename(m1->fs, r1, r2));
+        /* same volume: one rename, under the rules of every rename (a
+         * file open inside the folder makes it FM_ERR_BUSY) */
+        r = FM_File_RenameResolved(m1, r1, r2);
         FM_VFS_Unpin(m1);
         FM_Core_SetLastError(r);
         return r;

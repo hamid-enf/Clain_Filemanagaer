@@ -48,6 +48,35 @@
 typedef DWORD LBA_t;
 #endif
 
+/* FatFS keeps one table for every object that is open -- files and
+ * directories together, over all volumes -- and its size is _FS_LOCK
+ * (FF_FS_LOCK from R0.13) in ffconf.h.  CubeMX writes 2 there.  With 2,
+ * a third open of anything fails with FR_TOO_MANY_OPEN_FILES, which is
+ * what Directory_Copy needs for its first file (the directory, the
+ * source, the destination): every copy of a folder failed with
+ * FM_ERR_NO_MEMORY on the board, while the host tests, whose mock had no
+ * such table, passed.  The adapter can hold FM_MAX_OPEN_FILES files and
+ * FM_MAX_OPEN_DIRS directories of one volume open; the table has to be
+ * that large.  (0 switches the table off and is accepted: FatFS then
+ * does not notice a file that is opened twice.)
+ *
+ * -DFM_FATFS_ALLOW_SMALL_LOCK=1 turns the error off for a project that
+ * knows it never has more than _FS_LOCK objects open at a time. */
+#if defined(FF_FS_LOCK)
+#define FM_FATFS_LOCK_SLOTS FF_FS_LOCK
+#elif defined(_FS_LOCK)
+#define FM_FATFS_LOCK_SLOTS _FS_LOCK
+#else
+#define FM_FATFS_LOCK_SLOTS 0
+#endif
+#ifndef FM_FATFS_ALLOW_SMALL_LOCK
+#define FM_FATFS_ALLOW_SMALL_LOCK 0
+#endif
+#if !FM_FATFS_ALLOW_SMALL_LOCK && (FM_FATFS_LOCK_SLOTS > 0) && \
+    (FM_FATFS_LOCK_SLOTS < (FM_MAX_OPEN_FILES + FM_MAX_OPEN_DIRS))
+#error "ffconf.h: _FS_LOCK / FF_FS_LOCK is smaller than FM_MAX_OPEN_FILES + FM_MAX_OPEN_DIRS (Directory_Copy fails with 2). Raise it (16 is a good value) or build with -DFM_FATFS_ALLOW_SMALL_LOCK=1."
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Context and handles                                                 */
 /* ------------------------------------------------------------------ */
@@ -90,6 +119,10 @@ typedef struct
      * FatFS_Init(), and what refuses any other one. */
     FM_FS  *owner;
     FM_FS  *last;
+    /* The pool (see FatFS_Init): a mount of this slot has begun or is
+     * in place; and the order in which slots were handed out. */
+    uint8_t  pool_busy;
+    uint32_t pool_age;
 
     uint8_t file_store[FM_MAX_OPEN_FILES][sizeof(FIL) + 32u];
     FIL    *files[FM_MAX_OPEN_FILES];
@@ -120,6 +153,7 @@ typedef struct
 } FatFSDirHandle;
 
 static FatFS_Ctx g_fatfs[FM_MAX_FS];
+static uint32_t g_fatfs_age;
 
 #if FM_FATFS_PROVIDE_DISKIO
 static FM_Storage *g_fatfs_storage[FF_VOLUMES];
@@ -136,12 +170,14 @@ static void fatfs_ctx_reset(FatFS_Ctx *ctx)
     FM_FS *owner = ctx->owner;
     FM_FS *last = ctx->last;
     uint8_t pdrv = ctx->pdrv;
+    uint32_t age = ctx->pool_age;
     uint32_t i;
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->owner = owner;
     ctx->last = last;
     ctx->pdrv = pdrv;
+    ctx->pool_age = age;
     ctx->fatfs = (FATFS *)fm_place_aligned(ctx->fatfs_store,
                                            sizeof(ctx->fatfs_store),
                                            sizeof(FATFS),
@@ -290,6 +326,10 @@ static FatFS_Ctx *fatfs_claim(FM_FS *fs)
     {
         ctx = NULL;
     }
+    if (ctx != NULL)
+    {
+        ctx->pool_busy = 1u;
+    }
     FM_Unlock();
     return ctx;
 }
@@ -387,10 +427,10 @@ static BYTE fatfs_flags(uint32_t mode)
         else if (flags & FA_WRITE)   flags |= FA_OPEN_ALWAYS;
         else                         flags |= FA_OPEN_EXISTING;
     }
-    else if (mode & FM_OPEN_TRUNCATE)
-    {
-        flags |= FA_CREATE_ALWAYS;
-    }
+    /* TRUNCATE without CREATE opens a file that exists and empties it
+     * (fatfs_file_open does that).  It used to be FA_CREATE_ALWAYS,
+     * which also made the file when it was not there -- the other
+     * backends answer FM_ERR_NOT_FOUND. */
     if (mode & FM_OPEN_APPEND)
     {
         flags |= FA_OPEN_APPEND;
@@ -433,6 +473,22 @@ static FM_Result fatfs_file_open(FM_FS *fs, void *fh, const char *path, uint32_t
         ctx->file_used[i] = 0;
         FM_Unlock();
         return fatfs_map_err(fr);
+    }
+    if ((mode & FM_OPEN_TRUNCATE) != 0u && (mode & FM_OPEN_CREATE) == 0u &&
+        (mode & FM_OPEN_WRITE) != 0u)
+    {
+        /* opened as it is; this empties it.  (With APPEND the position
+         * is the end, so go to the start first.) */
+        fr = f_lseek(ctx->files[i], 0);
+        if (fr == FR_OK) fr = f_truncate(ctx->files[i]);
+        if (fr != FR_OK)
+        {
+            (void)f_close(ctx->files[i]);
+            FM_Lock();
+            ctx->file_used[i] = 0;
+            FM_Unlock();
+            return fatfs_map_err(fr);
+        }
     }
     h->index = (uint16_t)i;
     h->used = 1;
@@ -567,6 +623,27 @@ static FM_Result fatfs_stat(FM_FS *fs, const char *path, FM_FileInfo *info)
 
     if (path == NULL || info == NULL) return FM_ERR_INVALID_ARGUMENT;
     fatfs_path(ctx, path, fpath, sizeof(fpath));
+    {
+        const char *p = path;
+
+        while (*p == '/') p++;
+        if (*p == '\0')
+        {
+            /* The root of the volume.  It has no directory entry, and
+             * f_stat("0:/") answers FR_INVALID_NAME: File_GetInfo and
+             * Directory_Exists of the mount point itself failed with
+             * FM_ERR_INVALID_PATH on a card, and worked on every other
+             * backend.  Opening it says whether the volume is there. */
+            DIR d;
+
+            fr = f_opendir(&d, fpath);
+            if (fr != FR_OK) return fatfs_map_err(fr);
+            (void)f_closedir(&d);
+            memset(info, 0, sizeof(*info));
+            info->type = FM_ITEM_DIR;
+            return FM_OK;
+        }
+    }
     fr = f_stat(fpath, &fi);
     if (fr != FR_OK) return fatfs_map_err(fr);
 
@@ -602,8 +679,69 @@ static FM_Result fatfs_rename(FM_FS *fs, const char *old_path, const char *new_p
     fr = f_rename(fold, fnew);
     if (fr == FR_EXIST)
     {
-        (void)f_unlink(fnew);
-        fr = f_rename(fold, fnew);
+        /* Something has the new name.  It may be the file itself: on a
+         * FAT volume "a.txt" and "A.TXT" are one entry, and so are a
+         * long name and its 8.3 alias ("verylongname.txt" and
+         * "VERYLO~1.TXT").  FatFS up to R0.12c answers FR_EXIST for
+         * those too, and this function used to delete "the target" and
+         * rename again -- deleting the only copy.
+         *
+         * So the target is not deleted, it is moved aside.  If the old
+         * name is gone after that, both names were the same entry, and
+         * giving it the new name finishes the rename.  Otherwise the
+         * rename is done and only then the old target is removed; if
+         * the rename fails, the target goes back to its name.
+         *
+         * A target that is a directory is the exception to that order:
+         * moving it aside works whatever is in it, so "is it empty" has
+         * to be settled before the rename, by removing it (f_unlink
+         * takes an empty directory only).  A directory with entries
+         * goes back to its name and the answer is FM_ERR_NOT_EMPTY, as
+         * on the other file systems. */
+        char aside[FM_PATH_MAX];
+        FILINFO fi;
+        size_t cut = strlen(fnew);
+
+        while (cut > 0u && fnew[cut - 1u] != '/') cut--;
+        if (cut + sizeof("~fmrn.tmp") > sizeof(aside))
+        {
+            return FM_ERR_TOO_LARGE;
+        }
+        memcpy(aside, fnew, cut);
+        memcpy(aside + cut, "~fmrn.tmp", sizeof("~fmrn.tmp"));
+        (void)f_unlink(aside);          /* left from a reset, if at all */
+        fr = f_rename(fnew, aside);
+        if (fr == FR_OK && f_stat(fold, &fi) == FR_OK &&
+            f_stat(aside, &fi) == FR_OK && (fi.fattrib & AM_DIR) != 0)
+        {
+            if (f_unlink(aside) != FR_OK)
+            {
+                (void)f_rename(aside, fnew);
+                return FM_ERR_NOT_EMPTY;
+            }
+            fr = f_rename(fold, fnew);
+            if (fr != FR_OK)
+            {
+                (void)f_mkdir(fnew);    /* it was empty: as it was */
+            }
+        }
+        else if (fr == FR_OK)
+        {
+            fr = f_rename(fold, fnew);
+            if (fr == FR_OK)
+            {
+                (void)f_unlink(aside);
+            }
+            else if (fr == FR_NO_FILE)
+            {
+                /* the old name went aside with it: one and the same */
+                fr = f_rename(aside, fnew);
+            }
+            else
+            {
+                (void)f_rename(aside, fnew);
+            }
+        }
     }
     return fatfs_map_err(fr);
 }
@@ -735,16 +873,24 @@ static FM_Result fatfs_get_type(FM_FS *fs, char *type, size_t type_size)
 {
     FatFS_Ctx *ctx = fatfs_ctx(fs);
 
-    if (type == NULL || type_size < sizeof("FAT")) return FM_ERR_INVALID_ARGUMENT;
+    const char *name;
+    size_t need;
+
+    if (type == NULL) return FM_ERR_INVALID_ARGUMENT;
 
     switch (ctx->fatfs->fs_type)
     {
-    case FS_FAT12: (void)strcpy(type, "FAT12"); break;
-    case FS_FAT16: (void)strcpy(type, "FAT16"); break;
-    case FS_FAT32: (void)strcpy(type, "FAT32"); break;
-    case FS_EXFAT: (void)strcpy(type, "exFAT"); break;
-    default:       (void)strcpy(type, "FAT");   break;
+    case FS_FAT12: name = "FAT12"; break;
+    case FS_FAT16: name = "FAT16"; break;
+    case FS_FAT32: name = "FAT32"; break;
+    case FS_EXFAT: name = "exFAT"; break;
+    default:       name = "FAT";   break;
     }
+    /* the room is checked against the name that is copied (it was
+     * checked against "FAT", 4 bytes, and then 6 were written) */
+    need = strlen(name) + 1u;
+    if (type_size < need) return FM_ERR_TOO_LARGE;
+    memcpy(type, name, need);
     return FM_OK;
 }
 
@@ -798,12 +944,31 @@ FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv)
             ctx = &g_fatfs[i];
         }
     }
+    /* None free.  A slot that an earlier FatFS_Init() handed out and
+     * that never got as far as a mount (FS_Mount() refused before the
+     * driver was asked, or never called) is in use by nobody, and
+     * nothing gave it back: FM_MAX_FS of them ended every later
+     * FatFS_Init() with FM_ERR_NO_MEMORY.  The oldest one is taken over;
+     * its FM_FS answers FM_ERR_NOT_READY to FS_Mount() until it is
+     * initialised again. */
+    if (ctx == NULL)
+    {
+        for (i = 0; i < FM_MAX_FS; i++)
+        {
+            if (!g_fatfs[i].pool_busy &&
+                (ctx == NULL || g_fatfs[i].pool_age < ctx->pool_age))
+            {
+                ctx = &g_fatfs[i];
+            }
+        }
+    }
     if (ctx != NULL)
     {
         ctx->owner = fs;
         ctx->last = fs;
         ctx->pdrv = pdrv;
         fatfs_ctx_reset(ctx);
+        ctx->pool_age = ++g_fatfs_age;
     }
     FM_Unlock();
 

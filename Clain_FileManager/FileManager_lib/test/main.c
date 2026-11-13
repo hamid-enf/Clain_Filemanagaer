@@ -3765,6 +3765,77 @@ static void test_mediacache(void)
         }
     }
 
+    TEST("MediaCache: a cached file that is open is not evicted, the next one is");
+    {
+        static uint8_t big[6000];
+        static uint8_t back[6000];
+        char big_cached[FM_PATH_MAX];
+        char small_cached[FM_PATH_MAX];
+        FM_File *playing = NULL;
+        FM_Bool there = FM_FALSE;
+        uint32_t n = 0;
+        uint64_t total = 0;
+        FM_Result r;
+
+        for (i = 0; i < sizeof(big); i++) big[i] = (uint8_t)(i * 7u + 3u);
+        (void)Directory_DeleteRecursive("/mccache2");
+        r = FM_Transfer_SaveFile("/mcsrc/big.avi", big, sizeof(big));
+        if (r == FM_OK) r = FM_Transfer_SaveFile("/mcsrc/small.avi", payload, 3000u);
+        if (r == FM_OK) r = FM_Transfer_SaveFile("/mcsrc/new.avi", payload, 3000u);
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.cache_root = "/mccache2";
+        cfg.policy = FM_MEDIACACHE_ALWAYS;
+        cfg.max_total_bytes = 10000u;
+        FM_MediaCache_ResetStats();
+        if (r == FM_OK) r = FM_MediaCache_Init(&cfg);
+        if (r == FM_OK) r = FM_MediaCache_Resolve("/mcsrc/big.avi", big_cached, sizeof(big_cached));
+        if (r == FM_OK) r = FM_MediaCache_Resolve("/mcsrc/small.avi", small_cached, sizeof(small_cached));
+        if (r == FM_OK && (strncmp(big_cached, "/mccache2/", 10) != 0 ||
+                           strncmp(small_cached, "/mccache2/", 10) != 0))
+        {
+            r = FM_ERR_INVALID_PATH;        /* not cached: no test */
+        }
+        /* the big one is being played */
+        if (r == FM_OK)
+        {
+            playing = File_Open(big_cached, FM_OPEN_READ);
+            if (playing == NULL) r = File_GetLastError();
+        }
+        /* 9000 of 10000 bytes are in use and 3000 more are wanted: one
+         * file has to go, and the biggest one is open */
+        if (r == FM_OK) r = FM_MediaCache_Resolve("/mcsrc/new.avi", resolved, sizeof(resolved));
+        FM_MediaCache_GetStats(&st);
+        if (r == FM_OK) r = Directory_Size("/mccache2", &total);
+        if (r == FM_OK) r = File_Exists(small_cached, &there);
+        if (r == FM_OK) r = File_Read(playing, back, sizeof(back), &n);
+        if (playing != NULL) (void)File_Close(playing);
+        if (r != FM_OK)
+        {
+            CHECK_RESULT(r, "set-up");
+        }
+        else if (n != sizeof(big) || memcmp(back, big, sizeof(big)) != 0)
+        {
+            FAIL("the file that was playing is damaged");
+        }
+        else if (there || st.evictions != 1u || total > 10000u ||
+                 strncmp(resolved, "/mccache2/", 10) != 0)
+        {
+            printf("[the other cached file %s, %lu evictions, %lu bytes in "
+                   "the cache of 10000, plays from %s] ",
+                   there ? "still there" : "gone", (unsigned long)st.evictions,
+                   (unsigned long)total, resolved);
+            FAIL("the open file ended the search");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)Directory_DeleteRecursive("/mccache2");
+        (void)File_Delete("/mcsrc/big.avi");
+        (void)File_Delete("/mcsrc/small.avi");
+        (void)File_Delete("/mcsrc/new.avi");
+    }
+
     TEST("MediaCache: a file too large to cache still plays from source");
     {
         memset(&cfg, 0, sizeof(cfg));
@@ -4883,6 +4954,7 @@ static uint32_t  g_wfs_read_fail_at;        /* fail this call (1-based)  */
 static uint32_t  g_wfs_open_calls;
 static uint32_t  g_wfs_read_fail_from_open; /* fail reads from Nth open  */
 static uint32_t  g_wfs_flush_calls;
+static int       g_wfs_flush_fail;    /* 1: every flush is FM_ERR_IO */
 static uint32_t  g_wfs_rename_calls;
 static FM_Bool   g_wfs_corrupt;
 
@@ -5005,6 +5077,10 @@ static FM_Result wfs_write(FM_FS *fs, void *fh, const void *buf,
 static FM_Result wfs_flush(FM_FS *fs, void *fh)
 {
     g_wfs_flush_calls++;
+    if (g_wfs_flush_fail)
+    {
+        return FM_ERR_IO;
+    }
     return (g_wfs_base.ops.file_flush != NULL)
                ? g_wfs_base.ops.file_flush(fs, fh) : FM_OK;
 }
@@ -5169,6 +5245,12 @@ static void f05_progress(uint64_t cur, uint64_t total, void *user)
     {
         g_f05_flushes_before_full = g_wfs_flush_calls;
     }
+}
+
+static FM_Bool f05_xfer_progress(uint64_t cur, uint64_t total, void *user)
+{
+    f05_progress(cur, total, user);
+    return FM_TRUE;
 }
 
 /* F-11: a progress callback that starts another copy / edit */
@@ -5623,6 +5705,72 @@ static void test_file_report(void)
     }
 
     /* ---------------------------------------------------------------- */
+    /* (the flush before "everything is there" could be replaced by
+     * FM_OK and no test noticed: AUDIT_FILE_V5, XFER-FLUSH) */
+    TEST("F-05: a flush that fails fails the copy, and no half file stays");
+    {
+        FM_TransferOpts o;
+        FM_Result rc;
+        FM_Result rt;
+        FM_Result rok;
+        FM_Bool there_c = FM_TRUE;
+        FM_Bool there_t = FM_TRUE;
+        uint32_t full_c;
+        uint32_t full_t;
+        uint32_t ok_full;
+        uint32_t ok_flushes;
+
+        memset(&o, 0, sizeof(o));
+        o.progress = f05_xfer_progress;
+        (void)File_WriteAll("/f05_src.bin", big, 3000u);
+        (void)File_Delete("/ram/f05_c.bin");
+        (void)File_Delete("/ram/f05_t.bin");
+        /* FM_Transfer_Copy keeps the rule of File_Copy: flushed, then
+         * "100 %" */
+        g_f05_full_reports = 0u;
+        g_f05_flushes_at_full = 0u;
+        g_wfs_flush_calls = 0u;
+        rok = FM_Transfer_Copy("/f05_src.bin", "/ram/f05_t.bin", &o);
+        ok_full = g_f05_full_reports;
+        ok_flushes = g_f05_flushes_at_full;
+        (void)File_Delete("/ram/f05_t.bin");
+        /* and when that flush fails, nobody is told "100 %" */
+        g_wfs_flush_fail = 1;
+        g_f05_full_reports = 0u;
+        rc = File_Copy("/f05_src.bin", "/ram/f05_c.bin", f05_progress, NULL);
+        full_c = g_f05_full_reports;
+        g_f05_full_reports = 0u;
+        rt = FM_Transfer_Copy("/f05_src.bin", "/ram/f05_t.bin", &o);
+        full_t = g_f05_full_reports;
+        g_wfs_flush_fail = 0;
+        (void)File_Exists("/ram/f05_c.bin", &there_c);
+        (void)File_Exists("/ram/f05_t.bin", &there_t);
+        if (rok != FM_OK || ok_full != 1u || ok_flushes == 0u)
+        {
+            printf("[FM_Transfer_Copy %d, %lu reports of 100 %%, %lu flushes "
+                   "before it] ", (int)rok, (unsigned long)ok_full,
+                   (unsigned long)ok_flushes);
+            FAIL("100% reported before the flush");
+        }
+        else if (rc != FM_ERR_IO || rt != FM_ERR_IO || there_c || there_t ||
+                 full_c != 0u || full_t != 0u)
+        {
+            printf("[File_Copy %d (file %s, %lu reports of 100 %%), "
+                   "FM_Transfer_Copy %d (file %s, %lu reports of 100 %%)] ",
+                   (int)rc, there_c ? "left" : "gone", (unsigned long)full_c,
+                   (int)rt, there_t ? "left" : "gone", (unsigned long)full_t);
+            FAIL("the error of the flush was lost, or came after \"100 %\"");
+        }
+        else
+        {
+            PASS();
+        }
+        (void)File_Delete("/f05_src.bin");
+        (void)File_Delete("/ram/f05_c.bin");
+        (void)File_Delete("/ram/f05_t.bin");
+    }
+
+    /* ---------------------------------------------------------------- */
     TEST("F-06: Transfer_Raw rejects ranges past the capacity");
     {
         static uint8_t smem[4096];
@@ -5657,6 +5805,55 @@ static void test_file_report(void)
     }
 
     /* ---------------------------------------------------------------- */
+    /* (the branch for a destination unit larger than the staging buffer
+     * ran only in a build with -DFM_TRANSFER_CHUNK=1024: AUDIT_FILE_V5) */
+    TEST("F-06: raw copy to a unit larger than the staging buffer is still right");
+    {
+        uint32_t unit = (uint32_t)FM_TRANSFER_CHUNK * 2u;
+        uint32_t bytes = unit * 2u + 1000u;
+        uint32_t cap = unit * 4u;
+        uint8_t *smem = (uint8_t *)malloc(cap);
+        uint8_t *dmem = (uint8_t *)malloc(cap);
+        FM_Storage s, d;
+        FakeStore fsrc, fdst;
+        FM_Result r = FM_ERR_NO_MEMORY;
+        uint32_t k;
+
+        if (smem != NULL && dmem != NULL)
+        {
+            for (k = 0; k < cap; k++) smem[k] = (uint8_t)(k * 31u + (k >> 9));
+            memset(dmem, 0xEE, cap);
+            fake_store_init(&s, &fsrc, smem, cap, cap);
+            fake_store_init(&d, &fdst, dmem, cap, cap);
+            d.erase_size = unit;        /* > FM_TRANSFER_CHUNK */
+            d.write_size = 1u;
+            /* an unaligned start, an end inside the third unit */
+            r = FM_Transfer_Raw(&s, 7u, &d, 300u, bytes, NULL);
+        }
+        if (r != FM_OK)
+        {
+            CHECK_RESULT(r, "raw copy");
+        }
+        else if (memcmp(dmem + 300u, smem + 7u, bytes) != 0)
+        {
+            FAIL("the copy differs from the source");
+        }
+        else if (dmem[299] != 0xEEu || dmem[300u + bytes] != 0xEEu)
+        {
+            FAIL("bytes outside the range were written");
+        }
+        else if (fdst.writes < bytes / (uint32_t)FM_TRANSFER_CHUNK)
+        {
+            FAIL("fewer writes than chunks");
+        }
+        else
+        {
+            PASS();
+        }
+        free(smem);
+        free(dmem);
+    }
+
     TEST("F-07: erase goes unit by unit, exactly aligned");
     {
         static uint8_t smem[16384];
@@ -6307,9 +6504,20 @@ static void test_file_report(void)
 
         /* strlen == FM_PATH_MAX - 3: valid on its own, but
          * "<path>.fm_tmp" does not fit in FM_PATH_MAX */
+        /* (in folders: one name may not be longer than FM_NAME_MAX - 1) */
         memset(longp, 'q', sizeof(longp));
         longp[0] = '/';
         longp[FM_PATH_MAX - 3] = '\0';
+        {
+            size_t cut;
+
+            for (cut = 50u; cut < (size_t)(FM_PATH_MAX - 3); cut += 50u)
+            {
+                longp[cut] = '\0';
+                (void)Directory_Create(longp);
+                longp[cut] = '/';
+            }
+        }
         if (File_WriteText(longp, "keep-me") != FM_OK)
         {
             FAIL("could not create the long-named file");
@@ -6341,6 +6549,8 @@ static void test_file_report(void)
             }
         }
         (void)File_Delete(longp);
+        longp[50] = '\0';
+        (void)Directory_DeleteRecursive(longp);
     }
 
     /* ---------------------------------------------------------------- */
@@ -18303,12 +18513,23 @@ static void test_fmfs_rename_failure(void)
 
     TEST("FMFS rename: a name too long for one child changes nothing");
     r = mr;
-    memset(longname, 'L', 100);
-    longname[100] = '\0';
-    memset(newdir, 'N', 70);
-    newdir[70] = '\0';
+    /* (two folders deep: a single name of that length is refused by the
+     * library before FMFS sees it, FM_NAME_MAX) */
+    memset(longname, 'L', 101);
+    longname[50] = '/';
+    longname[101] = '\0';
+    memset(newdir, 'N', 60);
+    newdir[60] = '\0';
     (void)snprintf(p, sizeof(p), "/frn/t/%s", longname);
     if (r == FM_OK) r = Directory_Create("/frn/t");
+    if (r == FM_OK)
+    {
+        longname[50] = '\0';
+        (void)snprintf(p, sizeof(p), "/frn/t/%s", longname);
+        r = Directory_Create(p);
+        longname[50] = '/';
+        (void)snprintf(p, sizeof(p), "/frn/t/%s", longname);
+    }
     if (r == FM_OK) r = File_WriteAll("/frn/t/a.txt", "AAA", 3);
     if (r == FM_OK) r = Directory_Create("/frn/t/sub");
     if (r == FM_OK) r = File_WriteAll("/frn/t/sub/b.txt", "BBB", 3);
@@ -20460,6 +20681,7 @@ static void suite_leak_check(const char *suite)
 #include "debug_log_tests.h"
 #include "audit_v3_tests.h"
 #include "audit_v4_tests.h"
+#include "audit_v5_tests.h"
 
 int main(void)
 {
@@ -20567,11 +20789,16 @@ int main(void)
     RUN_SUITE(test_debug_levels);
     RUN_SUITE(test_audit_v2_file);
     RUN_SUITE(test_audit_v4_file);
+    RUN_SUITE(test_audit_v5_file);
+#if FM_USE_IMAGE
+    RUN_SUITE(test_audit_v5_image);
+#endif
 #if FM_USE_VIDEO && FM_USE_H264
     RUN_SUITE(test_audit_v2_video);
 #endif
 #if FM_USE_VIDEO
     RUN_SUITE(test_audit_v4_video);
+    RUN_SUITE(test_audit_v5_video);
 #endif
 #if FM_USE_VIDEO && FM_USE_MP3
     RUN_SUITE(test_video_mp3_track);

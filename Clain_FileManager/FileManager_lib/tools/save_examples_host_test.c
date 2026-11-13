@@ -129,6 +129,53 @@ static int16_t g_src_snd[SRC_N * SRC_SPF];
 static int grey_of(uint32_t n) { return 16 + 12 * (int)n; }
 #define GREY_TOL 6
 
+/* The same clip with a mono (1) or a stereo (2) track.  Stereo: the left
+ * channel is the mono pattern, the right one is -left - 1. */
+static FM_Result make_video_ch(const char *path, uint16_t channels)
+{
+    static FM_VideoFileWriter w;
+    static int16_t st[SRC_SPF * 2];
+    FM_VideoSaveConfig c;
+    FM_Result r;
+    uint32_t n;
+    uint32_t i;
+
+    memset(&c, 0, sizeof(c));
+    c.width = SRC_W;
+    c.height = SRC_H;
+    c.fps = SRC_FPS;
+    c.quality = 95u;
+    c.audio_rate = SRC_RATE;
+    c.audio_channels = channels;
+    for (i = 0; i < (uint32_t)(SRC_N * SRC_SPF); i++)
+    {
+        g_src_snd[i] = (int16_t)((i * 13u) % 16001u) - 8000;
+    }
+    r = VideoFileWriter_Open(&w, path, &c);
+    for (n = 0; r == FM_OK && n < SRC_N; n++)
+    {
+        memset(g_rgb, grey_of(n), sizeof(g_rgb));
+        r = VideoFileWriter_WriteFrame(&w, g_rgb, FM_PIXEL_RGB888);
+        if (r == FM_OK && channels == 2u)
+        {
+            for (i = 0; i < (uint32_t)SRC_SPF; i++)
+            {
+                st[2u * i] = g_src_snd[n * SRC_SPF + i];
+                st[2u * i + 1u] = (int16_t)(-st[2u * i] - 1);
+            }
+            r = VideoFileWriter_WriteAudio(&w, st, SRC_SPF);
+        }
+        else if (r == FM_OK)
+        {
+            r = VideoFileWriter_WriteAudio(&w, g_src_snd + n * SRC_SPF,
+                                           SRC_SPF);
+        }
+    }
+    if (r == FM_OK) r = VideoFileWriter_Close(&w);
+    else (void)VideoFileWriter_Close(&w);
+    return r;
+}
+
 static FM_Result make_video(const char *path)
 {
     static FM_VideoFileWriter w;
@@ -990,10 +1037,32 @@ int main(int argc, char **argv)
     printf("\n[7] SimpleVideo: tracks, containers and the clock\n");
     {
         FM_AudioTrackInfo a;
+        FM_Bool have_vectors;
         long loud;
 
         /* The tone of every vector is far above 500; silence is 0.  A
          * second of 8 kHz mono sound is 8000 samples. */
+        /* The clips come from the tree: the mount is the directory the
+         * program runs in, so /test/vectors is <cwd>/test/vectors.  Run
+         * from somewhere else, the six checks below used to fail one by
+         * one ("a track is heard ... FAIL") and looked like a broken
+         * player.  Now one line says what is missing. */
+        have_vectors = FM_FALSE;
+        (void)File_Exists("/test/vectors/avi_mp3.avi", &have_vectors);
+        ok("the clips of [7] are there (/test/vectors, see the NOTE)",
+           have_vectors);
+        if (!have_vectors)
+        {
+            printf("  NOTE: /test/vectors/avi_mp3.avi is missing.  This "
+                   "program reads its clips\n"
+                   "        from <current directory>/test/vectors: run it "
+                   "from the top of the\n"
+                   "        library tree (make saveexamplestest does).  "
+                   "Six checks are skipped;\n"
+                   "        the player was not tested.\n");
+        }
+        if (have_vectors)
+        {
         loud = play_and_listen("/test/vectors/avi_mp3.avi", "a.avi");
         ok("an MP3 track in AVI is heard (it was silence)", loud > 4000);
         loud = play_and_listen("/test/vectors/avi_pcm24.avi", "a.avi");
@@ -1007,6 +1076,7 @@ int main(int argc, char **argv)
         ok("a folder with only an .mkv plays, with its sound", loud > 1000);
         loud = play_and_listen("/test/vectors/mkv_vorbis.mkv", "a.webm");
         ok("a folder with only a .webm is found", loud >= 0);
+        }
 
         /* which tracks the speaker takes: the library's `decodable`
          * decides, not the width of the samples in the file */
@@ -1043,6 +1113,115 @@ int main(int argc, char **argv)
         ok("the time of a picture is the inverse",
            sv_ms_of_frame(53946u, 30000u, 1001u) == 1799998u &&
            sv_ms_of_frame(750u, 1000000u, 80000u) == 60000u);
+    }
+    /* ---- 8) SimpleVideo_AudioDataRead: always stereo frames --------- */
+    printf("\n[8] SimpleVideo_AudioDataRead on a mono and a stereo track\n");
+    {
+        /* VID5-01.  make_video() writes a MONO track whose sample i is
+         * ((i * 13) % 16001) - 8000: every sample differs from its
+         * neighbour, so "L = R, next pair different" tells doubled mono
+         * from mono handed out as if it were stereo. */
+        static int16_t pcm[2 * 256];
+        size_t got = 0u;
+        size_t i;
+        size_t total = 0u;
+        int pairs = 1;
+        int order = 1;
+        int untouched;
+        int started = 0;
+        int loops;
+        FM_Result rr;
+
+        (void)Directory_DeleteRecursive(SIMPLE_VIDEO_FOLDER);
+        (void)Directory_Create(SIMPLE_VIDEO_FOLDER);
+        rr = make_video(SIMPLE_VIDEO_FOLDER "/mono.avi");
+        ok("the mono clip is written", rr == FM_OK);
+        (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_CALLBACK);
+        (void)SimpleVideo_SetPlayMode(FM_PLAY_MODE_STOP);
+        SimpleVideo_SetAudioDataCallback(NULL, NULL);
+        SimpleVideo_SetFrameCallback(NULL, NULL);
+        sim_video_clock(1u);
+        rr = SimpleVideo_Begin();
+        if (rr == FM_OK) rr = SimpleVideo_Start();
+        for (loops = 0; rr == FM_OK && loops < 200; loops++)
+        {
+            (void)SimpleVideo_Poll();
+            if (SimpleVideo_IsRunning()) { started = 1; break; }
+        }
+        ok("the mono clip is playing", started);
+        for (i = 0; i < 2u * 256u; i++) pcm[i] = 0x5A5A;
+        rr = SimpleVideo_AudioDataRead(pcm, 100u, &got);
+        ok("100 frames asked: not more than 100 stereo frames reported",
+           rr == FM_OK && got > 0u && got <= 100u);
+        for (i = 0; i < got && i < 100u; i++)
+        {
+            if (pcm[2u * i] != pcm[2u * i + 1u]) pairs = 0;
+            if (i > 0u && pcm[2u * i] == pcm[2u * i - 2u]) order = 0;
+        }
+        ok("every frame is an L = R pair", got > 0u && pairs);
+        ok("the pairs are the samples of the track in order",
+           got > 1u && order && pcm[2] - pcm[0] == 13);
+        untouched = 1;
+        for (i = 2u * 100u; i < 2u * 256u; i++)
+        {
+            if (pcm[i] != 0x5A5A) untouched = 0;
+        }
+        ok("nothing is written past the 100 frames asked for", untouched);
+        /* more calls: the same shape every time, never more than asked
+         * (the I2S side of the player takes sound from the same track
+         * between two calls, so the total is not the track length) */
+        pairs = 1;
+        for (loops = 0; loops < 8; loops++)
+        {
+            rr = SimpleVideo_AudioDataRead(pcm, 256u, &got);
+            if (rr != FM_OK) break;
+            total += got;
+            if (got == 0u || got > 256u) pairs = 0;
+            for (i = 0; i < got && i < 256u; i++)
+            {
+                if (pcm[2u * i] != pcm[2u * i + 1u]) pairs = 0;
+                if (i > 0u && pcm[2u * i] - pcm[2u * i - 2u] != 13 &&
+                    pcm[2u * i] - pcm[2u * i - 2u] != 13 - 16001) pairs = 0;
+            }
+        }
+        ok("eight more reads of 256: L = R pairs in order every time",
+           rr == FM_OK && pairs && total > 256u);
+        ok("a bad argument is refused",
+           SimpleVideo_AudioDataRead(NULL, 4u, &got) ==
+               FM_ERR_INVALID_ARGUMENT &&
+           SimpleVideo_AudioDataRead(pcm, 4u, NULL) ==
+               FM_ERR_INVALID_ARGUMENT);
+        (void)SimpleVideo_Stop();
+        ok("after Stop there is nothing to read: NOT_READY",
+           SimpleVideo_AudioDataRead(pcm, 4u, &got) == FM_ERR_NOT_READY &&
+           got == 0u);
+
+        /* a stereo track comes back as it is in the file: R = -L - 1 */
+        (void)Directory_DeleteRecursive(SIMPLE_VIDEO_FOLDER);
+        (void)Directory_Create(SIMPLE_VIDEO_FOLDER);
+        rr = make_video_ch(SIMPLE_VIDEO_FOLDER "/st.avi", 2u);
+        sim_video_clock(1u);
+        if (rr == FM_OK) rr = SimpleVideo_Begin();
+        if (rr == FM_OK) rr = SimpleVideo_Start();
+        started = 0;
+        for (loops = 0; rr == FM_OK && loops < 200; loops++)
+        {
+            (void)SimpleVideo_Poll();
+            if (SimpleVideo_IsRunning()) { started = 1; break; }
+        }
+        got = 0u;
+        rr = started ? SimpleVideo_AudioDataRead(pcm, 100u, &got)
+                     : FM_ERR_NOT_READY;
+        pairs = 1;
+        for (i = 0; i < got && i < 100u; i++)
+        {
+            if (pcm[2u * i + 1u] != (int16_t)(-pcm[2u * i] - 1)) pairs = 0;
+            if (i > 0u && pcm[2u * i] - pcm[2u * i - 2u] != 13) pairs = 0;
+        }
+        ok("a stereo track: its own L and R, the count not doubled",
+           rr == FM_OK && got > 1u && got <= 100u && pairs);
+        (void)SimpleVideo_Stop();
+        (void)SimpleVideo_SetAudioOutput(FM_AUDIO_OUT_BOTH);
     }
     halstub_tick_hook = NULL;
 

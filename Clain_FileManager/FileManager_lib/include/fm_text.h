@@ -35,7 +35,14 @@ FM_Result Text_AppendLine(const char *path, const char *line);
 FM_Result Text_Find(const char *path, const char *needle, size_t *line_out);
 
 /* Streaming replace: every occurrence of old_sub in each line is
- * replaced by new_sub.  Works on arbitrarily large files. */
+ * replaced by new_sub.  Works on arbitrarily large files.
+ *
+ * Text_Replace, Text_InsertLine and Text_DeleteLine write the new text
+ * to "<path>.fm_tmp" and rename it over the file.  A path so long that
+ * this name does not fit in FM_PATH_MAX (longer than FM_PATH_MAX - 8
+ * characters) is FM_ERR_TOO_LARGE and nothing is touched.  (The name
+ * used to be cut to fit: the temporary file then WAS the file being
+ * edited, and the edit emptied it.) */
 FM_Result Text_Replace(const char *path, const char *old_sub,
                        const char *new_sub);
 

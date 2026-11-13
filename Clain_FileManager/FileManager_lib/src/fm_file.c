@@ -823,11 +823,17 @@ static FM_Bool file_handle_on_path(const FM_File *f,
  * handle (under FM_Lock) before it asks the backend, and it asks the
  * backend under that same backend lock, so an open that has not been
  * seen here cannot reach the file before the caller is done with it. */
+/* FM_TRUE when names on this mount compare without case (FAT). */
+FM_Bool FM_Mount_NoCase(const FM_MountEntry *mount)
+{
+    return (mount != NULL && mount->fs != NULL &&
+            strcmp(mount->fs->name, "FATFS") == 0) ? FM_TRUE : FM_FALSE;
+}
+
 FM_Bool FM_File_OpenOnPath(const FM_MountEntry *mount, const char *rel,
                            FM_Bool tree)
 {
-    FM_Bool nocase = (strcmp(mount->fs->name, "FATFS") == 0) ? FM_TRUE
-                                                             : FM_FALSE;
+    FM_Bool nocase = FM_Mount_NoCase(mount);
     FM_Bool found = FM_FALSE;
     uint32_t i;
 
@@ -984,6 +990,14 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
         file_release(f);
         return FM_ERR_IS_DIRECTORY;
     }
+    if ((mode & FM_OPEN_CREATE) != 0u && FM_Path_NameTooLong(rel, FM_FALSE))
+    {
+        /* a file this call would create under a name no listing can
+         * return (see FM_Path_NameTooLong) */
+        FM_VFS_Unpin(mount);
+        file_release(f);
+        return FM_ERR_TOO_LARGE;
+    }
     fs = mount->fs;
 
     /* Normalize directly into f->path instead of an extra stack buffer:
@@ -1091,12 +1105,6 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
 
     FM_CHECK_PTR(f, FM_ERR_INVALID_ARGUMENT);
     FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
-    if (f->used)
-    {
-        FM_ERR_LOG("File_OpenEx: handle already in use");
-        return FM_ERR_BUSY;
-    }
-    memset(f, 0, sizeof(*f));
     {
         uint32_t i;
         FM_Bool registered = FM_FALSE;
@@ -1104,8 +1112,20 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
         /* Register BEFORE the backend open.  The registry is what
          * FS_Unmount consults; a handle that is entered only after its
          * file is open leaves a window in which the filesystem can be
-         * unmounted underneath it. */
+         * unmounted underneath it.
+         *
+         * "Is it in use" and "it is mine now" are one step under the
+         * lock.  The test and the memset used to come before it: two
+         * tasks opening the same FM_File both passed the test, and the
+         * second memset wiped a handle the first had registered. */
         FM_Lock();
+        if (f->used)
+        {
+            FM_Unlock();
+            FM_ERR_LOG("File_OpenEx: handle already in use");
+            return FM_ERR_BUSY;
+        }
+        memset(f, 0, sizeof(*f));
         for (i = 0; i < FM_MAX_OPEN_FILES; i++)
         {
             if (g_external_files[i] == NULL)
@@ -1645,14 +1665,54 @@ FM_Result File_Delete(const char *path)
  * an adapter that implements rename as "delete target, then move" cannot
  * lose the file.  A missing source is still reported.
  * `m` must be pinned by the caller (FM_VFS_Pin). */
-static FM_Result file_rename_resolved(FM_MountEntry *m, const char *from,
-                                      const char *to)
+/* A directory entry is handed out in FM_DirEntry.name, FM_NAME_MAX
+ * bytes.  A longer name cannot be listed: Directory_Read stops there
+ * with FM_ERR_TOO_LARGE, and with it every walk -- a folder holding
+ * such a name could be filled but no longer copied or deleted.  The
+ * backends take longer names (LittleFS and FAT up to 255), so the
+ * library has to refuse to MAKE them.  Names that are already on a
+ * card (written by a PC) can still be opened and deleted by path; to
+ * list them, build with a larger FM_NAME_MAX.
+ *
+ * `all`: look at every component of `rel`, not only the last. */
+FM_Bool FM_Path_NameTooLong(const char *rel, FM_Bool all)
+{
+    size_t len = 0u;
+    size_t i;
+
+    for (i = 0u;; i++)
+    {
+        if (rel[i] == '/' || rel[i] == '\0')
+        {
+            if (len >= (size_t)FM_NAME_MAX && (all || rel[i] == '\0'))
+            {
+                return FM_TRUE;
+            }
+            if (rel[i] == '\0')
+            {
+                return FM_FALSE;
+            }
+            len = 0u;
+        }
+        else
+        {
+            len++;
+        }
+    }
+}
+
+FM_Result FM_File_RenameResolved(FM_MountEntry *m, const char *from,
+                                 const char *to)
 {
     FM_Result r;
 
     if (m->fs->ops.rename == NULL)
     {
         return FM_ERR_UNSUPPORTED;
+    }
+    if (FM_Path_NameTooLong(to, FM_FALSE))
+    {
+        return FM_ERR_TOO_LARGE;
     }
     if (strcmp(from, to) == 0)
     {
@@ -1713,10 +1773,35 @@ FM_Result File_Rename(const char *old_path, const char *new_path)
         FM_VFS_Unpin(m1);
         return FM_ERR_UNSUPPORTED; /* cross-mount rename: use Move */
     }
-    r = file_rename_resolved(m1, r1, r2);
+    r = FM_File_RenameResolved(m1, r1, r2);
     FM_VFS_Unpin(m1);
     FM_Core_SetLastError(r);
     return r;
+}
+
+/* Two resolved paths of one mount: the same entry?  "/sd/a.txt" and
+ * "/sd/A.TXT" are one file on a FAT volume.  (A long name and its 8.3
+ * alias are one file too; that cannot be seen from here, only the
+ * volume knows its aliases.) */
+static FM_Bool file_rel_same(const FM_MountEntry *m, const char *a,
+                             const char *b)
+{
+    size_t i;
+
+    if (!FM_Mount_NoCase(m))
+    {
+        return (strcmp(a, b) == 0) ? FM_TRUE : FM_FALSE;
+    }
+    for (i = 0u;; i++)
+    {
+        char x = a[i];
+        char y = b[i];
+
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return FM_FALSE;
+        if (x == '\0') return FM_TRUE;
+    }
 }
 
 /* FM_TRUE when both paths name the same entry of the same mount after
@@ -1738,7 +1823,7 @@ FM_Bool FM_File_SamePath(const char *a, const char *b)
     {
         return FM_FALSE;
     }
-    return (ma == mb && strcmp(ra, rb) == 0) ? FM_TRUE : FM_FALSE;
+    return (ma == mb && file_rel_same(ma, ra, rb)) ? FM_TRUE : FM_FALSE;
 }
 
 FM_Result File_Exists(const char *path, FM_Bool *exists)
@@ -2150,7 +2235,8 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
         dst_can_rename = (dst_mount->fs->ops.rename != NULL) ? FM_TRUE
                                                              : FM_FALSE;
         FM_VFS_Unpin(dst_mount);
-        if (src_mount == dst_mount && strcmp(src_rel, dst_rel) == 0)
+        if (src_mount == dst_mount &&
+            file_rel_same(src_mount, src_rel, dst_rel))
         {
             FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
             return FM_ERR_INVALID_ARGUMENT;
@@ -2265,7 +2351,7 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
     /* Same-mount move is a rename (atomic and fast). */
     if (m1 == m2 && m1->fs->ops.rename != NULL)
     {
-        r = file_rename_resolved(m1, r1, r2);
+        r = FM_File_RenameResolved(m1, r1, r2);
         FM_VFS_Unpin(m1);
         FM_Core_SetLastError(r);
         return r;

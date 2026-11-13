@@ -121,7 +121,15 @@ static void u32_to_str(uint32_t v, char *out)
     }
 }
 
-static void float_to_str(float v, char *out, size_t out_size)
+/* FLT_MAX without <float.h> */
+#define FM_LOGGER_FLT_MAX 3.402823466e+38f
+
+/* `json`: the text goes into a JSON line.  A value that is not a number
+ * is "null" there and "nan" / "inf" / "-inf" in a CSV column.  (It used
+ * to be cast to an integer, which is undefined: NaN was logged as
+ * 1511828489.4294966488 and infinity as 9000000.000 -- numbers a reader
+ * of the log takes for measurements.) */
+static void float_to_str(float v, char *out, size_t out_size, FM_Bool json)
 {
     /* Deterministic 3-decimal formatting without libc printf. */
     int64_t scaled;
@@ -133,6 +141,21 @@ static void float_to_str(float v, char *out, size_t out_size)
     size_t i;
     size_t n = 0;
 
+    if (v != v || v > FM_LOGGER_FLT_MAX || v < -FM_LOGGER_FLT_MAX)
+    {
+        const char *word = json ? "null"
+                           : (v != v) ? "nan" : (v > 0.0f) ? "inf" : "-inf";
+
+        for (i = 0; word[i] != '\0' && n + 1 < out_size; i++)
+        {
+            out[n++] = word[i];
+        }
+        if (n < out_size)
+        {
+            out[n] = '\0';
+        }
+        return;
+    }
     if (v < 0)
     {
         if (n + 1 < out_size)
@@ -747,7 +770,7 @@ FM_Result Logger_Write(FM_Logger *lg, uint32_t timestamp,
         {
             char fv[32];
 
-            float_to_str(values[i], fv, sizeof(fv));
+            float_to_str(values[i], fv, sizeof(fv), FM_FALSE);
             r = logger_append(line, sizeof(line), &n, ",");
             if (r == FM_OK) r = logger_append(line, sizeof(line), &n, fv);
         }
@@ -764,7 +787,7 @@ FM_Result Logger_Write(FM_Logger *lg, uint32_t timestamp,
         {
             char fv[32];
 
-            float_to_str(values[i], fv, sizeof(fv));
+            float_to_str(values[i], fv, sizeof(fv), FM_TRUE);
             if (i > 0) r = logger_append(line, sizeof(line), &n, ",");
             if (r == FM_OK) r = logger_append(line, sizeof(line), &n, fv);
         }

@@ -38,6 +38,25 @@
 #include LFS_STRINGIZE(LFS_DEFINES)
 #endif
 
+// FileManager (local change, see third_party/README.md): a firmware
+// project compiles this file with no symbol of ours, and the three
+// message macros below would then print through printf() whatever the
+// debug level of the library says (and pull printf into a firmware that
+// has none).  They are off unless LFS_YES_MESSAGES asks for them; what
+// went wrong reaches the caller as an error code and, with
+// FM_DEBUG_LEVEL, as a line of backends/fm_littlefs.c.
+#ifndef LFS_YES_MESSAGES
+#ifndef LFS_NO_DEBUG
+#define LFS_NO_DEBUG
+#endif
+#ifndef LFS_NO_WARN
+#define LFS_NO_WARN
+#endif
+#ifndef LFS_NO_ERROR
+#define LFS_NO_ERROR
+#endif
+#endif
+
 // System includes
 #include <stdint.h>
 #include <stdbool.h>

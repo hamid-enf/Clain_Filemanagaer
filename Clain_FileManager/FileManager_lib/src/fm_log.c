@@ -15,8 +15,10 @@
 
 #ifndef FM_LOG_DISABLE
 
-static FM_LogSinkFn g_sink;
-static void        *g_sink_ctx;
+/* volatile: the three stores of FM_Log_SetSink and the reads of
+ * log_deliver have to happen as written */
+static FM_LogSinkFn volatile g_sink;
+static void *volatile        g_sink_ctx;
 
 /* بافر فرمت. ایستا و بدون malloc — روی میکرو نمی‌شود چند کیلوبایت
  * استک را برای یک پیام لاگ خرج کرد. */
@@ -27,15 +29,25 @@ static char g_buf[FM_LOG_BUF_SIZE];
  * instead: two tasks logging at the same time used to format into the
  * one static buffer and each sent a mix of both messages (or a string
  * whose terminator the other task had just moved).  A lock is the wrong
- * tool here -- a sink is allowed to call back into the library (a file
- * sink does), which may log again, and messages from an ISR must not
- * block -- so each call simply owns its buffer.  Cost: FM_LOG_BUF_SIZE
- * bytes of task stack while a message is being formatted. */
+ * tool here -- the library logs while it holds its own locks, and
+ * messages from an ISR must not block -- so each call simply owns its
+ * buffer.  Cost: FM_LOG_BUF_SIZE bytes of task stack while a message is
+ * being formatted.
+ *
+ * (This comment used to say that a sink may call back into the library,
+ * "a file sink does".  With FM_USE_THREADS=1 it must not -- fm_log.h has
+ * the rule: the locks are not recursive, and a sink that writes a file
+ * waits for a lock its own caller holds, or recurses through its own
+ * error messages until the stack is gone.) */
 
 void FM_Log_SetSink(FM_LogSinkFn sink, void *ctx)
 {
-    /* ترتیب مهم است: اول ctx، بعد تابع. اگر برعکس بود و وقفه‌ای بین
-     * این دو خط رخ می‌داد، sink جدید با ctx قدیمی صدا زده می‌شد. */
+    /* The sink is taken away first, then the pair is replaced.  With
+     * only "ctx, then function" a message from an interrupt between the
+     * two stores called the OLD function with the NEW ctx.  Now it finds
+     * no sink and is not sent.  (Another task that reads the pair while
+     * it changes: log_deliver.) */
+    g_sink = NULL;
     g_sink_ctx = ctx;
     g_sink = sink;
 }
@@ -124,13 +136,30 @@ unsigned long FM_Log_Dropped(void)
 /* Hand `len` bytes to the sink.  The caller holds the "busy" claim. */
 static int log_deliver(const char *buf, size_t len)
 {
-    FM_LogSinkFn sink = g_sink;      /* read once: it may be replaced */
+    FM_LogSinkFn sink = NULL;
+    void *ctx = NULL;
+    int tries;
 
+    /* The function and its ctx as one pair.  FM_Log_SetSink takes the
+     * function away before it changes either, so a function that reads
+     * the same before and after the ctx belongs to that ctx; anything
+     * else is a replacement in progress and is read again.  (Two plain
+     * reads could pair the old function with the new ctx.) */
+    for (tries = 0; tries < 4; tries++)
+    {
+        sink = g_sink;
+        ctx = g_sink_ctx;
+        if (sink == g_sink)
+        {
+            break;
+        }
+        sink = NULL;
+    }
     if (sink == NULL || len == 0u)
     {
         return 0;
     }
-    sink(g_sink_ctx, buf, len);
+    sink(ctx, buf, len);
     return (int)len;
 }
 

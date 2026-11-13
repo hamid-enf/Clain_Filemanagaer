@@ -142,6 +142,11 @@ FM_Result Storage_Find(const char *name, FM_Storage **out);
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
+/* Storage_Unmount and Storage_Format are FM_ERR_BUSY while a file
+ * system is mounted on the storage (FS_Unmount first; to empty a mounted
+ * volume use FS_Format).  They used to go ahead: Storage_Format erased
+ * the medium under the mounted file system and its open files, and both
+ * answered FM_OK.  FS_Unmount() unmounts the storage itself. */
 FM_Result Storage_Mount(const char *name);
 FM_Result Storage_Unmount(const char *name);
 FM_Result Storage_Format(const char *name);  /* driver-level format */

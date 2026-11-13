@@ -91,7 +91,9 @@
  *   }
  *
  * اگر SIMPLE_VIDEO_I2S=0 بماند، PCM را با SimpleVideo_AudioDataRead به
- * DAC خودتان بدهید.
+ * DAC خودتان بدهید. خروجی آن همیشه استریوی ۱۶ بیتیِ درهم است (ترک مونو
+ * چپ = راست می‌شود)؛ بافر باید جای frames × 2 نمونه داشته باشد. قرارداد
+ * کامل بالای خود تابع نوشته شده.
  *
  * پخش خودکار (پیش‌فرض خاموش):
  *   پیش‌فرض: Begin فقط پوشه را می‌خواند و چیزی پخش نمی‌شود؛ شما با
@@ -3319,9 +3321,22 @@ void SimpleVideo_SetAudioMonitorCallback(FM_AudioDataFn fn, void *ctx)
  * SimpleVideo_IsRunning(). For DSP/image pipelines.
  *
  * SimpleVideo_AudioDataRead reads straight from the audio track of the
- * playing clip (stereo frames); what is read here is no longer played.
- * With SIMPLE_VIDEO_I2S=0 it is the way to get the sound; with I2S on,
- * prefer SimpleVideo_SetAudioDataCallback. */
+ * playing clip; what is read here is no longer played.  With
+ * SIMPLE_VIDEO_I2S=0 it is the way to get the sound; with I2S on,
+ * prefer SimpleVideo_SetAudioDataCallback.
+ *
+ * The answer is always interleaved 16-bit stereo, the format the I2S
+ * ring gets: `pcm` has room for frames * 2 samples, *got_frames stereo
+ * frames come back (0 to `frames`, one packet of the track per call).
+ * A mono track is doubled to L = R.  It used to come back as mono
+ * samples with twice the true count in *got_frames, so a caller played
+ * it at double speed and read half of its buffer that was never
+ * written.  For a mono track only half of the buffer is free for the
+ * decoder: a packet that does not fit there is FM_ERR_TOO_LARGE (an
+ * MP3 track needs frames >= 2304 when it is mono, 1152 when stereo).
+ * A track that is not decoded to PCM (no decoder registered for it) or
+ * has more than two channels is FM_ERR_UNSUPPORTED -- the speaker is
+ * silent for it too. */
 const void *SimpleVideo_GetFrame(uint16_t *w, uint16_t *h)
 {
     if (w != NULL) *w = sv.player.video.info.width;
@@ -3331,16 +3346,40 @@ const void *SimpleVideo_GetFrame(uint16_t *w, uint16_t *h)
 FM_Result SimpleVideo_AudioDataRead(int16_t *pcm, size_t frames, size_t *got_frames)
 {
     uint8_t *tmp = (uint8_t *)pcm;
-    size_t cap = frames * 2u * sizeof(int16_t);
+    size_t cap;
     size_t got = 0;
+    size_t i;
     FM_Result r;
     if (pcm == NULL || got_frames == NULL) return FM_ERR_INVALID_ARGUMENT;
     *got_frames = 0;
     if (!sv.running || !sv.has_audio) return FM_ERR_NOT_READY;
     if (sv_audio_out == FM_AUDIO_OUT_NONE) return FM_ERR_NOT_READY;
-    r = Video_ReadAudioFrame(&sv.player.video, tmp, cap, &got);
+    if (!sv.audio_pcm) return FM_ERR_UNSUPPORTED;
+    if (sv.audio.channels != 1u && sv.audio.channels != 2u) return FM_ERR_UNSUPPORTED;
+    if (frames > ((size_t)-1) / (2u * sizeof(int16_t))) return FM_ERR_TOO_LARGE;
+    cap = frames * 2u * sizeof(int16_t);
+    if (sv.audio.channels == 2u)
+    {
+        r = Video_ReadAudioFrame(&sv.player.video, tmp, cap, &got);
+        if (r != FM_OK) return r;
+        *got_frames = got / (2u * sizeof(int16_t));
+        return FM_OK;
+    }
+    /* Mono: the track gives one sample per sound frame.  Read into the
+     * first half of the buffer and spread it to L/R pairs from the end
+     * backwards, so no sample is overwritten before it has been read. */
+    r = Video_ReadAudioFrame(&sv.player.video, tmp, cap / 2u, &got);
     if (r != FM_OK) return r;
-    *got_frames = got / (sv.audio.channels * sizeof(int16_t));
+    got /= sizeof(int16_t);
+    for (i = got; i > 0u; i--)
+    {
+        int16_t s;
+
+        memcpy(&s, tmp + (i - 1u) * sizeof(int16_t), sizeof(s));
+        pcm[(i - 1u) * 2u] = s;
+        pcm[(i - 1u) * 2u + 1u] = s;
+    }
+    *got_frames = got;
     return FM_OK;
 }
 FM_Result SimpleVideo_GetAudioInfo(FM_AudioTrackInfo *info)
@@ -3877,6 +3916,17 @@ const void *SimpleVideo_Frame(uint16_t *width, uint16_t *height,
     return sv_frame[sv_show];
 }
 
+/* What is playing now.  The fields of the clip (name, container, width,
+ * height, fps, frame_count, frame_index, position, duration, has_audio,
+ * audio_rate, audio_channels, pixels, bytes) are filled in only while
+ * one is open: from its first picture until SimpleVideo_Stop() or the
+ * end of the playlist.  Outside of that `running` is 0 and they are all
+ * zero / "" / NULL -- "nothing is playing", not "a clip of length 0".
+ * Test `running` (or name[0]) before using them; to keep the name or
+ * the duration of the last clip, copy them in the track-end callback
+ * (SimpleVideo_SetTrackEndCallback) or before calling Stop.  The playlist
+ * numbers, paused, format, volume_pct and the seek counters are valid
+ * at any time. */
 void SimpleVideo_Info(SimpleVideoInfo *out)
 {
     if (out == NULL)

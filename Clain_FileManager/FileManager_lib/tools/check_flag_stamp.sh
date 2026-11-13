@@ -36,6 +36,24 @@ $MAKE -s -j4 libfilemanager.a >/dev/null 2>&1 || { echo "FAIL flag stamp: build"
 uptodate libfilemanager.a || fail "same flags: make wants to rebuild"
 uptodate libfilemanager.a CFLAGS_EXTRA=-DFM_STAMP_PROBE=1 &&
     fail "a new -D did not make the objects out of date"
+# The archive is out of date on its own account whenever an object is
+# rebuilt *or* its own rule sees the stamp, so the question above stays
+# "yes" even when one object rule has lost the stamp -- and make then
+# relinks objects that were never recompiled.  Ask one object of every
+# object rule of the Makefile, not the archive.
+for o in src/fm_core.o src/fm_audio_enc.o src/fm_video_enc.o \
+         backends/fm_posix_fs.o backends/fm_ramdisk.o \
+         third_party/littlefs/lfs.o \
+         third_party/h264bsd/src/h264bsd_seq_param_set.o \
+         third_party/picojpeg/picojpeg.o third_party/stb/stb_vorbis.o \
+         third_party/opus/src/opus_decoder.o; do
+    [ -f "$o" ] || continue          # that part is switched off in this build
+    uptodate "$o" CFLAGS_EXTRA=-DFM_STAMP_PROBE=1 &&
+        fail "a new -D did not make $o out of date"
+done
+# ...and every object rule must be covered by the list above
+rules=$(grep -c '^[a-z_0-9/]*%\.o: [a-z_0-9/]*%\.c' Makefile)
+[ "$rules" -eq 7 ] || fail "the Makefile has $rules object rules, this script knows 7"
 uptodate libfilemanager.a &&
     fail "going back to the first flags did not make them out of date"
 $MAKE -s -j4 libfilemanager.a >/dev/null 2>&1 || fail "rebuild"

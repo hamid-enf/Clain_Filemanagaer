@@ -49,6 +49,39 @@ for t in "-DFM_USE_THREADS=0" \
     done
 done
 
+# ---- the table of open objects (HIGH-02 of the V5 audit) ----
+# CubeMX writes _FS_LOCK 2 into ffconf.h; with that, Directory_Copy cannot
+# open its first file.  The adapter has to refuse to compile, with a
+# message that names the setting -- and compile when told it is meant.
+echo "adapter: _FS_LOCK below the handles of the library is a compile error ..."
+for g in "" "-DMOCK_FATFS_MODERN=1"; do
+    # shellcheck disable=SC2086
+    if $CC -std=c99 -fsyntax-only -D_GNU_SOURCE -DFM_HOST_BUILD=1 \
+        -DFM_USE_FATFS=1 -DFM_FATFS_PROVIDE_DISKIO=0 -DMOCK_FS_LOCK=2 $g \
+        -I. -Iinclude -Ibackends -Isrc -Itest/fatfs_mock \
+        backends/fm_fatfs.c 2> "$OUT/lock.log"; then
+        echo "FAILED: the adapter compiled with _FS_LOCK = 2"
+        exit 1
+    fi
+    grep -q "_FS_LOCK / FF_FS_LOCK is smaller" "$OUT/lock.log" || {
+        cat "$OUT/lock.log"
+        echo "FAILED: _FS_LOCK = 2 stopped the build, but not with the message"
+        exit 1
+    }
+    # shellcheck disable=SC2086
+    $CC -std=c99 -fsyntax-only -D_GNU_SOURCE -DFM_HOST_BUILD=1 \
+        -DFM_USE_FATFS=1 -DFM_FATFS_PROVIDE_DISKIO=0 -DMOCK_FS_LOCK=2 $g \
+        -DFM_FATFS_ALLOW_SMALL_LOCK=1 \
+        -I. -Iinclude -Ibackends -Isrc -Itest/fatfs_mock \
+        backends/fm_fatfs.c || exit 1
+    # 0 = the table is off: accepted
+    # shellcheck disable=SC2086
+    $CC -std=c99 -fsyntax-only -D_GNU_SOURCE -DFM_HOST_BUILD=1 \
+        -DFM_USE_FATFS=1 -DFM_FATFS_PROVIDE_DISKIO=0 -DMOCK_FS_LOCK=0 $g \
+        -I. -Iinclude -Ibackends -Isrc -Itest/fatfs_mock \
+        backends/fm_fatfs.c || exit 1
+done
+
 # ---- the library, once (nothing in it but the adapter sees ff.h) ----
 echo "building the library  [asan+ubsan, FM_USE_FATFS=1] ..."
 objs=""

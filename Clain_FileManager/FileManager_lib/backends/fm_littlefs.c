@@ -48,6 +48,10 @@ typedef struct
     FM_Bool     mounted;
     FM_Bool     in_use;
     FM_FS      *owner;          /* the FM_FS it is in use by */
+    /* The pool (see LittleFS_Init): a mount of this context has begun
+     * or is in place; and the order in which contexts were handed out. */
+    uint8_t     pool_busy;
+    uint32_t    pool_age;
 
     /* Static buffers handed to littlefs (no heap required).  They go
      * to the storage driver as they are, so they start on a cache line:
@@ -91,6 +95,7 @@ typedef char lfs_dir_handle_must_fit[
 
 /* One context per registered adapter instance (FM_MAX_FS). */
 static LittleFS_Ctx g_lfs[FM_MAX_FS];
+static uint32_t g_lfs_age;
 
 static LittleFS_Ctx *lfs_ctx(FM_FS *fs)
 {
@@ -228,6 +233,15 @@ static FM_Result lfs_build_cfg(LittleFS_Ctx *ctx, FM_Storage *storage)
     {
         block = 512;
     }
+    /* littlefs needs blocks of at least 128 bytes (its own metadata does
+     * not fit below that; lfs_init() asserts it, and with assertions off
+     * it writes outside the block).  A byte-addressed medium -- a RAM
+     * disk from RamDisk_Register(), erase unit 1 -- gets the smallest
+     * multiple of its unit that reaches 512. */
+    if (block < 128u)
+    {
+        block = ((512u + block - 1u) / block) * block;
+    }
 
     if (read_size == 0 || block % read_size != 0)
     {
@@ -269,7 +283,9 @@ static FM_Result lfs_build_cfg(LittleFS_Ctx *ctx, FM_Storage *storage)
     ctx->cfg.prog_buffer = ctx->prog_buf;
     ctx->cfg.lookahead_buffer = ctx->lookahead;
 
-    if (ctx->cfg.block_count == 0)
+    /* two blocks hold the superblock pair; a volume needs more than
+     * that to store anything, but two is what littlefs itself accepts */
+    if (ctx->cfg.block_count < 2u)
     {
         return FM_ERR_NO_SPACE;
     }
@@ -340,6 +356,10 @@ static LittleFS_Ctx *lfs_claim(FM_FS *fs)
     {
         ctx = NULL;
     }
+    if (ctx != NULL)
+    {
+        ctx->pool_busy = 1u;
+    }
     FM_Unlock();
     return ctx;
 }
@@ -351,6 +371,7 @@ static void lfs_release(LittleFS_Ctx *ctx)
     ctx->storage = NULL;
     ctx->owner = NULL;
     ctx->in_use = FM_FALSE;
+    ctx->pool_busy = 0u;
     FM_Unlock();
 }
 
@@ -406,34 +427,85 @@ static FM_Result lfs_fs_unmount(FM_FS *fs)
     return FM_OK;
 }
 
+/* FS_Format() of a mounted volume (the only kind it accepts).
+ *
+ * lfs_format() writes a new, empty file system and leaves the lfs_t in
+ * the state of "not mounted".  This function used to call it on the
+ * mounted lfs_t and return: the volume on the medium was new, the
+ * lfs_t still described the old one, and every call after the format
+ * failed with FM_ERR_CORRUPTED until the next reset.  So: unmount,
+ * format, mount again. */
 static FM_Result lfs_fs_format(FM_FS *fs)
 {
     LittleFS_Ctx *ctx = lfs_ctx(fs);
+    FM_Bool was_mounted;
     FM_Result r;
     int err;
 
-    if (fs->storage == NULL)
+    if (ctx == NULL || ctx->owner != fs || fs->storage == NULL)
     {
         return FM_ERR_NOT_MOUNTED;
     }
+    was_mounted = ctx->mounted;
+    if (was_mounted)
+    {
+        (void)lfs_unmount(&ctx->lfs);
+    }
     r = lfs_build_cfg(ctx, fs->storage);
+    err = (r == FM_OK) ? lfs_format(&ctx->lfs, &ctx->cfg) : LFS_ERR_OK;
+    if (was_mounted)
+    {
+        /* whatever the format said, the volume has to be usable again:
+         * after a format that failed this mounts what is there */
+        int merr = lfs_mount(&ctx->lfs, &ctx->cfg);
+
+        if (merr != LFS_ERR_OK)
+        {
+            ctx->mounted = FM_FALSE;
+            if (err == LFS_ERR_OK)
+            {
+                err = merr;
+            }
+        }
+    }
     if (r != FM_OK)
     {
         return r;
     }
-    err = lfs_format(&ctx->lfs, &ctx->cfg);
     return lfs_map_err(err);
 }
 
+static int lfs_check_block(void *data, lfs_block_t block)
+{
+    uint32_t *count = (uint32_t *)data;
+
+    (void)block;
+    (*count)++;
+    return 0;
+}
+
+/* FS_Check(): walk every metadata block of the volume.  littlefs reads
+ * each of them from the medium and checks its checksum on the way, so a
+ * block that no longer holds what was written ends the walk with
+ * LFS_ERR_CORRUPT.  (This used to answer FM_OK for any mounted volume
+ * without reading a byte.)  File data is not read: littlefs keeps no
+ * checksum of it. */
 static FM_Result lfs_fs_check(FM_FS *fs)
 {
     LittleFS_Ctx *ctx = lfs_ctx(fs);
+    uint32_t blocks = 0u;
+    int err;
 
-    if (!ctx->mounted)
+    if (ctx == NULL || ctx->owner != fs || !ctx->mounted)
     {
         return FM_ERR_NOT_MOUNTED;
     }
-    return FM_OK;
+    err = lfs_fs_traverse(&ctx->lfs, lfs_check_block, &blocks);
+    if (err != LFS_ERR_OK)
+    {
+        return lfs_map_err(err);
+    }
+    return (blocks >= 2u) ? FM_OK : FM_ERR_CORRUPTED;
 }
 
 /* ------------------------------------------------------------------ */
@@ -987,9 +1059,13 @@ static FM_Result lfs_fs_get_free(FM_FS *fs, uint64_t *free, uint64_t *total)
 
 static FM_Result lfs_fs_get_type(FM_FS *fs, char *type, size_t type_size)
 {
-    if (type == NULL || type_size < sizeof("LITTLEFS"))
+    if (type == NULL)
     {
         return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (type_size < sizeof("LITTLEFS"))
+    {
+        return FM_ERR_TOO_LARGE;    /* the code every backend gives */
     }
     (void)fs;
     (void)strcpy(type, "LITTLEFS");
@@ -1027,12 +1103,33 @@ FM_Result LittleFS_Init(FM_FS *fs)
             ctx = &g_lfs[i];
         }
     }
+    /* None free.  A context that was handed out by an earlier
+     * LittleFS_Init() and never got as far as a mount is not in use by
+     * anybody: its FS_Mount() was refused before the driver was asked
+     * (no such storage, mount path taken, mount table full), or was
+     * never called.  Nothing gave such a context back, so FM_MAX_FS of
+     * them ended every later LittleFS_Init() with FM_ERR_NO_MEMORY.
+     * The oldest one is taken over.  Its FM_FS can no longer be mounted
+     * (FM_ERR_NOT_READY) until it is initialised again, which is the
+     * rule anyway: LittleFS_Init() before each FS_Mount(). */
+    if (ctx == NULL)
+    {
+        for (i = 0; i < FM_MAX_FS; i++)
+        {
+            if (!g_lfs[i].pool_busy &&
+                (ctx == NULL || g_lfs[i].pool_age < ctx->pool_age))
+            {
+                ctx = &g_lfs[i];
+            }
+        }
+    }
     if (ctx != NULL)
     {
         memset(ctx, 0, sizeof(*ctx));
         ctx->auto_format = FM_TRUE;
         ctx->in_use = FM_TRUE;
         ctx->owner = fs;
+        ctx->pool_age = ++g_lfs_age;
     }
     FM_Unlock();
     if (ctx == NULL)
@@ -1066,6 +1163,92 @@ FM_Result LittleFS_Init(FM_FS *fs)
     fs->ops.get_free = lfs_fs_get_free;
     fs->ops.get_type = lfs_fs_get_type;
     return FM_OK;
+}
+
+/* Write a new, empty LittleFS to a storage no file system is mounted on.
+ *
+ * This is the format for a volume that cannot be mounted: with
+ * LittleFS_SetAutoFormat(fs, FM_FALSE) a blank or damaged medium fails
+ * at FS_Mount(), and FS_Format() only takes a mount path.
+ *
+ *   FM_ERR_BUSY       a mount uses the storage (use FS_Format there)
+ *   FM_ERR_NO_MEMORY  all FM_MAX_FS LittleFS contexts are mounted
+ *
+ * The storage is mounted (Storage_Mount) when it was not, as FS_Mount()
+ * does, and stays mounted.
+ *
+ * The work needs the buffers of one context.  One that is not mounted is
+ * borrowed and handed back as it was: an FM_FS that LittleFS_Init() has
+ * prepared, or one whose mount has just failed, keeps its context and
+ * its auto-format setting, and can be mounted right after this call.
+ * (While the format runs, a second task that mounts that very FM_FS gets
+ * FM_ERR_NOT_READY.) */
+FM_Result LittleFS_FormatStorage(FM_Storage *storage)
+{
+    static FM_FS borrower;      /* only its address is used */
+    LittleFS_Ctx *ctx = NULL;
+    FM_Bool was_in_use = FM_FALSE;
+    FM_FS *was_owner = NULL;
+    FM_Result r;
+    int err = LFS_ERR_OK;
+    uint32_t i;
+
+    if (storage == NULL)
+    {
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    if (FM_VFS_StorageInUse(storage))
+    {
+        return FM_ERR_BUSY;
+    }
+    if (!FM_Storage_IsMounted(storage))
+    {
+        r = Storage_Mount(storage->name);
+        if (r != FM_OK)
+        {
+            return r;
+        }
+    }
+
+    FM_Lock();
+    for (i = 0; i < FM_MAX_FS; i++)
+    {
+        /* not in a mount; a free one rather than one an FM_FS holds */
+        if (!g_lfs[i].pool_busy &&
+            (ctx == NULL || (ctx->in_use && !g_lfs[i].in_use)))
+        {
+            ctx = &g_lfs[i];
+        }
+    }
+    if (ctx != NULL)
+    {
+        was_in_use = ctx->in_use;
+        was_owner = ctx->owner;
+        ctx->in_use = FM_TRUE;
+        ctx->owner = &borrower;
+        ctx->pool_busy = 1u;
+    }
+    FM_Unlock();
+    if (ctx == NULL)
+    {
+        return FM_ERR_NO_MEMORY;
+    }
+
+    r = lfs_build_cfg(ctx, storage);
+    if (r == FM_OK)
+    {
+        err = lfs_format(&ctx->lfs, &ctx->cfg);
+    }
+
+    FM_Lock();
+    ctx->mounted = FM_FALSE;
+    ctx->storage = NULL;
+    ctx->in_use = was_in_use;
+    ctx->owner = was_owner;
+    ctx->pool_busy = 0u;
+    FM_Unlock();
+
+    return (r != FM_OK) ? r : lfs_map_err(err);
 }
 
 void LittleFS_SetAutoFormat(FM_FS *fs, FM_Bool auto_format)

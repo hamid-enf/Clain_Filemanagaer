@@ -255,13 +255,24 @@ const char *Audio_FormatExtension(FM_AudioFileFormat format);
  * When a write failed (card full, I/O error) the file is not thrown
  * away: Close sets the lengths in a WAV / ADPCM header to what reached
  * the card, so that part opens and plays; the error is still what Close
- * returns.  A FLAC file needs no fixing (a reader stops at the frame
- * that was cut).
+ * returns.  A FLAC file has no lengths to set, but it does not end
+ * cleanly either: its last frame is cut.  This library plays every
+ * whole frame and then reports the end; a stricter reader (libav) plays
+ * the same frames and then reports "invalid data".  Its header says
+ * "total samples = 0": a reader that trusts the header shows no length.
+ * (Audio_Open of this library counts the whole frames of such a file
+ * and reports their length.)
  *
  * A recording that is never closed (reset, power loss, card pulled):
  * every FM_AUDIO_ENC_SYNC_BYTES (256 KB; 0 = off) the lengths are
- * brought up to date and the file is synced, so it plays up to the last
- * such point.  Less than that many bytes on the card = an empty file.
+ * brought up to date and the file is synced, so a WAV / ADPCM file
+ * plays up to the last such point (what was written after it is in the
+ * file but outside the lengths).  With less than that many bytes
+ * written, the lengths in the header are still 0, and what a reader
+ * gets depends on the file system: on FAT the size of the file is still
+ * 0 (nothing to play); where the bytes did reach the medium, this
+ * library and libav play them to the end of the file, a reader that
+ * trusts the header shows an empty track.  Do not rely on either.
  * In time: 1.5 s of 44.1 kHz stereo WAV, 6 s of 44.1 kHz stereo ADPCM,
  * 64 s of 8 kHz mono ADPCM -- choose a smaller value for low rates. */
 FM_Result AudioFileWriter_Open(FM_AudioFileWriter *writer, const char *path,

@@ -470,6 +470,19 @@ FM_Result FS_Mount(const char *mount_path, FM_FS *fs)
     {
         return FM_ERR_BUSY;
     }
+    /* The same demand as FS_Register(): an FM_FS without these cannot
+     * serve a file.  An adapter's Init that failed leaves the FM_FS all
+     * zero (LittleFS_Init() with no context left, for one); mounting it
+     * anyway used to succeed, and the first File_Open() on the volume
+     * then called a NULL pointer. */
+    if (fs->ops.file_open == NULL || fs->ops.file_close == NULL ||
+        fs->ops.file_read == NULL || fs->ops.file_write == NULL)
+    {
+        FM_ERR_LOG("mount %s failed (%d): the FM_FS has no file "
+                   "functions (was its Init checked?)", mount_path,
+                   (int)FM_ERR_INVALID_ARGUMENT);
+        return FM_ERR_INVALID_ARGUMENT;
+    }
     r = mount_path_normalize(mount_path, normalized, sizeof(normalized));
     if (r != FM_OK)
     {
@@ -626,6 +639,29 @@ FM_Result FS_Unmount(const char *mount_path)
     mount_op_unlock();
     FM_EVENT_LOG("unmounted %s", normalized);
     return FM_OK;
+}
+
+FM_Bool FM_VFS_StorageInUse(const FM_Storage *storage)
+{
+    FM_Bool in_use = FM_FALSE;
+    uint32_t i;
+
+    if (storage == NULL)
+    {
+        return FM_FALSE;
+    }
+    FM_Lock();
+    for (i = 0; i < FM_MAX_MOUNTS; i++)
+    {
+        if (g_mounts[i].used && g_mounts[i].fs != NULL &&
+            g_mounts[i].fs->storage == storage)
+        {
+            in_use = FM_TRUE;
+            break;
+        }
+    }
+    FM_Unlock();
+    return in_use;
 }
 
 FM_Result FS_Format(const char *mount_path)

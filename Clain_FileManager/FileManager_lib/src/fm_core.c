@@ -275,7 +275,33 @@ int FileManager_GetDebugLevel(void)
     return FM_DEBUG_LEVEL;
 }
 
-FM_Result FileManager_Init(void)
+FM_Result FileManager_InitChecked(size_t file_size, size_t dir_size,
+                                  size_t storage_size, size_t fs_size,
+                                  size_t entry_size)
+{
+    if (file_size != sizeof(FM_File) || dir_size != sizeof(FM_Dir) ||
+        storage_size != sizeof(FM_Storage) || fs_size != sizeof(FM_FS) ||
+        entry_size != sizeof(FM_DirEntry))
+    {
+        FM_ERR_LOG("FileManager_Init: the application and the library "
+                   "were compiled with different options. Sizes "
+                   "application/library: FM_File %lu/%lu, FM_Dir %lu/%lu, "
+                   "FM_Storage %lu/%lu, FM_FS %lu/%lu, FM_DirEntry %lu/%lu",
+                   (unsigned long)file_size, (unsigned long)sizeof(FM_File),
+                   (unsigned long)dir_size, (unsigned long)sizeof(FM_Dir),
+                   (unsigned long)storage_size,
+                   (unsigned long)sizeof(FM_Storage),
+                   (unsigned long)fs_size, (unsigned long)sizeof(FM_FS),
+                   (unsigned long)entry_size,
+                   (unsigned long)sizeof(FM_DirEntry));
+        return FM_ERR_INTERNAL;
+    }
+    return (FileManager_Init)();
+}
+
+/* (the name in parentheses: file_manager.h makes FileManager_Init() a
+ * macro that calls the function above) */
+FM_Result (FileManager_Init)(void)
 {
     /*
      * فلگ FM_CACHE را اینجا اعمال کن. اینجا امن است چون تا وقتی

@@ -161,6 +161,34 @@ static void qspi_delay(FM_QspiDevice *dev, uint32_t ms)
     }
 }
 
+/* Chips above 16 MB are driven with 4 address bytes, and that is a mode
+ * of the chip (command 0xB7), not of the command: it is volatile.  A
+ * power-up and a software reset (0x66 / 0x99) both put the chip back to
+ * 3 address bytes.  So the mode is entered at start-up AND after every
+ * reset this driver sends.  Without the second, the chip took the first
+ * three of the four address bytes of every later command as its
+ * address: reads returned other data, programs and erases landed 256
+ * times lower than asked -- on a volume that had been fine until one
+ * erase timed out. */
+static void qspi_enter_4byte(FM_QspiDevice *dev)
+{
+    FM_Result r;
+
+    if (dev->info.addr_bytes != 4u)
+    {
+        return;
+    }
+    (void)qspi_write_enable(dev);
+    r = dev->io.cmd(dev->io.ctx, QCMD_ENTER_4B_ADDR);
+    if (r != FM_OK)
+    {
+        /* some chips are in this mode from the factory and refuse the
+         * command: not fatal */
+        FM_EVENT_LOG("4-byte address mode command refused (%d), "
+                     "continuing", (int)r);
+    }
+}
+
 FM_Result FM_Qspi_WaitReady(FM_QspiDevice *dev, uint32_t timeout_ms)
 {
     uint32_t waited = 0;
@@ -207,6 +235,8 @@ FM_Result FM_Qspi_WaitReady(FM_QspiDevice *dev, uint32_t timeout_ms)
             (void)dev->io.cmd(dev->io.ctx, QCMD_RESET_ENABLE);
             (void)dev->io.cmd(dev->io.ctx, QCMD_RESET);
             qspi_delay(dev, 1u);
+            /* the reset dropped the 4-byte address mode */
+            qspi_enter_4byte(dev);
             return FM_ERR_TIMEOUT;
         }
         qspi_delay(dev, 1u);
@@ -322,18 +352,7 @@ FM_Result FM_Qspi_Init(FM_QspiDevice *dev, const FM_QspiIo *io,
     }
 
     /* قطعات بزرگ‌تر از ۱۶MB آدرس ۴ بایتی می‌خواهند. */
-    if (dev->info.addr_bytes == 4u)
-    {
-        (void)qspi_write_enable(dev);
-        r = dev->io.cmd(dev->io.ctx, QCMD_ENTER_4B_ADDR);
-        if (r != FM_OK)
-        {
-            /* بعضی قطعات از قبل در حالت ۴ بایتی هستند و این دستور را
-             * رد می‌کنند — کشنده نیست. */
-            FM_EVENT_LOG("4-byte address mode command refused (%d), "
-                         "continuing", (int)r);
-        }
-    }
+    qspi_enter_4byte(dev);
 
     dev->ready = FM_TRUE;
     FM_EVENT_LOG("%s ready: %lu MB, %lu B sectors, %u-byte addressing",
@@ -596,15 +615,7 @@ static FM_Result qspi_erase_sector(FM_QspiDevice *dev, uint64_t addr)
             }
             if ((st & QSTATUS_BUSY) == 0u)
             {
-                /* «آزاد شدن» بعد از تایم‌اوت، اثر ریست نرم است نه پایان
-                 * طبیعی (پایانِ طبیعی دقیقاً روی مرز ۴۰۰۰ms سی بار پشت
-                 * هم تصادف نیست). سکتور ممکن است نیمه‌پاک باشد؛ بعداً
-                 * Format یک‌باره توصیه می‌شود. */
-                FM_ERR_LOG("erase came back only after a reset (%lu ms): "
-                           "the sector may be half erased, format the "
-                           "volume once",
-                           (unsigned long)waited);
-                return FM_OK;
+                break;
             }
             if ((waited % 2000u) == 0u)
             {
@@ -614,7 +625,17 @@ static FM_Result qspi_erase_sector(FM_QspiDevice *dev, uint64_t addr)
             qspi_delay(dev, 1u);
             waited++;
         }
-        FM_EVENT_LOG("sector erase stuck - retrying once");
+        /* However the wait ended, this erase did not finish: WaitReady
+         * has sent a software reset, and a reset aborts an erase in
+         * progress.  The chip is free again, the sector is somewhere
+         * between its old content and blank.  This used to return FM_OK
+         * here ("the sector may be half erased"); the caller then
+         * programmed its data over the leftovers and reported success
+         * for a sector that read back wrong.  Erase it again, and only
+         * the result of that is the answer. */
+        FM_EVENT_LOG("sector erase @0x%08lX did not finish (%lu ms) - "
+                     "erasing again", (unsigned long)addr,
+                     (unsigned long)waited);
         r = qspi_write_enable(dev);
         if (r == FM_OK)
         {
@@ -622,8 +643,14 @@ static FM_Result qspi_erase_sector(FM_QspiDevice *dev, uint64_t addr)
                                  (uint32_t)addr, dev->info.addr_bytes);
             if (r == FM_OK)
             {
+                dev->stat_erases++;
                 r = FM_Qspi_WaitReady(dev, qspi_erase_timeout(dev));
             }
+        }
+        if (r != FM_OK)
+        {
+            FM_ERR_LOG("sector erase @0x%08lX failed twice (%d)",
+                       (unsigned long)addr, (int)r);
         }
     }
     return r;
@@ -797,6 +824,69 @@ static FM_Result qspi_write_erased(FM_QspiDevice *dev, uint64_t addr,
     return FM_OK;
 }
 
+/* Can [addr, addr + len) take `src` by programming alone?  Yes when
+ * every byte there is either erased (0xFF) or already the byte wanted.
+ * (A NOR cell could take more -- any change that only clears bits --
+ * but programming a byte twice with different values is exactly what
+ * the parts with internal error correction forbid, so that case goes
+ * the long way.)  *same: the chip already holds exactly these bytes. */
+static FM_Result qspi_can_program(FM_QspiDevice *dev, uint64_t addr,
+                                  const uint8_t *src, uint32_t len,
+                                  FM_Bool *can, FM_Bool *same)
+{
+    uint8_t have[128];
+
+    *can = FM_TRUE;
+    *same = FM_TRUE;
+    while (len > 0u)
+    {
+        uint32_t n = (len < (uint32_t)sizeof(have))
+                         ? len : (uint32_t)sizeof(have);
+        uint32_t i;
+        FM_Result r = FM_Qspi_Read(dev, addr, have, n);
+
+        if (r != FM_OK)
+        {
+            return r;
+        }
+        for (i = 0; i < n; i++)
+        {
+            if (have[i] != src[i])
+            {
+                *same = FM_FALSE;
+                if (have[i] != 0xFFu)
+                {
+                    *can = FM_FALSE;
+                    return FM_OK;
+                }
+            }
+        }
+        addr += n;
+        src += n;
+        len -= n;
+    }
+    return FM_OK;
+}
+
+/* Write `len` bytes at `addr`, whatever is there now.
+ *
+ * Sector by sector, the cheapest way that gives the right bytes:
+ *   1. the chip already holds them          -> nothing to do;
+ *   2. they can be programmed over what is
+ *      there (an erased range, above all)   -> program, no erase;
+ *   3. a whole sector                       -> erase, program;
+ *   4. part of a sector that needs an erase -> read the sector, change
+ *      it in RAM, erase, program it back.  Needs the sector buffer of
+ *      FM_Qspi_Init (FM_ERR_UNSUPPORTED without one).
+ *
+ * Case 2 is what a log-structured file system does all the time:
+ * littlefs erases a block and then fills it 256 bytes at a time.  Each
+ * of those writes used to take case 4 -- a 4 KB read, an erase of the
+ * sector and a 4 KB program for 256 new bytes, with every earlier,
+ * already committed write of that sector in RAM only while the sector
+ * was blank: a power cut there lost files that had been closed long
+ * before.  Without a sector buffer the same writes were refused and the
+ * volume could not even be mounted. */
 FM_Result FM_Qspi_Write(FM_QspiDevice *dev, uint64_t addr, const void *buf,
                         uint32_t len)
 {
@@ -815,51 +905,59 @@ FM_Result FM_Qspi_Write(FM_QspiDevice *dev, uint64_t addr, const void *buf,
     FM_TRACE_LOG("write %lu @ %lu", (unsigned long)len,
                  (unsigned long)addr);
 
-    /* حالت ساده: دقیقاً روی مرز سکتور و مضرب سکتور — فقط پاک کن و بنویس. */
-    if ((addr % dev->info.sector_size) == 0u &&
-        (len % dev->info.sector_size) == 0u)
-    {
-        FM_Result r = FM_Qspi_Erase(dev, addr, len);
-
-        if (r != FM_OK)
-        {
-            return r;
-        }
-        return qspi_write_erased(dev, addr, src, len);
-    }
-
-    /* حالت عمومی: read-modify-erase-write برای هر سکتور درگیر.
-     * بدون بافر سکتور نمی‌شود — چون NOR فقط سکتوری پاک می‌شود. */
-    FM_CHECK(dev->sector_buf != NULL, FM_ERR_UNSUPPORTED,
-             "unaligned write needs a sector buffer (pass one to "
-             "FM_Qspi_Init)");
-
     while (len > 0u)
     {
         uint64_t sect_base = addr - (addr % dev->info.sector_size);
         uint32_t off = (uint32_t)(addr - sect_base);
         uint32_t room = dev->info.sector_size - off;
         uint32_t n = (len < room) ? len : room;
+        FM_Bool can = FM_FALSE;
+        FM_Bool same = FM_FALSE;
         FM_Result r;
 
-        /* ۱) سکتور فعلی را بخوان */
-        r = FM_Qspi_Read(dev, sect_base, dev->sector_buf,
-                         dev->info.sector_size);
+        r = qspi_can_program(dev, addr, src, n, &can, &same);
         if (r != FM_OK)
         {
             return r;
         }
-        /* ۲) در RAM تغییرش بده */
-        memcpy(dev->sector_buf + off, src, n);
-        /* ۳) پاکش کن */
-        r = qspi_erase_sector(dev, sect_base);
-        if (r != FM_OK)
+        if (same)
         {
-            return r;
+            /* 1) already there */
         }
-        /* ۴) کامل بنویسش */
-        r = qspi_write_erased(dev, sect_base, dev->sector_buf,
-                              dev->info.sector_size);
+        else if (can)
+        {
+            /* 2) program over what is there */
+            r = qspi_write_erased(dev, addr, src, n);
+        }
+        else if (off == 0u && n == dev->info.sector_size)
+        {
+            /* 3) a whole sector: erase and program */
+            r = qspi_erase_sector(dev, sect_base);
+            if (r == FM_OK)
+            {
+                r = qspi_write_erased(dev, sect_base, src, n);
+            }
+        }
+        else
+        {
+            /* 4) read-modify-erase-write */
+            FM_CHECK(dev->sector_buf != NULL, FM_ERR_UNSUPPORTED,
+                     "a write over programmed flash that is not a whole "
+                     "sector needs a sector buffer (pass one to "
+                     "FM_Qspi_Init)");
+            r = FM_Qspi_Read(dev, sect_base, dev->sector_buf,
+                             dev->info.sector_size);
+            if (r == FM_OK)
+            {
+                memcpy(dev->sector_buf + off, src, n);
+                r = qspi_erase_sector(dev, sect_base);
+            }
+            if (r == FM_OK)
+            {
+                r = qspi_write_erased(dev, sect_base, dev->sector_buf,
+                                      dev->info.sector_size);
+            }
+        }
         if (r != FM_OK)
         {
             return r;

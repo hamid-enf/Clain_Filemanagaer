@@ -140,6 +140,9 @@ static uint32_t g_usb_msc_prev_tick = 0xFFFFFFFFu;
 #ifndef USB_MSC_BOUNCE_SECTION
 #define USB_MSC_BOUNCE_SECTION
 #endif
+#if (USB_MSC_BOUNCE_SECTORS) < 1
+#error "USB_MSC_BOUNCE_SECTORS must be at least 1"
+#endif
 static uint8_t g_usb_msc_bounce[USB_MSC_BOUNCE_SECTORS * 512u]
     __attribute__((aligned(32))) USB_MSC_BOUNCE_SECTION;
 
@@ -283,6 +286,47 @@ static inline int8_t UsbMsc_StorageIsWriteProtected(uint8_t lun)
 #endif
 }
 
+/* عیب‌یابی: سکتور صفر بدون امضای 55 AA خوانده شد. دوباره با دو بافر
+ * جدا می‌خواند و ۱۶ بایت اول هر دو را لاگ می‌کند.
+ *
+ * این دو بافر ۵۱۲ بایتی قبلاً متغیر محلیِ UsbMsc_StorageRead بودند: کامپایلر
+ * جای‌شان را در ابتدای تابع می‌گیرد، یعنی هر READ(10) -- که داخل وقفهٔ
+ * USB و روی پشتهٔ اصلی (MSP) اجرا می‌شود -- بیش از ۱ کیلوبایت پشته
+ * می‌برد، برای شاخه‌ای که تقریباً هیچ‌وقت اجرا نمی‌شود. حالا static
+ * هستند (۱ کیلوبایت RAM ثابت، صفر بایت پشته). تابع بازورودی نیست؛ لازم
+ * هم نیست: فقط از یک جا (وقفهٔ USB یا UsbSd_Poll) صدا زده می‌شود. */
+static void UsbMsc_Lba0Probe(void)
+{
+    static uint8_t probe[512];
+    static uint8_t via_fm[512];
+    FM_Result r1, r2;
+    int i;
+
+    /* پروب ۱: همان مسیر، بافر تازه */
+    memset(probe, 0x5Au, sizeof(probe));
+    r1 = USB_MSC_ReadBlocks(&g_usb_msc_ctx.msc, 0u, 1u, probe);
+    FM_Cache_CleanForDma(probe, sizeof(probe));
+    FM_Cache_InvalidateAfterDma(probe, sizeof(probe));
+    /* پروب ۲: مستقیم از درایور (بدون لایهٔ USB-MSC) */
+    memset(via_fm, 0x5Au, sizeof(via_fm));
+    r2 = Storage_ReadBlocks("SD", 0u, via_fm, sizeof(via_fm));
+    FM_Cache_CleanForDma(via_fm, sizeof(via_fm));
+    FM_Cache_InvalidateAfterDma(via_fm, sizeof(via_fm));
+    FM_Log("UsbMsc: lba0 ZERO! r1=%d r2=%d\n", (int)r1, (int)r2);
+    FM_Log("UsbMsc: usb16:");
+    for (i = 0; i < 16; i++)
+    {
+        FM_Log(" %02X", probe[i]);
+    }
+    FM_Log("%s\n", "");
+    FM_Log("UsbMsc: sd--16:");
+    for (i = 0; i < 16; i++)
+    {
+        FM_Log(" %02X", via_fm[i]);
+    }
+    FM_Log("%s\n", "");
+}
+
 static inline int8_t UsbMsc_StorageRead(uint8_t lun, uint8_t *buffer,
                                      uint32_t lba, uint16_t block_count)
 {
@@ -361,41 +405,7 @@ static inline int8_t UsbMsc_StorageRead(uint8_t lun, uint8_t *buffer,
                     }
                     else
                     {
-                        /* خواندن دوباره با بافر تازهٔ جدایbounce: اگر این
-                         * هم صفر بود یعنی خود پای درایور در این context
-                         * داده نمی‌دهد (نه کش، نه آدرس بافر) */
-                        uint8_t probe[512];
-                        uint8_t via_fm[512];
-                        FM_Result r1, r2;
-                        int i;
-
-                        /* پروب ۱: همان مسیر، بافر تازه */
-                        memset(probe, 0x5Au, sizeof(probe));
-                        r1 = USB_MSC_ReadBlocks(&g_usb_msc_ctx.msc, 0u, 1u,
-                                                probe);
-                        FM_Cache_CleanForDma(probe, sizeof(probe));
-                        FM_Cache_InvalidateAfterDma(probe, sizeof(probe));
-                        /* پروب ۲: مستقیم از درایور (بدون لایهٔ USB-MSC) */
-                        memset(via_fm, 0x5Au, sizeof(via_fm));
-                        r2 = Storage_ReadBlocks("SD", 0u, via_fm,
-                                                sizeof(via_fm));
-                        FM_Cache_CleanForDma(via_fm, sizeof(via_fm));
-                        FM_Cache_InvalidateAfterDma(via_fm,
-                                                    sizeof(via_fm));
-                        FM_Log("UsbMsc: lba0 ZERO! r1=%d r2=%d\n",
-                               (int)r1, (int)r2);
-                        FM_Log("UsbMsc: usb16:");
-                        for (i = 0; i < 16; i++)
-                        {
-                            FM_Log(" %02X", probe[i]);
-                        }
-                        FM_Log("%s\n", "");
-                        FM_Log("UsbMsc: sd--16:");
-                        for (i = 0; i < 16; i++)
-                        {
-                            FM_Log(" %02X", via_fm[i]);
-                        }
-                        FM_Log("%s\n", "");
+                        UsbMsc_Lba0Probe();
                     }
                 }
             }
@@ -445,7 +455,18 @@ static inline int8_t UsbMsc_StorageWrite(uint8_t lun, const uint8_t *buffer,
         while (done < (uint32_t)block_count)
         {
             uint32_t n = (uint32_t)block_count - done;
-            size_t bytes = (size_t)n * 512u;
+            size_t bytes;
+
+            /* One window of the bounce buffer per pass, like the read
+             * path.  Without this limit a request of more than
+             * USB_MSC_BOUNCE_SECTORS blocks copied block_count * 512
+             * bytes into the 4 KB buffer (the Cube stack hands over 1
+             * block per call with MSC_MEDIA_PACKET 512, 64 with 32768). */
+            if (n > (uint32_t)USB_MSC_BOUNCE_SECTORS)
+            {
+                n = (uint32_t)USB_MSC_BOUNCE_SECTORS;
+            }
+            bytes = (size_t)n * 512u;
 
             /* هستهٔ USB تازه با DMA در بافر کیوب نوشته؛ CPU باید دادهٔ
              * تازهٔ RAM را ببیند: Clean (خطوط کثیفِ همسایه بیرون بریزد)

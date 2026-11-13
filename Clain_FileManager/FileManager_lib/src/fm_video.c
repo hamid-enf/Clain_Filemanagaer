@@ -6738,37 +6738,42 @@ static FM_Result video_audio_read_raw(FM_Video *v, FM_VideoPriv *priv,
     }
     else if (priv->audio_codec == FM_VIDEO_AUDIO_ALAW)
     {
-        /* 8-bit A-law -> 16-bit PCM: expand in place via temp */
-        uint8_t *tmp = (uint8_t*)FM_Alloc(fsize);
+        /* 8-bit A-law -> 16-bit PCM, expanded inside the caller's buffer.
+         * The packet is read into the upper half and expanded upwards
+         * from the start: sample i is read at fsize + i and written at
+         * 2i and 2i + 1, which is never ahead of the read.
+         *
+         * (It used to go through an FM_Alloc of the whole packet, taken
+         * BEFORE the capacity was looked at: a packet the caller could
+         * not take anyway cost a heap block first, and with little heap
+         * the answer was FM_ERR_NO_MEMORY instead of FM_ERR_TOO_LARGE.) */
         size_t need = (size_t)fsize * 2u;
-        if (tmp == NULL) return FM_ERR_NO_MEMORY;
-        if (cap < need) { FM_Free(tmp); return FM_ERR_TOO_LARGE; }
-        r = video_read_at(&v->file, offset, tmp, fsize);
-        if (r != FM_OK) { FM_Free(tmp); return r; }
+        const uint8_t *in = buf + fsize;
+        if (cap < need) return FM_ERR_TOO_LARGE;
+        r = video_read_at(&v->file, offset, buf + fsize, fsize);
+        if (r != FM_OK) return r;
         for (uint32_t i=0;i<fsize;i++)
         {
-            uint32_t s = (uint32_t)(int32_t)alaw_decode(tmp[i]);
+            uint32_t s = (uint32_t)(int32_t)alaw_decode(in[i]);
             buf[i*2u] = (uint8_t)(s & 0xFFu);
             buf[i*2u+1u] = (uint8_t)((s>>8)&0xFFu);
         }
-        FM_Free(tmp);
         *size = need;
     }
     else if (priv->audio_codec == FM_VIDEO_AUDIO_ULAW)
     {
-        uint8_t *tmp = (uint8_t*)FM_Alloc(fsize);
+        /* as A-law above: no heap, capacity first */
         size_t need = (size_t)fsize * 2u;
-        if (tmp == NULL) return FM_ERR_NO_MEMORY;
-        if (cap < need) { FM_Free(tmp); return FM_ERR_TOO_LARGE; }
-        r = video_read_at(&v->file, offset, tmp, fsize);
-        if (r != FM_OK) { FM_Free(tmp); return r; }
+        const uint8_t *in = buf + fsize;
+        if (cap < need) return FM_ERR_TOO_LARGE;
+        r = video_read_at(&v->file, offset, buf + fsize, fsize);
+        if (r != FM_OK) return r;
         for (uint32_t i=0;i<fsize;i++)
         {
-            uint32_t s = (uint32_t)(int32_t)ulaw_decode(tmp[i]);
+            uint32_t s = (uint32_t)(int32_t)ulaw_decode(in[i]);
             buf[i*2u] = (uint8_t)(s & 0xFFu);
             buf[i*2u+1u] = (uint8_t)((s>>8)&0xFFu);
         }
-        FM_Free(tmp);
         *size = need;
     }
     else

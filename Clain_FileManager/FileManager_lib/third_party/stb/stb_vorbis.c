@@ -74,6 +74,15 @@
 #ifndef STB_VORBIS_INCLUDE_STB_VORBIS_H
 #define STB_VORBIS_INCLUDE_STB_VORBIS_H
 
+// FileManager (local change, see third_party/README.md): the library
+// decodes from memory and through the push-data API only.  The FILE *
+// functions were compiled into every firmware (a project build defines
+// no symbol of ours) and pulled fopen / fread / fseek / ftell / fclose
+// in with them.  STB_VORBIS_YES_STDIO brings them back.
+#if !defined(STB_VORBIS_YES_STDIO) && !defined(STB_VORBIS_NO_STDIO)
+#define STB_VORBIS_NO_STDIO 1
+#endif
+
 #if defined(STB_VORBIS_NO_CRT) && !defined(STB_VORBIS_NO_STDIO)
 #define STB_VORBIS_NO_STDIO 1
 #endif

@@ -251,7 +251,11 @@ FM_Result Image_ApplyEffect(FM_Image *img, FM_ImageEffect effect,
 /* ------------------------------------------------------------------ */
 /* Scale a raw pixel buffer from (sw x sh) to (dw x dh), preserving the
  * pixel format. Supports GRAY8, RGB/BGR 565, RGB/BGR 888 and RGBA/BGRA8888.
- * Alpha is preserved/interpolated. Nearest is fastest; bilinear is smoother. */
+ * Alpha is preserved/interpolated. Nearest is fastest; bilinear is smoother.
+ * Bilinear: pixel centres map onto pixel centres, the four source pixels
+ * around a destination pixel are mixed by distance, the edge pixel is
+ * repeated.  There is no filter in front of it: shrinking by more than 2
+ * skips source pixels. */
 FM_Result Image_Scale(const void *src, uint16_t sw, uint16_t sh,
                       FM_PixelFormat fmt, void *dst, uint16_t dw, uint16_t dh,
                       FM_ScaleMode mode);

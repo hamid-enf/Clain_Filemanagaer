@@ -86,20 +86,38 @@ FM_Result Path_Join(const char *a, const char *b, char *out, size_t out_size)
         return FM_ERR_TOO_LARGE;
     }
 
+    /* `out` may be `a` or `b` (joining in place).  The tail goes to its
+     * place first: copying `a` first wrote over `b` when out == b, and
+     * Path_Join("/dir", buf, buf, n) returned FM_OK with "/dir//dir/..."
+     * in buf. */
+    memmove(out + la + (add_sep ? 1u : 0u), b + b_start, lb - b_start);
     memmove(out, a, la);
     if (add_sep)
     {
-        out[la++] = '/';
+        out[la] = '/';
     }
-    memmove(out + la, b + b_start, lb - b_start);
     out[need] = '\0';
     return FM_OK;
 }
 
+/* Where each kept component starts.  A path of fewer than FM_PATH_MAX
+ * characters has at most FM_PATH_MAX / 2 components ("a/a/a..."), and
+ * every start is below FM_PATH_MAX: the list is that long and its
+ * entries that wide, no more.  (It was size_t[FM_PATH_MAX]: 640 bytes
+ * of stack on a 32-bit target, under every call that takes a path.) */
+#if FM_PATH_MAX <= 256
+typedef uint8_t fm_path_off_t;
+#elif FM_PATH_MAX <= 65536
+typedef uint16_t fm_path_off_t;
+#else
+typedef size_t fm_path_off_t;
+#endif
+#define FM_PATH_COMP_MAX ((size_t)FM_PATH_MAX / 2u + 1u)
+
 FM_Result Path_Normalize(char *path, size_t path_size)
 {
     char result[FM_PATH_MAX];
-    size_t offsets[FM_PATH_MAX];
+    fm_path_off_t offsets[FM_PATH_COMP_MAX];
     size_t input_len = 0;
     size_t ncomp = 0;
     size_t out_len = 0;
@@ -147,29 +165,31 @@ FM_Result Path_Normalize(char *path, size_t path_size)
         }
         if (len == 2 && path[start] == '.' && path[start + 1] == '.')
         {
+            size_t prev = (ncomp > 0) ? (size_t)offsets[ncomp - 1] : 0u;
+
             if (ncomp > 0 &&
-                !(path[offsets[ncomp - 1]] == '.' &&
-                  path[offsets[ncomp - 1] + 1] == '.' &&
-                  (offsets[ncomp - 1] + 2 == input_len ||
-                   path[offsets[ncomp - 1] + 2] == '/')))
+                !(path[prev] == '.' &&
+                  path[prev + 1] == '.' &&
+                  (prev + 2 == input_len ||
+                   path[prev + 2] == '/')))
             {
                 ncomp--;
             }
             else if (!absolute)
             {
-                if (ncomp >= FM_PATH_MAX)
+                if (ncomp >= FM_PATH_COMP_MAX)
                 {
                     return FM_ERR_TOO_LARGE;
                 }
-                offsets[ncomp++] = start;
+                offsets[ncomp++] = (fm_path_off_t)start;
             }
             continue;
         }
-        if (ncomp >= FM_PATH_MAX)
+        if (ncomp >= FM_PATH_COMP_MAX)
         {
             return FM_ERR_TOO_LARGE;
         }
-        offsets[ncomp++] = start;
+        offsets[ncomp++] = (fm_path_off_t)start;
     }
 
     if (absolute)

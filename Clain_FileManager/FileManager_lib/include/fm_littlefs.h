@@ -61,6 +61,23 @@ FM_Result LittleFS_Init(FM_FS *fs);
  * FS_Format() explicitly. */
 void LittleFS_SetAutoFormat(FM_FS *fs, FM_Bool auto_format);
 
+/* Write a new, empty LittleFS to a registered storage no file system is
+ * mounted on -- the format for a volume FS_Mount() refuses (auto-format
+ * off and the medium blank or damaged):
+ *
+ *     LittleFS_Init(&fs);
+ *     LittleFS_SetAutoFormat(&fs, FM_FALSE);
+ *     if (FS_Mount("/qspi", &fs) == FM_ERR_CORRUPTED && user_said_yes) {
+ *         LittleFS_FormatStorage(&qspi_storage);
+ *         FS_Mount("/qspi", &fs);          // the same fs, setting kept
+ *     }
+ *
+ * FM_ERR_BUSY while a mount uses the storage (format that one with
+ * FS_Format()); FM_ERR_NO_MEMORY when all FM_MAX_FS LittleFS volumes are
+ * mounted (the format borrows the buffers of one that is not).  The
+ * storage is mounted with Storage_Mount() if it was not, and stays so. */
+FM_Result LittleFS_FormatStorage(FM_Storage *storage);
+
 #endif /* FM_USE_LITTLEFS */
 
 FM_END_DECLS

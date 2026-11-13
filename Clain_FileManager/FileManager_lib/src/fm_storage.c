@@ -408,6 +408,15 @@ FM_Result Storage_Unmount(const char *name)
     {
         return r;
     }
+    /* A file system is mounted on it: FS_Unmount() comes first (and
+     * unmounts the storage itself when it was the last user).  This
+     * call used to go through, and the file system went on reading and
+     * writing a storage that had been told it was no longer in use. */
+    if (FM_VFS_StorageInUse(s))
+    {
+        FM_ERR_LOG("unmount %s: a file system is mounted on it", name);
+        return FM_ERR_BUSY;
+    }
     storage_op_lock();
     storage_unmount_locked(s);
     storage_op_unlock();
@@ -431,6 +440,14 @@ FM_Result Storage_Format(const char *name)
     if (!FM_Storage_IsPresent(s))
     {
         return FM_ERR_NOT_READY;
+    }
+    /* Erasing the medium under a mounted file system -- with files open
+     * on it, for all this function knew -- used to work and answer
+     * FM_OK.  FS_Format() is the format for a mounted volume. */
+    if (FM_VFS_StorageInUse(s))
+    {
+        FM_ERR_LOG("format %s: a file system is mounted on it", name);
+        return FM_ERR_BUSY;
     }
     if (s->on_format != NULL)
     {

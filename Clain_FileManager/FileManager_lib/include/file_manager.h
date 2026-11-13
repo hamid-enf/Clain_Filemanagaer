@@ -96,6 +96,38 @@ FM_BEGIN_DECLS
 FM_Result FileManager_Init(void);
 void      FileManager_Deinit(void);
 
+/* FileManager_Init() with a check that the caller and the library were
+ * compiled with the same options.  FM_File, FM_Dir, FM_Storage, FM_FS
+ * and FM_DirEntry are allocated by the application and filled in by the
+ * library, and their sizes follow the configuration (FM_USE_THREADS,
+ * FM_PATH_MAX, FM_NAME_MAX, the buffer sizes...).  A libfilemanager.a
+ * built with one set of -D options and linked to an application built
+ * with another reads and writes past the end of those objects, silently.
+ * With different sizes this returns FM_ERR_INTERNAL, prints which type
+ * differs (FM_DEBUG_LEVEL >= 1) and initializes nothing.
+ *
+ * What it does not see: an option that changes none of these five.  The
+ * objects of the optional modules (FM_Logger, FM_Json, FM_Video, ...)
+ * are not compared one by one; they follow the five through FM_File,
+ * FM_PATH_MAX and FM_NAME_MAX, but an option of their own
+ * (FM_LOGGER_BUFFER_SIZE in FM_Logger, for one) can differ unnoticed.
+ * The rule stays: one set of -D options for the library and for
+ * everything that includes its headers.
+ *
+ * FileManager_Init() in application code IS this call: the macro below
+ * passes the sizes the application sees.  -DFM_NO_ABI_CHECK=1 removes
+ * the macro (for code that needs the plain function, e.g. takes its
+ * address; `(FileManager_Init)()` calls it as well). */
+FM_Result FileManager_InitChecked(size_t file_size, size_t dir_size,
+                                  size_t storage_size, size_t fs_size,
+                                  size_t entry_size);
+#if !defined(FM_NO_ABI_CHECK) || !FM_NO_ABI_CHECK
+#define FileManager_Init() \
+    FileManager_InitChecked(sizeof(FM_File), sizeof(FM_Dir), \
+                            sizeof(FM_Storage), sizeof(FM_FS), \
+                            sizeof(FM_DirEntry))
+#endif
+
 /* Optional super-loop hook.  Image/PNG/JPEG decode calls FM_Idle()
  * between scanlines so I2S audio can refill instead of underrunning.
  * SimpleAudio_Begin installs SimpleAudio_Poll here.  Re-entrant calls

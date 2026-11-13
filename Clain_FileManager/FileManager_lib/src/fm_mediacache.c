@@ -135,31 +135,48 @@ static uint64_t mc_total_bytes(void)
  * کوچک زمان دقیق نگه نمی‌دارند، و برای باز کردن جا بزرگ‌ترین انتخاب
  * مؤثرتری است.
  */
+/* A cached file that is open -- the one being played -- cannot be
+ * deleted (File_Delete: FM_ERR_BUSY), and must not be.  It used to end
+ * the search: the biggest file is the likeliest to be the one playing,
+ * and with it "in the way" nothing else was removed, the new copy was
+ * made on top of a full cache and max_total_bytes was exceeded (and the
+ * failed delete was counted as an eviction).  Such a file is now passed
+ * over and the next biggest is taken. */
+#define MC_EVICT_BUSY_MAX 4u
+
 static FM_Result mc_evict_one(const char *keep)
 {
-    FM_Dir *d;
-    FM_DirEntry e;
-    char victim[FM_PATH_MAX];
-    uint64_t biggest = 0;
-    FM_Bool found = FM_FALSE;
+    char busy[MC_EVICT_BUSY_MAX][FM_NAME_MAX];
+    uint32_t n_busy = 0;
 
-    d = Directory_Open(g_cfg.cache_root);
-    if (d == NULL)
+    for (;;)
     {
-        return FM_ERR_NOT_FOUND;
-    }
-    while (Directory_Read(d, &e) == FM_OK)
-    {
-        if (e.type == FM_ITEM_DIR)
+        FM_Dir *d;
+        FM_DirEntry e;
+        char victim[FM_PATH_MAX];
+        char victim_name[FM_NAME_MAX];
+        uint64_t biggest = 0;
+        FM_Bool found = FM_FALSE;
+        FM_Result r;
+        uint32_t i;
+
+        d = Directory_Open(g_cfg.cache_root);
+        if (d == NULL)
         {
-            continue;
+            return FM_ERR_NOT_FOUND;
         }
-        if (e.size >= biggest)
+        while (Directory_Read(d, &e) == FM_OK)
         {
             char full[FM_PATH_MAX];
+            int n;
 
-            if (snprintf(full, sizeof(full), "%s/%s", g_cfg.cache_root,
-                         e.name) < 0)
+            if (e.type == FM_ITEM_DIR || e.size < biggest)
+            {
+                continue;
+            }
+            n = snprintf(full, sizeof(full), "%s/%s", g_cfg.cache_root,
+                         e.name);
+            if (n < 0 || (size_t)n >= sizeof(full))
             {
                 continue;
             }
@@ -167,21 +184,43 @@ static FM_Result mc_evict_one(const char *keep)
             {
                 continue;          /* همانی که الان می‌سازیم */
             }
+            for (i = 0; i < n_busy; i++)
+            {
+                if (strcmp(busy[i], e.name) == 0)
+                {
+                    break;
+                }
+            }
+            if (i < n_busy)
+            {
+                continue;          /* open: tried, cannot go */
+            }
             biggest = e.size;
             memcpy(victim, full, sizeof(victim));
+            memcpy(victim_name, e.name, sizeof(victim_name));
             found = FM_TRUE;
         }
-    }
-    (void)Directory_Close(d);
+        (void)Directory_Close(d);
 
-    if (!found)
-    {
-        return FM_ERR_NOT_FOUND;
+        if (!found)
+        {
+            return FM_ERR_NOT_FOUND;
+        }
+        r = File_Delete(victim);
+        if (r == FM_OK)
+        {
+            FM_EVENT_LOG("evicted %s (%lu bytes)", victim,
+                         (unsigned long)biggest);
+            g_stats.evictions++;
+            return FM_OK;
+        }
+        if (r != FM_ERR_BUSY || n_busy >= MC_EVICT_BUSY_MAX)
+        {
+            return r;
+        }
+        memcpy(busy[n_busy], victim_name, sizeof(busy[n_busy]));
+        n_busy++;
     }
-    FM_EVENT_LOG("evicting %s (%lu bytes)", victim,
-                 (unsigned long)biggest);
-    g_stats.evictions++;
-    return File_Delete(victim);
 }
 
 /* ------------------------------------------------------------------ */

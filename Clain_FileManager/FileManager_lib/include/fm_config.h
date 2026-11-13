@@ -277,7 +277,12 @@
  * (FM_ERR_TOO_LARGE; names are never shortened).  FAT long file names
  * and littlefs names go up to 255: set this to 256 for cards or images
  * that are written elsewhere.  Costs that many bytes per FM_DirEntry /
- * FM_FileInfo, most of them on the stack of the caller. */
+ * FM_FileInfo, most of them on the stack of the caller.
+ *
+ * The library itself never makes such a name: creating a file or a
+ * directory, renaming, copying or moving to a name of FM_NAME_MAX
+ * characters or more is FM_ERR_TOO_LARGE.  A longer name that is
+ * already on a card can still be opened and deleted by its path. */
 #define FM_NAME_MAX 64                /* max file/dir entry name       */
 #endif
 #ifndef FM_MAX_OPEN_FILES

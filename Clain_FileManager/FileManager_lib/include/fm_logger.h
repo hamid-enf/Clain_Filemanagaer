@@ -68,7 +68,10 @@ FM_Result Logger_Close(FM_Logger *lg);       /* alias for Stop             */
 FM_Result Logger_Flush(FM_Logger *lg);
 FM_Result Logger_GetInfo(FM_Logger *lg, FM_LoggerInfo *info);
 
-/* CSV / JSONL: one record of N float values with a timestamp. */
+/* CSV / JSONL: one record of N float values with a timestamp, three
+ * decimals each.  A value beyond +-9000000 is written as +-9000000.000.
+ * NaN and +-infinity are written as nan / inf / -inf in CSV and as null
+ * in JSONL. */
 FM_Result Logger_Write(FM_Logger *lg, uint32_t timestamp,
                        const float *values, uint32_t value_count);
 

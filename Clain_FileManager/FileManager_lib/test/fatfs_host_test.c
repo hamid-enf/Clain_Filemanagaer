@@ -595,6 +595,265 @@ int main(void)
         CHECK(r, "after FatFS_MountDefault");
     }
 
+    /* ---------------------------------------------------------- */
+    printf("[11] audit V5: what a real FatFS does and the mock did not\n");
+    {
+        static FM_FS fs;
+        FM_Result r;
+        FM_FileInfo info;
+        FM_Bool exists = FM_FALSE;
+        FM_File *f;
+        char buf[32];
+
+        ff_mock_reset();
+        r = FatFS_Init(&fs, 0);
+        if (r == FM_OK) r = FS_Mount("/sd", &fs);
+        TEST("set-up");
+        CHECK(r, "mount");
+
+        /* HIGH-01: 4 bytes were asked for, 6 were written */
+        TEST("HIGH-01: get_type into 4 bytes is refused, not overrun");
+        {
+            char *small = (char *)malloc(4);    /* ASan sees one byte too many */
+            char type6[6];
+            FM_Result r4 = FM_ERR_INTERNAL;
+            FM_Result r5 = FM_ERR_INTERNAL;
+            FM_Result r6 = FM_ERR_INTERNAL;
+
+            (void)File_WriteText("/sd/t.txt", "x");     /* fs_type is set */
+            if (small != NULL)
+            {
+                r4 = fs.ops.get_type(&fs, small, 4);
+                free(small);
+            }
+            r5 = fs.ops.get_type(&fs, type6, 5);
+            r6 = fs.ops.get_type(&fs, type6, 6);
+            CHECK_TRUE(r4 == FM_ERR_TOO_LARGE && r5 == FM_ERR_TOO_LARGE &&
+                       r6 == FM_OK && strcmp(type6, "FAT32") == 0,
+                       "want -16, -16, 0 and \"FAT32\"");
+        }
+
+        /* MED-02: f_stat("0:/") is FR_INVALID_NAME on a real volume */
+        TEST("MED-02: File_GetInfo of the mount point is a directory");
+        memset(&info, 0, sizeof(info));
+        r = File_GetInfo("/sd", &info);
+        CHECK_TRUE(r == FM_OK && info.type == FM_ITEM_DIR, "File_GetInfo(/sd)");
+        TEST("MED-02: Directory_Exists of the mount point");
+        r = Directory_Exists("/sd", &exists);
+        CHECK_TRUE(r == FM_OK && exists, "Directory_Exists(/sd)");
+
+        /* MED-03 */
+        TEST("MED-03: WRITE|TRUNCATE without CREATE does not make a file");
+        f = File_Open("/sd/none.txt", FM_OPEN_WRITE | FM_OPEN_TRUNCATE);
+        r = File_GetLastError();
+        if (f != NULL) (void)File_Close(f);
+        exists = FM_TRUE;
+        (void)File_Exists("/sd/none.txt", &exists);
+        CHECK_TRUE(f == NULL && r == FM_ERR_NOT_FOUND && !exists,
+                   "opened or created a file that was not there");
+        TEST("MED-03: ...and empties one that is there");
+        r = File_WriteText("/sd/full.txt", "twelve bytes");
+        f = (r == FM_OK) ? File_Open("/sd/full.txt",
+                                     FM_OPEN_WRITE | FM_OPEN_TRUNCATE) : NULL;
+        if (f == NULL) r = (r == FM_OK) ? File_GetLastError() : r;
+        if (r == FM_OK) r = File_Write(f, "ab", 2u, NULL);
+        if (f != NULL) (void)File_Close(f);
+        memset(buf, 0, sizeof(buf));
+        if (r == FM_OK) r = File_ReadText("/sd/full.txt", buf, sizeof(buf), NULL);
+        CHECK_TRUE(r == FM_OK && strcmp(buf, "ab") == 0, "content after truncate");
+
+        /* HIGH-02: the table of open objects */
+        TEST("HIGH-02: Directory_Copy of a folder with a file (needs 3 objects open)");
+        r = Directory_Create("/sd/src");
+        if (r == FM_OK) r = File_WriteText("/sd/src/a.txt", "copy me");
+        if (r == FM_OK) r = Directory_Copy("/sd/src", "/sd/dst", NULL, NULL);
+        memset(buf, 0, sizeof(buf));
+        if (r == FM_OK) r = File_ReadText("/sd/dst/a.txt", buf, sizeof(buf), NULL);
+        CHECK_TRUE(r == FM_OK && strcmp(buf, "copy me") == 0, "Directory_Copy");
+
+        TEST("HIGH-02: every file handle the library has can be open at once");
+        {
+            FM_File *h[FM_MAX_OPEN_FILES];
+            int i;
+            int opened = 0;
+
+            for (i = 0; i < FM_MAX_OPEN_FILES; i++)
+            {
+                char name[24];
+
+                snprintf(name, sizeof(name), "/sd/h%d.bin", i);
+                h[i] = File_Open(name, FM_OPEN_WRITE | FM_OPEN_CREATE);
+                if (h[i] != NULL) opened++;
+            }
+            for (i = 0; i < FM_MAX_OPEN_FILES; i++)
+            {
+                if (h[i] != NULL) (void)File_Close(h[i]);
+            }
+            CHECK_TRUE(opened == FM_MAX_OPEN_FILES, "an open was refused");
+        }
+
+        /* MED-08: one entry, two spellings */
+        TEST("MED-08: renaming a file to its own name in another case keeps it");
+        r = File_WriteText("/sd/name.txt", "still here");
+        if (r == FM_OK) r = File_Rename("/sd/name.txt", "/sd/NAME.TXT");
+        memset(buf, 0, sizeof(buf));
+        if (r == FM_OK) r = File_ReadText("/sd/NAME.TXT", buf, sizeof(buf), NULL);
+        CHECK_TRUE(r == FM_OK && strcmp(buf, "still here") == 0,
+                   "the file is gone or the rename failed");
+
+        TEST("MED-08: a rename onto another file replaces it, the source is gone");
+        r = File_WriteText("/sd/one.txt", "one");
+        if (r == FM_OK) r = File_WriteText("/sd/two.txt", "two");
+        if (r == FM_OK) r = File_Rename("/sd/one.txt", "/sd/two.txt");
+        memset(buf, 0, sizeof(buf));
+        if (r == FM_OK) r = File_ReadText("/sd/two.txt", buf, sizeof(buf), NULL);
+        exists = FM_TRUE;
+        (void)File_Exists("/sd/one.txt", &exists);
+        {
+            FM_Bool left = FM_TRUE;
+
+            (void)File_Exists("/sd/~fmrn.tmp", &left);
+            CHECK_TRUE(r == FM_OK && strcmp(buf, "one") == 0 && !exists && !left,
+                       "wrong content, source still there, or a temp file left");
+        }
+
+        TEST("MED-08: copying a file onto itself in another case is refused");
+        r = File_WriteText("/sd/self.txt", "self");
+        if (r == FM_OK)
+        {
+            FM_Result rc = File_Copy("/sd/self.txt", "/sd/SELF.TXT", NULL, NULL);
+
+            memset(buf, 0, sizeof(buf));
+            r = File_ReadText("/sd/self.txt", buf, sizeof(buf), NULL);
+            CHECK_TRUE(rc != FM_OK && r == FM_OK && strcmp(buf, "self") == 0,
+                       "copied onto itself, or the file was emptied");
+        }
+        else
+        {
+            FAIL("set-up");
+        }
+
+        TEST("MED-08: a folder cannot be moved into itself under another case");
+        r = Directory_Create("/sd/Tree");
+        if (r == FM_OK)
+        {
+            FM_Result rm = Directory_Move("/sd/Tree", "/sd/tree/sub", NULL, NULL);
+
+            CHECK_TRUE(rm == FM_ERR_INVALID_ARGUMENT, "not refused");
+        }
+        else
+        {
+            FAIL("set-up");
+        }
+
+        /* The move-aside of MED-08 must not let a folder with content
+         * be replaced: aside it went, and stayed there as "~fmrn.tmp". */
+        TEST("MED-08: a rename onto a folder that has entries is refused, nothing moves");
+        {
+            FM_Result a = Directory_Create("/sd/ra");
+            FM_Result b = Directory_Create("/sd/rb");
+            FM_Result rr;
+            FM_Bool ea = FM_FALSE;
+            FM_Bool eb = FM_FALSE;
+            FM_Bool et = FM_TRUE;
+
+            if (a == FM_OK) a = File_WriteText("/sd/ra/a.txt", "from a");
+            if (b == FM_OK) b = File_WriteText("/sd/rb/b.txt", "in b");
+            rr = Directory_Rename("/sd/ra", "/sd/rb");
+            (void)File_Exists("/sd/ra/a.txt", &ea);
+            (void)File_Exists("/sd/rb/b.txt", &eb);
+            (void)Directory_Exists("/sd/~fmrn.tmp", &et);
+            if (a != FM_OK || b != FM_OK || rr != FM_ERR_NOT_EMPTY || !ea ||
+                !eb || et)
+            {
+                printf("[set-up %d %d, rename %d, a.txt %d, b.txt %d, "
+                       "~fmrn.tmp %d] ", (int)a, (int)b, (int)rr, (int)ea,
+                       (int)eb, (int)et);
+                FAIL("wrong");
+            }
+            else { PASS(); }
+        }
+
+        TEST("MED-08: a rename onto an empty folder replaces it");
+        {
+            FM_Result c = Directory_Create("/sd/rc");
+            FM_Result rr = Directory_Rename("/sd/ra", "/sd/rc");
+            FM_Bool ea = FM_TRUE;
+            FM_Bool ec = FM_FALSE;
+            FM_Bool et = FM_TRUE;
+
+            (void)Directory_Exists("/sd/ra", &ea);
+            (void)File_Exists("/sd/rc/a.txt", &ec);
+            (void)Directory_Exists("/sd/~fmrn.tmp", &et);
+            if (c != FM_OK || rr != FM_OK || ea || !ec || et)
+            {
+                printf("[set-up %d, rename %d, ra %d, rc/a.txt %d, "
+                       "~fmrn.tmp %d] ", (int)c, (int)rr, (int)ea, (int)ec,
+                       (int)et);
+                FAIL("wrong");
+            }
+            else { PASS(); }
+        }
+
+        TEST("MED-08: a folder renamed to its own name in another case keeps its files");
+        {
+            FM_Result rr = Directory_Rename("/sd/rc", "/sd/RC");
+            FM_Bool ec = FM_FALSE;
+            FM_Bool et = FM_TRUE;
+
+            (void)File_Exists("/sd/RC/a.txt", &ec);
+            (void)Directory_Exists("/sd/~fmrn.tmp", &et);
+            if (rr != FM_OK || !ec || et)
+            {
+                printf("[rename %d, RC/a.txt %d, ~fmrn.tmp %d] ", (int)rr,
+                       (int)ec, (int)et);
+                FAIL("wrong");
+            }
+            else { PASS(); }
+        }
+
+        (void)FS_Unmount("/sd");
+
+        /* CRIT-02: FM_MAX_FS FatFS_Init calls that were never mounted
+         * used up the adapter for good */
+        TEST("CRIT-02: FatFS_Init after FM_MAX_FS unmounted ones still works");
+        {
+            static FM_FS lost[FM_MAX_FS];
+            static FM_FS late;
+            FM_Result rl = FM_OK;
+            FM_Result rm = FM_ERR_INTERNAL;
+            int robbed = 0;
+            int kept = 0;
+            int k;
+
+            for (k = 0; k < (int)FM_MAX_FS && rl == FM_OK; k++)
+            {
+                rl = FatFS_Init(&lost[k], 0);
+            }
+            if (rl == FM_OK) rl = FatFS_Init(&late, 0);
+            if (rl == FM_OK) rm = FS_Mount("/sd", &late);
+            if (rm == FM_OK) rm = File_WriteText("/sd/late.txt", "late");
+            (void)FS_Unmount("/sd");
+            /* exactly one FM_FS lost its slot; it is told so at its
+             * mount, the others mount as if nothing had happened */
+            for (k = 0; k < (int)FM_MAX_FS; k++)
+            {
+                FM_Result ro = FS_Mount("/sd", &lost[k]);
+
+                if (ro == FM_OK) { kept++; (void)FS_Unmount("/sd"); }
+                else if (ro == FM_ERR_NOT_READY) robbed++;
+            }
+            if (rl != FM_OK || rm != FM_OK || robbed != 1 ||
+                kept != (int)FM_MAX_FS - 1)
+            {
+                printf("[init %d, mount %d, %d robbed, %d kept] ", (int)rl,
+                       (int)rm, robbed, kept);
+                FAIL("wrong");
+            }
+            else { PASS(); }
+        }
+    }
+
     printf("\n  Results: %d/%d passed, %d failures\n",
            g_tests - g_failures, g_tests, g_failures);
     return g_failures ? 1 : 0;

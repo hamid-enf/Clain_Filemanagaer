@@ -273,7 +273,7 @@ EXAMPLES = examples/setup examples/file_basics \
            examples/data_logger examples/crc_example \
            examples/image_bmp
 
-.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick fatfs m32
+.PHONY: all clean test examples examples_run asan tsan ports cmake check matrix matrix-asan matrix-quick fatfs m32 usbmsctest
 
 all: $(LIBS) fm_test
 
@@ -296,29 +296,39 @@ libfilemanager.a: $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
 # Objects
+#
+# Every compile writes a .d file next to its object (-MMD: the headers
+# that translation unit really included; -MP: a header that was deleted
+# does not stop make).  They are read back at the end of this file, so
+# an edited header -- src/fm_internal.h, src/fm_adpcm.h, a third-party
+# header, an example header the tests include -- rebuilds exactly the
+# objects that use it.  The fixed list "include/fm*.h" below is only the
+# first build's safety net; without the .d files `make test` after
+# editing src/fm_adpcm.h ran the old library and said 589/589.
+DEPFLAGS = -MMD -MP
 src/%.o: src/%.c include/fm*.h $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 backends/%.o: backends/%.c include/fm*.h $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Vendored third-party code is built with relaxed warnings: it is upstream
 # code, not maintained under this project's strict warning set.  littlefs
 # diagnostics are silenced because the first-mount "corrupted" report is an
 # expected condition that the adapter auto-formats.
 third_party/littlefs/%.o: third_party/littlefs/%.c $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -c -o $@ $<
 
 third_party/h264bsd/src/%.o: third_party/h264bsd/src/%.c $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter \
 		-Wno-unused-but-set-variable -Wno-maybe-uninitialized \
 		-include include/fm_alloc.h \
 		-Dmalloc=FM_Alloc -Dfree=FM_Free -c -o $@ $<
 
 third_party/picojpeg/%.o: third_party/picojpeg/%.c $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-sequence-point \
 		-Wno-unused-but-set-variable -Wno-pedantic \
 		-c -o $@ $<
@@ -327,7 +337,7 @@ third_party/picojpeg/%.o: third_party/picojpeg/%.c $(FLAGS_STAMP)
 # working defaults (see include/opus_types.h / celt/stack_alloc.h), which
 # is exactly how STM32CubeIDE compiles it — this rule verifies that path.
 third_party/opus/%.o: third_party/opus/%.c $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-pedantic \
 		-Wno-sign-compare -Wno-maybe-uninitialized $(OPUS_INC) \
 		-c -o $@ $<
@@ -335,14 +345,14 @@ third_party/opus/%.o: third_party/opus/%.c $(FLAGS_STAMP)
 # stb_vorbis single-file library, compiled as its own object (the sole
 # implementation TU — src/fm_vorbis.c includes it header-only).
 third_party/stb/%.o: third_party/stb/%.c $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Wno-conversion -Wno-sign-conversion -Wno-shadow \
 		-Wno-unused-function -Wno-unused-parameter -Wno-pedantic \
 		-Wno-maybe-uninitialized -c -o $@ $<
 
 # Test executable.  The test bodies live in test/*.h, all included by
 # test/main.c: they are prerequisites too, so editing one rebuilds it.
 fm_test: test/main.c $(wildcard test/*.h) include/fm*.h $(OBJS) $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) -o $@ test/main.c $(SYNC_HOST) $(OBJS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -MMD -MP -MF .fm_test.d -MT $@ -o $@ test/main.c $(SYNC_HOST) $(OBJS) $(LDFLAGS) -lm
 
 # ------------------------------------------------------------------
 # asan — the suite under AddressSanitizer + UndefinedBehaviorSanitizer
@@ -454,6 +464,16 @@ hwjpegtest: $(LIBS)
 # audiorecordtest — audio_record_with_tap.h (record + taps + folder copy) against the real
 # library on the host: records a WAV, reopens it, verifies length and
 # level, installs every tap, and copies a nested tree.
+# The USB mass-storage glue with a RAM disk as the medium.  This one file
+# is built with AddressSanitizer: the bounce buffer of the glue is a
+# static array in the header, and an overflow of it is silent otherwise.
+usbmsctest: $(LIBS)
+	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
+		-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+		-Iinclude -Iexamples -Itools/halstub \
+		test/usb_msc_host_test.c $(LIBS) -lm -o fm_usbmsctest
+	@./fm_usbmsctest
+
 audiorecordtest: $(LIBS)
 	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
 		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
@@ -493,19 +513,27 @@ fatfs:
 	@sh test/build_fatfs_host.sh
 
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks hwjpegtest audiorecordtest saveexamplestest tapstest asan ports fatfs
+check: test cachetest videohooks hwjpegtest usbmsctest audiorecordtest saveexamplestest tapstest asan ports fatfs
 	@sh tools/check_switch_names.sh
 	@sh tools/check_flag_stamp.sh
+	@sh tools/check_deps.sh
 	@sh tools/check_examples.sh
 	@sh tools/check_cubeide.sh
+	@sh tools/check_board.sh
 	@sh tools/check_cmake.sh
 	@sh tools/check_32bit.sh
 
 clean:
 	rm -rf build-asan
 	rm -f $(FLAGS_STAMP)
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_hwjpegtest fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_hwjpegtest fm_usbmsctest fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
+	find src backends third_party -name "*.d" -delete
+	rm -f .fm_test.d
 
 test: fm_test
 	./fm_test
+
+# The header lists written by -MMD (see "Objects").  Absent on a first
+# build, which compiles everything anyway.
+-include $(OBJS:.o=.d) .fm_test.d

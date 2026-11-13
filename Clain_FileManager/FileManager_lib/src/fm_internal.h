@@ -118,6 +118,17 @@ void     FM_InternalBufferRelease(void);
 
 /* FM_TRUE when both paths resolve to the same entry of the same mount. */
 FM_Bool FM_File_SamePath(const char *a, const char *b);
+FM_Bool FM_Mount_NoCase(const FM_MountEntry *mount);
+/* a name of FM_NAME_MAX characters or more (the last component of
+ * `rel`, or with `all` any of them): cannot be listed, so not created */
+FM_Bool FM_Path_NameTooLong(const char *rel, FM_Bool all);
+/* FM_TRUE while a mounted file system uses this storage. */
+FM_Bool FM_VFS_StorageInUse(const FM_Storage *storage);
+/* The one rename every caller goes through (File_Rename, File_Move,
+ * Directory_Rename, Directory_Move): onto itself is a no-op, a path with
+ * an open handle on or below it is FM_ERR_BUSY.  `m` must be pinned. */
+FM_Result FM_File_RenameResolved(FM_MountEntry *m, const char *from,
+                                 const char *to);
 
 /* Exclusive claims on the library's shared work areas (fm_core.c).
  *
