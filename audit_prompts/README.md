@@ -22,13 +22,13 @@
 
 | File | Part | Report expected | Finding IDs |
 |---|---|---|---|
-| `01_file_storage_filesystem.md` | file API, filesystems, storage drivers, utilities, the log layer, the build configuration | `AUDIT_FILE_V5.md` | `FILE5-nn` |
-| `02_image.md` | BMP / PNG / JPEG decode and encode, pixel operations, `SimpleImage` | `AUDIT_IMAGE_V5.md` | `IMG5-nn` |
-| `03_video.md` | containers, H.264, MJPEG, audio tracks of video files, A/V timing, media cache, playback side of `SimpleVideo` | `AUDIT_VIDEO_V5.md` | `VID5-nn` |
-| `04_audio.md` | audio decoders, playlist player, type detection, playback side of `SimpleAudio` / `AudioDma` (output switch, callbacks) | `AUDIT_AUDIO_V5.md` | `AUD5-nn` |
-| `05_save_record.md` | everything that writes media (encoders, AVI writer, converters, `Rec*`, save examples, board glue) and how the parts work together | `AUDIT_SAVE_V3.md` | `SAV3-nn` |
+| `01_file_storage_filesystem.md` | file API, filesystems, storage drivers, utilities, the log layer, the build configuration | `AUDIT_FILE_V6.md` | `FILE6-nn` |
+| `02_image.md` | BMP / PNG / JPEG decode and encode, pixel operations, `SimpleImage` | `AUDIT_IMAGE_V6.md` | `IMG6-nn` |
+| `03_video.md` | containers, H.264, MJPEG, audio tracks of video files, A/V timing, media cache, playback side of `SimpleVideo` | `AUDIT_VIDEO_V6.md` | `VID6-nn` |
+| `04_audio.md` | audio decoders, playlist player, type detection, playback side of `SimpleAudio` / `AudioDma` (output switch, callbacks) | `AUDIT_AUDIO_V5.md` (no report of round V5 arrived for this part; the prompt is the V5 prompt at the new commit) | `AUD5-nn` |
+| `05_save_record.md` | everything that writes media (encoders, AVI writer, converters, `Rec*`, save examples, board glue) and how the parts work together | `AUDIT_SAVE_V4.md` | `SAV4-nn` |
 
-All five pin the same commit, **`fc31b25`** on
+All five pin the same commit, **`6fe596d`** on
 `arena/ba6a87b3-clain-filemanagaer`, and forbid any change on GitHub. Each is
 self-contained: the auditor gets one file and nothing else.
 
@@ -76,18 +76,41 @@ self-contained: the auditor gets one file and nothing else.
   video 7, audio 3, save 1) and a number of suspicions. All confirmed
   findings and the suspicions IMG4-S2, AUD4 SUSP-A and SAV2-03 were fixed in
   `fc31b25`; what was left open is listed in each prompt.
-- This round (V5 for parts 1–4, V3 for part 5) audits `fc31b25`. In every
-  prompt, section 4 has a new block in front of Job 1, "What round V4 (V2)
-  found, and what the fixes claim": the table of that round's findings with
-  the place of each fix and of its test, and the questions the maintainers
-  have about their own fixes. The older Job 1 tables stay: the V4 auditors
-  gave their verdicts on them, and those verdicts are in `ReportV3.txt`.
-- Several fixes of round two change public behaviour (delete / rename of an
-  open file is refused, `FM_SCALE_BILINEAR` gives other pixels, `FM_VideoInfo`
-  grew, an MP3 that changes its channel count plays on converted, a WAV with
-  a `data` length of 0 plays to its end). Each prompt names the ones of its
-  part; check them as changes of a contract, not only as fixes.
-- Scope of the parts is unchanged against round two.
+- Round three (V5 for parts 1–4, V3 for part 5): `fc31b25`. Four reports
+  came back, in one file, `ReportV4.txt` at the repository root (file: lines
+  1–267, image: 268–561, video: 562–1153, save: 1154–1904). **The audio
+  report did not arrive.** File: 25 findings under the auditor's own IDs
+  (CRIT-01 … LOW-04), among them a buffer overrun in the USB mass-storage
+  glue and a text edit that emptied the file. Image: none, two suspicions. Video: two
+  findings, three suspicions. Save: three findings and one suspicion. Everything was worked on
+  in `6fe596d` except: SAV3-04 (the recorder writes to the card inside the
+  I2S refill; documented, not fixed), half of LOW-01, and the stack question
+  of the file report, which the maintainers answer differently (the tree
+  walks are loops). The two image suspicions were examined and refuted.
+- This round (V6 for parts 1–3, V5 again for part 4, V4 for part 5) audits
+  `6fe596d`. In every prompt, section 4 has a new block in front of the
+  older ones, "What round V5 (V3) found, and what the fixes claim": the
+  table of that round's findings with the place of each fix, its test, and
+  whether the maintainers saw the test fail with the fix removed; then the
+  questions the maintainers have about their own fixes. The audio prompt
+  has a block that says what changed next to its part instead. The older
+  blocks and Job 1 tables stay: the reports of round three give verdicts on
+  them (`ReportV4.txt`).
+- Fixes of round three that change public behaviour: `Directory_Rename`
+  refuses files, mount points, a folder into itself and a folder with an
+  open file; `Storage_Unmount` / `Storage_Format` are `FM_ERR_BUSY` under a
+  mount; names of `FM_NAME_MAX` characters or more are not created; `Text_*`
+  edits refuse a path whose temporary name does not fit; `FileManager_Init()`
+  is a macro that compares structure sizes; FMFS refuses a table that makes
+  no sense; `FM_Qspi_Write` programs in place where it can;
+  `SimpleVideo_AudioDataRead` always returns stereo; a FatFS rename moves the
+  target aside instead of deleting it first. Check them as changes of a
+  contract, not only as fixes.
+- **The firmware side of round three was not compiled** (no ARM compiler):
+  `Core/Src/main.c`, `USB_DEVICE/Target/usbd_conf.c`,
+  `FATFS/Target/ffconf.h`, and the changes in `top_api/usb_msc.h`. Nothing
+  ran on a board. The file and the save prompt say so.
+- Scope of the parts is unchanged.
 
 ## Starting the next round
 

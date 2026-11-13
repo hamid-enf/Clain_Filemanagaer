@@ -1,4 +1,4 @@
-# External audit V5 — image
+# External audit V6 — image
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
@@ -20,9 +20,9 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `fc31b25` (`fc31b259c8345180a0ca2297c802c8e9f4b7dcdc`). Audit exactly
-  this commit (`git checkout fc31b25`) and quote it in your report. Later
-  commits on the branch change only the folder `audit_prompts/`.
+- Commit: `6fe596d` (`6fe596d445c17569dace9fe490929b8d4f3b0fe9`). Audit exactly
+  this commit (`git checkout 6fe596d`) and quote it in your report. Later
+  commits on the branch update the audit prompts and library README, not the code under audit.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
   (the CubeMX firmware project of the reference board), and `ReportV2.txt`,
@@ -35,7 +35,8 @@ History of this part:
 | first | `8dd0f25` | `ReportV2.txt`, lines 1583–2454 | the findings were worked on, up to `a6cf829` |
 | follow-up ("V3") | `a6cf829` | none in the repository | the prompt was written (`git show f161ff8:audit_prompts/02_image.md`); no report of it is in the repository, so **nobody outside has checked the fixes of the first round** or read the JPEG patches made after it. Its jobs are carried into this round |
 | V4 | `48a00bc` | `ReportV3.txt`, lines 642–1272 | two findings and two suspicions; IMG4-01, IMG4-02 and IMG4-S2 fixed in `fc31b25`, IMG4-S1 open |
-| this one (V5) | `fc31b25` | `AUDIT_IMAGE_V5.md` | |
+| V5 | `fc31b25` | `ReportV4.txt`, lines 268–561 | no finding; two suspicions (IMG5-S1, IMG5-S2), both examined by the maintainers and refuted; no code of this part changed in `6fe596d`, two tests added |
+| this one (V6) | `6fe596d` | `AUDIT_IMAGE_V6.md` | |
 
 It is a C99 file-manager and media library for STM32 microcontrollers. The
 reference board is an STM32H743 with an SD card, SDRAM, I2S audio out and an
@@ -98,7 +99,7 @@ you may go into the other parts.
    do not have, or of a file you did not create. When a tool this prompt names
    is not available to you, say so in the audit record and say what you used
    in its place. Check every line number against
-   `git show fc31b25:<path> | sed -n '<from>,<to>p'` before you write it down:
+   `git show 6fe596d:<path> | sed -n '<from>,<to>p'` before you write it down:
    a wrong line number makes a finding unusable, and one invented trace makes
    the whole report untrustworthy.
 6. **One root cause, one finding.** The same mistake in five places is one
@@ -118,13 +119,13 @@ you may go into the other parts.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite: 589 tests at this commit
+make test                 # whole suite: 635 tests at this commit
 make asan                 # the same suite under ASan + UBSan (+ LeakSanitizer)
-make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (594 tests)
+make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (640 tests)
                           #   make tsan FM_SYNC_IMPL=freertos | cmsis_rtos2  goes through that port
-make m32                  # the suite built and run as a 32-bit x86 program (590 tests);
+make m32                  # the suite built and run as a 32-bit x86 program (636 tests);
 make m32 M32=ubsan        #   needs:  pip install ziglang
-make cachetest videohooks audiorecordtest saveexamplestest tapstest fatfs
+make cachetest videohooks hwjpegtest usbmsctest audiorecordtest saveexamplestest tapstest fatfs
                           # the smaller host tests (stub HAL, mock FatFS)
 make check                # all of the above except tsan, plus: every port compiles, every example
                           #   header compiles alone, firmware-build rules, switch names, flags
@@ -200,22 +201,29 @@ FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library pr
   shell scripts use LF. Comments in `top_api/`, `examples/`, `board/` and the
   guides in `docs/` are in Persian; code and identifiers are English.
 
-**What is established at `fc31b25`** (the maintainers ran it; running it again
+**What is established at `6fe596d`** (the maintainers ran it; running it again
 will find nothing):
 
 | Check | Result |
 |---|---|
-| `make test` | `Results: 589/589 passed, 0 failures` |
-| `make check` | exit status 0 (includes the suite under ASan + UBSan, the ports, the FatFS mock, CMake 13 configurations, 32-bit) |
-| `make m32`, `make m32 M32=ubsan` | 590/590 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
-| `make tsan` (pthread port) | 594/594, 0 ThreadSanitizer warnings |
+| `make test` | `Results: 635/635 passed, 0 failures` |
+| `make check` | exit status 0 (the suite, the suite under ASan + UBSan, the ports, the FatFS mock, the small host tests, the `tools/check_*.sh` scripts, CMake 13 configurations, 32-bit) |
+| `make m32`, `make m32 M32=ubsan` | 636/636 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
+| `make tsan` (pthread port) | 640/640, 0 ThreadSanitizer warnings |
 | `make matrix-quick` | 8 configurations, 0 failed |
-| `make matrix` | 57 configurations, 0 failed (run alone, in a copy of the tree; one build at a time per tree: a second build in the same tree mixes object files). New since the last round: `FM_BUFFERS=SMALL` / `LARGE` / `HUGE` and both `..._ENC_SYNC_BYTES=0` |
-| `make audiorecordtest`, `make saveexamplestest` | 99 and 74 checks pass |
-| `make hwjpegtest`, `make videohooks` | 73 checks and 22 checks pass (new in this round: the hardware-JPEG glue against a software model of the peripheral) |
+| `make matrix` | 57 configurations: 55 passed; `TEXT=0` failed to build before the guard fix (fixed and rerun: 629/629); `FM_FILE_FORCE_BOUNCE THREADS=1` failed once (639/640, concurrent media CRC mismatch at step 504), not reproduced in 25 serial reruns; still open |
+| `make fatfs` (mock FatFS) | `test/fatfs_host_test.c`: 48 checks in each of three builds (classic, modern, legacy API), 53 with two drives; a compile with `_FS_LOCK = 2` must stop at the adapter's `#error` |
+| `make audiorecordtest`, `make saveexamplestest` | 99 and 85 checks pass |
+| `make hwjpegtest`, `make videohooks`, `make usbmsctest` | 73, 22 and 48 checks pass (`usbmsctest` was added with the latest fixes: the mass-storage glue `top_api/usb_msc.h` on a RAM disk, under ASan) |
 
 **What is not established** (nobody did it at this commit):
 
+- **the firmware files changed in this round were not compiled**: no ARM
+  compiler was available. That is `Core/Src/main.c`,
+  `USB_DEVICE/Target/usbd_conf.c`, `FATFS/Target/ffconf.h` (all three in
+  `Clain_FileManager/`, outside the library root) and the new
+  `UsbMsc_Lba0Probe` in `top_api/usb_msc.h`; `tools/check_board.sh` only
+  reads the settings back as text;
 - the compile for Cortex-M7 (clang with ST HAL headers; 0 warnings at
   `48a00bc`) was not repeated at this commit;
 - nothing ran on a board, on a real SD card, or was built with
@@ -269,6 +277,29 @@ would it fail if the feature were broken in a plausible way?
 For your part the references are libjpeg (or libjpeg-turbo), libpng and
 Pillow: every decoded pixel against theirs, and every file this library
 **writes** decoded by them.
+
+### What round V5 found, and what was done with it
+
+The report of that round is in the repository: `ReportV4.txt`, lines 268–561 (four of the five reports are
+in that file; the harnesses the auditors wrote are not in the repository). It confirmed **no defect** and
+raised two suspicions without evidence. The maintainers settled both, and neither is a defect:
+
+| ID | What the report suspected | What the maintainers found | Test |
+|---|---|---|---|
+| IMG5-S1 | the JPEG encoder's quantiser (in `jpeg_write_block`, `src/fm_jpeg.c`) rounds with a bias | it is the formula of libjpeg-turbo's `quantize()` (`jcdctmgr.c`, release 2.1.5): make the coefficient positive, add half the step, divide, restore the sign. Round half away from zero, symmetric about zero: no bias. No code change | none added |
+| IMG5-S2 | the bilinear scaler (`src/fm_image.c`, the `FM_SCALE_BILINEAR` path) weights the edge pixels wrongly | compared with a floating-point centre-to-centre definition on a 37×29 noise picture at 8 target sizes: worst difference 1.88 grey levels (fixed-point rounding). A ramp enlarged 3 times never steps down. No code change; `README.md` and `include/fm_image.h` now say that bilinear has no pre-filter, so shrinking by more than 2 skips source pixels | `IMG5-S2 …` (two tests, suite `test_audit_v5_image` in `test/audit_v5_tests.h`). Mutations: tolerance 2.5 → 0 fails (so the comparison is real); a wrong vertical weight in the scaler (`vy` used without its half-pixel offset) fails at 127 levels |
+
+```bash
+git diff fc31b25..6fe596d -- src/fm_image.c src/fm_jpeg.c src/fm_png.c include/fm_image.h top_api/hw_jpeg.h   # the comment in fm_image.h is the whole diff
+```
+
+What that round leaves for you (questions, not findings):
+
+1. A round with no finding is either the end of the cycle or a round that did not dig. The V5 report compared no decoder output with libjpeg / libpng on files of its own and ran no fuzzer; its two suspicions were stated without a failing input. Jobs 2 and 3 below were, in effect, not done. Do them.
+2. The reference of the IMG5-S2 test is the maintainers' own floating-point model, not another library. Is "centre-to-centre" what a user expects against Pillow / OpenCV (`INTER_LINEAR`) / ffmpeg `scale=flags=bilinear` on the same picture, when enlarging and when shrinking by less than 2?
+3. The nearest-neighbour path, the RGB565 targets of `Image_Scale` / `Image_ScaleEx` and the scaled video path (`Video_DecodeFrameScaled`) have no such comparison.
+4. IMG4-S1 of the round before is still open (see the row in Job 1).
+
 
 ### What round V4 found, and what the fixes claim
 
@@ -645,7 +676,7 @@ the messages of **your** files (`grep -n "FM_ERR_LOG\|FM_EVENT_LOG\|FM_TRACE_LOG
 - Build your part with `-DFM_DEBUG_LEVEL=0`, `=3` and `-DFM_LOG_DISABLE` under
   `-Werror`, with each of your `FM_USE_*` switches off.
 
-**The JPEG encoder (new in this round)** — see Job 2 (b); it is the newest and
+**The JPEG encoder (added before the preceding round)** — see Job 2 (b); it is the newest and
 least examined code of this part. Add a differential harness that encodes
 random and natural pictures at random options and decodes them with libjpeg;
 run it for 32 bits too.
@@ -682,9 +713,9 @@ third-party code, what it does with the results — is fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_IMAGE_V5.md`. It is used as a work list:
+Deliver **one Markdown file** named `AUDIT_IMAGE_V6.md`. It is used as a work list:
 each finding is opened by someone who has not seen your session and has only
-the report and a clean checkout of `fc31b25`. Use this structure, in this
+the report and a clean checkout of `6fe596d`. Use this structure, in this
 order, with these headings:
 
 1. **Summary in Persian** (8 to 12 lines): how many confirmed defects by
@@ -698,7 +729,7 @@ order, with these headings:
      had, and the tools this prompt names that you did not have (with what you
      used in their place);
    - the result line of `make test` on your machine before you changed
-     anything (expected: `Results: 589/589 passed, 0 failures`; if yours
+     anything (expected: `Results: 635/635 passed, 0 failures`; if yours
      differs, that comes first in the report);
    - a table of what you did: method, target, amount (executions, files,
      cases, hours), coverage reached, result;
@@ -708,34 +739,34 @@ order, with these headings:
 3. **Table of findings**: ID, severity, status (confirmed / suspicion), owning
    part, `file:line`, one-line title, fix tested (yes / no), regression test
    included (yes / no). Sorted by severity.
-4. **One section per confirmed finding**, IDs `IMG5-01`, `IMG5-02`, ...:
+4. **One section per confirmed finding**, IDs `IMG6-01`, `IMG6-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps; a recording that lost or misplaced data). S3:
      wrong error handling — a leaked handle or slot, a wrong error code, state
      not restored after a failure. S4: mismatch with the documentation,
      portability, wasted time or memory, a test that cannot fail.
-   - **Where** — `path:from-to`, function, at `fc31b25`, and the lines
+   - **Where** — `path:from-to`, function, at `6fe596d`, and the lines
      themselves (quote at most 15).
    - **Reach** — which public function leads there, which action of a user of
      the board (a UART command, a file on the card, a sequence of calls), which
      build configurations, 32 bits / 64 bits / both, and how likely it is with
      ordinary files and ordinary use.
-   - **How to reproduce** — from a clean checkout of `fc31b25`: the files to
+   - **How to reproduce** — from a clean checkout of `6fe596d`: the files to
      add (full source in the appendix), the exact commands, and the output as
      it was printed (sanitizer report, wrong value, hang with the time you
      waited). For an input file: a hex dump if it is under 200 bytes, otherwise
      the script that generates it.
    - **Expected and observed.**
    - **Root cause** — why it happens, not just where.
-   - **Proposed fix** — a unified diff against `fc31b25` in a `diff` block.
+   - **Proposed fix** — a unified diff against `6fe596d` in a `diff` block.
      Produce it with `git diff`, do not type it: the sources have CRLF line
      endings and a typed diff will not apply. Then state: applied (yes / no),
      the reproducer after the fix, the result line of `make test` after the
      fix, and anything else you ran with it (`make asan`, `make m32`, the
      smaller host tests).
    - **Regression test** — the test to add (which file, the code), with its
-     result on `fc31b25` (must fail) and with your fix (must pass). If a test
+     result on `6fe596d` (must fail) and with your fix (must pass). If a test
      is not possible on a PC, say why.
    - **Siblings** — where else you looked for the same mistake (other formats,
      other backends, the twin in `examples/`, the other player) and what you
@@ -798,10 +829,10 @@ must be able to reproduce every confirmed finding from the report alone.
 **Before you deliver, check your own report** (and say in the audit record
 that you did):
 
-- Make a fresh clone at `fc31b25` and re-run every reproducer from the text of
+- Make a fresh clone at `6fe596d` and re-run every reproducer from the text of
   the report alone. Drop or downgrade what does not reproduce.
 - Run `git apply --check` for every diff on that clean tree.
-- Re-check every `file:line` against `git show fc31b25:<path>`.
+- Re-check every `file:line` against `git show 6fe596d:<path>`.
 - The numbers in the Persian summary, in the table of findings and in the
   findings index agree.
 - No finding rests on a documented limit, and no "confirmed" finding contains

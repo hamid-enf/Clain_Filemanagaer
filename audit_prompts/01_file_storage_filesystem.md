@@ -1,4 +1,4 @@
-# External audit V5 — files, storage, filesystems, build configuration
+# External audit V6 — files, storage, filesystems, build configuration
 
 You are an independent auditor. Your job is to **find defects** in one part of an
 embedded C library, **prove** each one, and give the **exact place** in the code
@@ -20,9 +20,9 @@ keep this order: Job 1, the open leads, Job 2, then the rest.
 
 - Repository: `https://github.com/hamid-enf/Clain_Filemanagaer`
 - Branch: `arena/ba6a87b3-clain-filemanagaer`
-- Commit: `fc31b25` (`fc31b259c8345180a0ca2297c802c8e9f4b7dcdc`). Audit exactly
-  this commit (`git checkout fc31b25`) and quote it in your report. Later
-  commits on the branch change only the folder `audit_prompts/`.
+- Commit: `6fe596d` (`6fe596d445c17569dace9fe490929b8d4f3b0fe9`). Audit exactly
+  this commit (`git checkout 6fe596d`) and quote it in your report. Later
+  commits on the branch update the audit prompts and library README, not the code under audit.
 - Library root: `Clain_FileManager/FileManager_lib/`. Paths below are relative to
   it, except: paths that start with `Core/` are in `Clain_FileManager/Core/`
   (the CubeMX firmware project of the reference board), and `ReportV2.txt`,
@@ -35,7 +35,8 @@ History of this part:
 | first | `8dd0f25` | `ReportV2.txt`, lines 1–1087 | the findings were worked on, up to `a6cf829` |
 | follow-up ("V3") | `a6cf829` | none in the repository | the prompt was written (`git show f161ff8:audit_prompts/01_file_storage_filesystem.md`); no report of it is in the repository, so **nobody outside has checked the fixes of the first round**. Its jobs are carried into this round |
 | V4 | `48a00bc` | `ReportV3.txt`, lines 1–641 | five findings (FILE4-01 … -05), all fixed in `fc31b25` |
-| this one (V5) | `fc31b25` | `AUDIT_FILE_V5.md` | |
+| V5 | `fc31b25` | `ReportV4.txt`, lines 1–267 | 5 critical, 8 high, 8 medium and 4 low findings under the auditor's own IDs (CRIT-01 … LOW-04); all worked on in `6fe596d` except half of LOW-01; see section 4 |
+| this one (V6) | `6fe596d` | `AUDIT_FILE_V6.md` | |
 
 It is a C99 file-manager and media library for STM32 microcontrollers. The
 reference board is an STM32H743 with an SD card, SDRAM, I2S audio out and an
@@ -98,7 +99,7 @@ which files, and how far you may go into the other parts.
    do not have, or of a file you did not create. When a tool this prompt names
    is not available to you, say so in the audit record and say what you used
    in its place. Check every line number against
-   `git show fc31b25:<path> | sed -n '<from>,<to>p'` before you write it down:
+   `git show 6fe596d:<path> | sed -n '<from>,<to>p'` before you write it down:
    a wrong line number makes a finding unusable, and one invented trace makes
    the whole report untrustworthy.
 6. **One root cause, one finding.** The same mistake in five places is one
@@ -118,13 +119,13 @@ which files, and how far you may go into the other parts.
 
 ```bash
 cd Clain_FileManager/FileManager_lib
-make test                 # whole suite: 589 tests at this commit
+make test                 # whole suite: 635 tests at this commit
 make asan                 # the same suite under ASan + UBSan (+ LeakSanitizer)
-make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (594 tests)
+make tsan                 # the suite with FM_USE_THREADS=1 under ThreadSanitizer (640 tests)
                           #   make tsan FM_SYNC_IMPL=freertos | cmsis_rtos2  goes through that port
-make m32                  # the suite built and run as a 32-bit x86 program (590 tests);
+make m32                  # the suite built and run as a 32-bit x86 program (636 tests);
 make m32 M32=ubsan        #   needs:  pip install ziglang
-make cachetest videohooks audiorecordtest saveexamplestest tapstest fatfs
+make cachetest videohooks hwjpegtest usbmsctest audiorecordtest saveexamplestest tapstest fatfs
                           # the smaller host tests (stub HAL, mock FatFS)
 make check                # all of the above except tsan, plus: every port compiles, every example
                           #   header compiles alone, firmware-build rules, switch names, flags
@@ -200,22 +201,29 @@ FM_TEST_LOG=1 ./fm_test 2>log.txt             # see every message the library pr
   shell scripts use LF. Comments in `top_api/`, `examples/`, `board/` and the
   guides in `docs/` are in Persian; code and identifiers are English.
 
-**What is established at `fc31b25`** (the maintainers ran it; running it again
+**What is established at `6fe596d`** (the maintainers ran it; running it again
 will find nothing):
 
 | Check | Result |
 |---|---|
-| `make test` | `Results: 589/589 passed, 0 failures` |
-| `make check` | exit status 0 (includes the suite under ASan + UBSan, the ports, the FatFS mock, CMake 13 configurations, 32-bit) |
-| `make m32`, `make m32 M32=ubsan` | 590/590 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
-| `make tsan` (pthread port) | 594/594, 0 ThreadSanitizer warnings |
+| `make test` | `Results: 635/635 passed, 0 failures` |
+| `make check` | exit status 0 (the suite, the suite under ASan + UBSan, the ports, the FatFS mock, the small host tests, the `tools/check_*.sh` scripts, CMake 13 configurations, 32-bit) |
+| `make m32`, `make m32 M32=ubsan` | 636/636 both (clang of ziglang 0.17.1, `x86-linux-musl`) |
+| `make tsan` (pthread port) | 640/640, 0 ThreadSanitizer warnings |
 | `make matrix-quick` | 8 configurations, 0 failed |
-| `make matrix` | 57 configurations, 0 failed (run alone, in a copy of the tree; one build at a time per tree: a second build in the same tree mixes object files). New since the last round: `FM_BUFFERS=SMALL` / `LARGE` / `HUGE` and both `..._ENC_SYNC_BYTES=0` |
-| `make audiorecordtest`, `make saveexamplestest` | 99 and 74 checks pass |
-| `make hwjpegtest`, `make videohooks` | 73 checks and 22 checks pass (new in this round: the hardware-JPEG glue against a software model of the peripheral) |
+| `make matrix` | 57 configurations: 55 passed; `TEXT=0` failed to build before the guard fix (fixed and rerun: 629/629); `FM_FILE_FORCE_BOUNCE THREADS=1` failed once (639/640, concurrent media CRC mismatch at step 504), not reproduced in 25 serial reruns; still open |
+| `make fatfs` (mock FatFS) | `test/fatfs_host_test.c`: 48 checks in each of three builds (classic, modern, legacy API), 53 with two drives; a compile with `_FS_LOCK = 2` must stop at the adapter's `#error` |
+| `make audiorecordtest`, `make saveexamplestest` | 99 and 85 checks pass |
+| `make hwjpegtest`, `make videohooks`, `make usbmsctest` | 73, 22 and 48 checks pass (`usbmsctest` was added with the latest fixes: the mass-storage glue `top_api/usb_msc.h` on a RAM disk, under ASan) |
 
 **What is not established** (nobody did it at this commit):
 
+- **the firmware files changed in this round were not compiled**: no ARM
+  compiler was available. That is `Core/Src/main.c`,
+  `USB_DEVICE/Target/usbd_conf.c`, `FATFS/Target/ffconf.h` (all three in
+  `Clain_FileManager/`, outside the library root) and the new
+  `UsbMsc_Lba0Probe` in `top_api/usb_msc.h`; `tools/check_board.sh` only
+  reads the settings back as text;
 - the compile for Cortex-M7 (clang with ST HAL headers; 0 warnings at
   `48a00bc`) was not repeated at this commit;
 - nothing ran on a board, on a real SD card, or was built with
@@ -272,6 +280,65 @@ semantics: the same sequence of operations on FMFS, LittleFS, FatFS and POSIX
 (section 6), and an image written by this library's FatFS / LittleFS adapters
 checked with the tools of those filesystems (`fsck.fat`, `mtools`, `littlefs`'s
 own `lfs` FUSE or Python tools).
+
+### What round V5 found, and what the fixes claim
+
+The report of that round is in the repository: `ReportV4.txt`, lines 1–267 (four of the five reports are in
+that file; the audio report of that round is not in the repository; the harnesses the auditors wrote are
+not in the repository either). The auditor used his own IDs (CRIT / HIGH / MED / LOW), kept here. Read it,
+then the diff of the fixes:
+
+```bash
+git diff fc31b25..6fe596d -- src backends include/fm_*.h include/file_manager.h top_api/usb_msc.h \
+    third_party/littlefs/lfs_util.h third_party/stb/stb_vorbis.c test/fatfs_mock tools Makefile \
+    ../FATFS/Target/ffconf.h ../Core/Src/main.c ../USB_DEVICE/Target/usbd_conf.c
+```
+
+These rows belong to Job 1 and come first. For each: fixed, partly fixed, not
+fixed, or fixed but something else broke. The tests are in
+`test/audit_v5_tests.h` (suite `test_audit_v5_file`) unless the row says
+otherwise; "mutation: yes" means the maintainers removed the fix and saw the
+named test fail. Remove the fix yourself and see.
+
+| ID | What was wrong | What the fix claims | Mutation |
+|---|---|---|---|
+| CRIT-01 | `UsbMsc_StorageWrite` copied `blk_len * 512` bytes into the 4096-byte bounce buffer | `top_api/usb_msc.h`: at most `USB_MSC_BOUNCE_SECTORS` blocks per pass. `test/usb_msc_host_test.c` (`make usbmsctest`, 48 checks, ASan) | yes (ASan `global-buffer-overflow`) |
+| CRIT-02 | a context of the LittleFS / FMFS / FatFS pools (`FM_MAX_FS` = 4) that was handed out and never mounted was lost; after four, `*_Init` failed and a zeroed `FM_FS` could be mounted (NULL call at the first open) | `*_Init` with no free context takes over the oldest one that is not in a mount; the robbed `FM_FS` gets `FM_ERR_NOT_READY` at `FS_Mount`; `FS_Mount` refuses an `FM_FS` without file functions (`FM_ERR_INVALID_ARGUMENT`). Tests `CRIT-02 …`; FatFS: `CRIT-02 …` in section `[11]` of `test/fatfs_host_test.c` | yes |
+| CRIT-03 | `Text_Replace` / `InsertLine` / `DeleteLine` cut `"<path>.fm_tmp"` to `FM_PATH_MAX`: the temporary file was the file itself, and the edit emptied it | `text_tmp_name` (`src/fm_text.c`): `FM_ERR_TOO_LARGE` before any open. **Public behaviour change** | yes |
+| CRIT-04 | QSPI: after the soft reset of a timeout the chip was back in 3-byte address mode; an erase that timed out was reported as done | `src/fm_qspi.c`: 4-byte mode entered again after every reset, the erase repeated. Tests `CRIT-04 …` against a chip model in the test | yes |
+| CRIT-05 | `FM_Qspi_Write`: every partial write was read-modify-erase-write of a sector (and `FM_ERR_UNSUPPORTED` without a sector buffer): LittleFS on QSPI erased 4 KB per append | per sector: identical → nothing; target `0xFF` or equal → program in place; whole sector → erase + program; else read-modify-erase-write. **Public behaviour change** | yes |
+| HIGH-01 | `fatfs_get_type` wrote 6 bytes into a 4-byte buffer | `FM_ERR_TOO_LARGE`. Section `[11]` | yes (ASan) |
+| HIGH-02 | `_FS_LOCK 2` in the firmware's `ffconf.h`: a third open object failed | adapter `#error` for `0 < _FS_LOCK < 12` (`-DFM_FATFS_ALLOW_SMALL_LOCK=1` to pass); `FATFS/Target/ffconf.h:230` is 16; `tools/check_board.sh`. Section `[11]`; `test/build_fatfs_host.sh` builds with `_FS_LOCK = 2` and expects the error | yes |
+| HIGH-03 | `Storage_Unmount` / `Storage_Format` worked under a mounted file system | `FM_ERR_BUSY`. **Public behaviour change** | yes |
+| HIGH-04 | LittleFS: an erase unit of 1 (RAM) reached `lfs` asserts; `FS_Format` on a mounted volume left a broken `lfs_t`; no way to format a volume that does not mount | `lfs_build_cfg` (block size a multiple of the unit, at least 512; fewer than 2 blocks → `FM_ERR_NO_SPACE`); `FS_Format` unmounts, formats, mounts; new `LittleFS_FormatStorage(storage)` (borrows a context that is not in a mount and gives it back to the `FM_FS` that held it). Tests `HIGH-04 …` (4) | yes |
+| HIGH-05 | `Directory_Rename` renamed files, mount points, a folder into itself (a loop on LittleFS), a folder with an open file | `FM_ERR_NOT_DIRECTORY` / `FM_ERR_INVALID_ARGUMENT` / `FM_ERR_BUSY` (`src/fm_directory.c`). **Public behaviour change** | yes |
+| HIGH-06 | `JsonWriter_Float` and `Logger_Write` wrote garbage for NaN / infinity and for values from 2^32 up | `null` (JSON), `nan` / `inf` / `-inf` (CSV); 64-bit integer part, clamp at ±9e9 | yes |
+| HIGH-07 | FMFS trusted a table that passed its checksum: a file in the metadata area, two files on the same bytes; `fmfs_format` without a storage read NULL | `fmfs_table_valid` → `FM_ERR_CORRUPTED` at mount and `FS_Check` (version 2 also: a name twice, a missing parent, a second root, a file behind `data_next`); version 1 with a stale `data_next` mounts and the mark is moved up. Tests `HIGH-07 …` (`av5_fmfs_table`, built on the power-fail harness `pf_*` of `test/main.c`). **Public behaviour change** | yes |
+| HIGH-08 | firmware: `OTG_FS_IRQn` at the same priority as the tick; HAL timeouts inside the USB interrupt never expire | `HAL_InitTick(0U)` in `Core/Src/main.c`, `OTG_FS_IRQn` 6 in `USB_DEVICE/Target/usbd_conf.c`; `tools/check_board.sh` reads the two back. **Not compiled, not run on a board** | script only |
+| MED-01 | `File_OpenEx` tested `f->used` outside the lock | inside `FM_Lock` (`src/fm_file.c`). Test `MED-01 …` is single-threaded and passes without the fix; the race itself has no test | no |
+| MED-02 / -03 / -08 | FatFS: `stat` of the mount point failed; `WRITE|TRUNCATE` created a missing file; a rename onto another spelling of the same entry (other case, the 8.3 alias of a long name) deleted the file | `backends/fm_fatfs.c`. Section `[11]`. MED-08: the target is moved aside to `~fmrn.tmp`, not deleted first; a target directory with entries is `FM_ERR_NOT_EMPTY`. The mock (`test/fatfs_mock/ff_mock.c`) now moves the content of a renamed directory with it | yes |
+| MED-04 | a name of `FM_NAME_MAX` characters or more could be created and then not listed or deleted recursively | `FM_Path_NameTooLong` (`src/fm_file.c`): `FM_ERR_TOO_LARGE` at create / rename. **Public behaviour change** | yes |
+| MED-05 | LittleFS `FS_Check` looked at the superblock only | `lfs_fs_traverse` over the volume: littlefs reads every metadata block and checks its checksum; file data is not read | yes |
+| MED-06 / -07 | JSON index overflow; `Path_Join` with `out == b` | `src/fm_json.c`, `src/fm_path.c` | yes |
+| LOW-01 | `-DFM_FATFS_PROVIDE_DISKIO` on the command line was overridden | `include/fm_fatfs.h`. The `get_fattime` half of the finding was not worked on (the CubeMX project has its own in `FATFS/App/fatfs.c`) | no |
+| LOW-02 | no check that application and library agree on the structure sizes | `FileManager_Init()` is a macro for `FileManager_InitChecked(sizeof …)` (`include/file_manager.h`, `src/fm_core.c`): `FM_ERR_INTERNAL` on a mismatch. Five structures only; `FM_Logger`, which the report names, is not compared. **Public behaviour change** | no |
+| LOW-03 | `FM_Log_SetSink` changed function and context in two steps; stale comment | sink removed first (`src/fm_log.c`). No test. No recursion guard was added for `FM_USE_THREADS=1`: the rule in `include/fm_log.h` is all there is | no |
+| LOW-04 | `get_type` codes differed; littlefs pulled in `printf`, stb_vorbis `fopen` | `FM_ERR_TOO_LARGE` everywhere; `LFS_YES_MESSAGES` / `STB_VORBIS_YES_STDIO` guards; `tools/check_cubeide.sh` fails on either symbol | yes |
+| stack frames (6.2) | "`scan_recursive` 1168 B per level, depth 8 needs over 9 KB" | **not a defect as stated**: `scan_recursive`, `delete_recursive` and `dir_copy_recursive` (`src/fm_directory.c`) are loops, none calls itself; the frame is paid once. Changed all the same: `Path_Normalize` kept `size_t offsets[FM_PATH_MAX]` (640 B on the target; the report measured an 840 B frame), now one byte per component; the two 512-byte diagnostic buffers of `UsbMsc_StorageRead` (the 1112 B of `STORAGE_Read_FS`, on the interrupt stack) are static in `UsbMsc_Lba0Probe` | n/a |
+| gaps 35, 38 | no test that a failing flush fails a copy; `FM_Transfer_Raw` with a unit larger than the buffer untested | tests `F-05: a flush that fails …` and `F-06: raw copy to a unit larger …` in `test/main.c` (the code was right) | yes |
+
+Open questions the maintainers have about their own fixes (they are questions,
+not findings; nobody has an answer):
+
+1. **The firmware side was not compiled.** `Core/Src/main.c`, `USB_DEVICE/Target/usbd_conf.c`, `FATFS/Target/ffconf.h` and the new `UsbMsc_Lba0Probe` were edited without an ARM compiler. `_FS_LOCK 16` sits outside the `USER CODE` blocks: a CubeMX regeneration writes 2 again (the `#error` then stops the build). With `OTG_FS_IRQn` at 6 the USB interrupt is below every other interrupt of the project: what does that do to USB throughput, and is 6 the right number against `SDMMC1_IRQn` (1) and the DMA interrupts?
+2. **The take-over rule of CRIT-02** takes a context from an `FM_FS` that was initialised and not yet mounted. Two tasks that initialise and mount at the same time, an application that initialises all its volumes at start and mounts them later (more than `FM_MAX_FS` of one kind), `FS_Mount` retried in a loop after `FM_ERR_NOT_READY`: is anything lost that the old code kept?
+3. **`LittleFS_FormatStorage`** borrows a context for the duration of the format and holds no mount lock. A second task that mounts the owner of that context meanwhile gets `FM_ERR_NOT_READY`; what else can run into it?
+4. **MED-08, the move-aside**: `~fmrn.tmp` after a reset between the two renames (the next rename in that folder deletes it: is that the file somebody still needs?); a file renamed onto a directory and a directory onto a file (the other backends refuse one of the two; FatFS does what `f_rename` does); a folder that already holds a user file named `~fmrn.tmp`.
+5. **`fmfs_table_valid`** runs at every mount and `FS_Check`: its cost with `FM_FMFS_MAX_ENTRIES` files (it compares pairs), and whether a table written by an earlier release of this library can fail it (the maintainers know of one shape, the stale `data_next` of version 1, and repair it).
+6. **CRIT-05** programs over bytes that are `0xFF` or equal. On a part with internal ECC, is programming a page twice (first half, later second half) within its specification? The comment in `qspi_can_program` says why "only clears bits" is not used; nobody checked a data sheet.
+7. **MED-04** refuses names of 64 characters or more at creation. `File_Copy` / `Directory_Copy` from a PC-written card with longer names now fail part way (`FM_ERR_TOO_LARGE`): what is left behind?
+8. The real `ff.c` (ST's R0.12c) is still not in the repository's tests; the auditor's harness with it is not in the repository. Section `[11]` runs on the mock, which was changed to behave as the report says the real one does.
+
 
 ### What round V4 found, and what the fixes claim
 
@@ -439,6 +506,40 @@ the drivers, those files, and the differential tester of section 6.
 
 ### Open leads — an answer to each is wanted in the report
 
+- **W8. Intermittent threaded media checksum.** The 57-configuration matrix
+  had one failure with `FM_FILE_FORCE_BOUNCE` and threads enabled: the
+  concurrent files / filesystems / codecs test reported thread 1, step 504,
+  CRC mismatch (639/640). It passed 25 serial reruns; the cause is unknown.
+  Four simultaneous test processes shared their test files, so their failures
+  are invalid as evidence. Reproduce in isolated workspaces and investigate.
+- **W9. Mutation coverage.** No mutation was run for MED-01; a mutation of
+  `LittleFS_FormatStorage` that releases a claimed context at the end escaped
+  the existing HIGH-04 tests. Exhaust the context pool, format, and check
+  that another init still fails, then try the mutation.
+
+- **W6. Stack of the file layer on the target (from the V5 report, section
+  6.2).** The V5 auditor measured, for Cortex-M7: `FM_Transfer_CopyEx` 1216 B,
+  `scan_recursive` 1168 B, `Directory_Copy` 1056 B, `Directory_DeleteRecursive`
+  800 B, and warned of "1168 B per level". That part is wrong: the walks in
+  `src/fm_directory.c` are loops (`walk_push` / `walk_pop` on one path
+  buffer), the frame is paid once. What stays true: one call of the copy path
+  holds two `FM_File` objects and two paths on the stack (`xfer_copy_locked`
+  in `src/fm_transfer.c`: 1264 B on x86-64 at `-Os`), on top of the frames of
+  the backend below it (`lfs_*`, `f_*`, the sector buffer of `fmfs_*`). Nobody
+  has added up a whole call chain. Do it for the deepest ones
+  (`Directory_Copy` → `File_Copy` → `FM_Transfer_CopyEx` → backend write →
+  driver; `Text_Replace`; `File_SafeReplace`) with `-fstack-usage` and a call
+  graph, for each backend, and compare with the stack the firmware has (the
+  linker script is not in the repository: say what you assumed).
+- **W7. The real `ff.c`.** The V5 auditor ran the adapter against ST's FatFS
+  R0.12c with the firmware's `ffconf.h` and found four defects the mock had
+  hidden (HIGH-02, MED-02, MED-03, MED-08). The repository still tests the
+  adapter on `test/fatfs_mock` only; the mock was changed to behave as the
+  report says the real one does. Build section `[11]` of
+  `test/fatfs_host_test.c`, and the differential tester of section 6, against
+  the real `ff.c` (it is not in the repository: the V5 auditor used ST's
+  `stm32_mw_fatfs`, R0.12c, with `ccsbcs.c`) on a RAM disk, with `_FS_LOCK` 16 and with 0, and report every
+  difference from the mock.
 - **W1. What does `File_Flush` guarantee?** The save code (new, another part)
   rests on it: every 256 KB (audio) or 1 MB (video) it patches the header,
   calls `File_Flush` and promises that after a reset the file on the card is
@@ -543,7 +644,7 @@ order and say in the report how far you got.
 `fm_spiflash.c`, `fm_sd_hal.c`, `fm_usb_msc.c`, and their host tests
 (`test_qspi`, `test_spiflash`, `test_eeprom_usb` in `test/main.c`).
 
-**Tier 4 — build configuration and the board's storage layer (new in this round, Job 2 (b))**
+**Tier 4 — build configuration and the board's storage layer (added for the previous round, Job 2 (b))**
 
 | File | What it is |
 |---|---|
@@ -704,7 +805,7 @@ The mechanism itself is in your scope and deserves a harness of its own:
   say each level prints match what is printed? (`FM_TEST_LOG=1 ./fm_test` at
   each level gives you the full list.)
 
-**Build configuration (new in this round).** Treat `include/fm_board_config.h`
+**Build configuration (added for the previous round).** Treat `include/fm_board_config.h`
 as an input format with users who make mistakes:
 
 - every feature line on and off, alone and in the pairs that depend on each
@@ -775,9 +876,9 @@ third-party code, what it does with the results — is fully in scope.
 
 ## 8. The report
 
-Deliver **one Markdown file** named `AUDIT_FILE_V5.md`. It is used as a work list:
+Deliver **one Markdown file** named `AUDIT_FILE_V6.md`. It is used as a work list:
 each finding is opened by someone who has not seen your session and has only
-the report and a clean checkout of `fc31b25`. Use this structure, in this
+the report and a clean checkout of `6fe596d`. Use this structure, in this
 order, with these headings:
 
 1. **Summary in Persian** (8 to 12 lines): how many confirmed defects by
@@ -791,7 +892,7 @@ order, with these headings:
      had, and the tools this prompt names that you did not have (with what you
      used in their place);
    - the result line of `make test` on your machine before you changed
-     anything (expected: `Results: 589/589 passed, 0 failures`; if yours
+     anything (expected: `Results: 635/635 passed, 0 failures`; if yours
      differs, that comes first in the report);
    - a table of what you did: method, target, amount (executions, files,
      cases, hours), coverage reached, result;
@@ -801,34 +902,34 @@ order, with these headings:
 3. **Table of findings**: ID, severity, status (confirmed / suspicion), owning
    part, `file:line`, one-line title, fix tested (yes / no), regression test
    included (yes / no). Sorted by severity.
-4. **One section per confirmed finding**, IDs `FILE5-01`, `FILE5-02`, ...:
+4. **One section per confirmed finding**, IDs `FILE6-01`, `FILE6-02`, ...:
    - **Severity** — S1: memory corruption, crash, hang, loss or corruption of
      stored data. S2: wrong result returned as success (wrong pixels, samples,
      bytes, sizes, timestamps; a recording that lost or misplaced data). S3:
      wrong error handling — a leaked handle or slot, a wrong error code, state
      not restored after a failure. S4: mismatch with the documentation,
      portability, wasted time or memory, a test that cannot fail.
-   - **Where** — `path:from-to`, function, at `fc31b25`, and the lines
+   - **Where** — `path:from-to`, function, at `6fe596d`, and the lines
      themselves (quote at most 15).
    - **Reach** — which public function leads there, which action of a user of
      the board (a UART command, a file on the card, a sequence of calls), which
      build configurations, 32 bits / 64 bits / both, and how likely it is with
      ordinary files and ordinary use.
-   - **How to reproduce** — from a clean checkout of `fc31b25`: the files to
+   - **How to reproduce** — from a clean checkout of `6fe596d`: the files to
      add (full source in the appendix), the exact commands, and the output as
      it was printed (sanitizer report, wrong value, hang with the time you
      waited). For an input file: a hex dump if it is under 200 bytes, otherwise
      the script that generates it.
    - **Expected and observed.**
    - **Root cause** — why it happens, not just where.
-   - **Proposed fix** — a unified diff against `fc31b25` in a `diff` block.
+   - **Proposed fix** — a unified diff against `6fe596d` in a `diff` block.
      Produce it with `git diff`, do not type it: the sources have CRLF line
      endings and a typed diff will not apply. Then state: applied (yes / no),
      the reproducer after the fix, the result line of `make test` after the
      fix, and anything else you ran with it (`make asan`, `make m32`, the
      smaller host tests).
    - **Regression test** — the test to add (which file, the code), with its
-     result on `fc31b25` (must fail) and with your fix (must pass). If a test
+     result on `6fe596d` (must fail) and with your fix (must pass). If a test
      is not possible on a PC, say why.
    - **Siblings** — where else you looked for the same mistake (other formats,
      other backends, the twin in `examples/`, the other player) and what you
@@ -891,10 +992,10 @@ must be able to reproduce every confirmed finding from the report alone.
 **Before you deliver, check your own report** (and say in the audit record
 that you did):
 
-- Make a fresh clone at `fc31b25` and re-run every reproducer from the text of
+- Make a fresh clone at `6fe596d` and re-run every reproducer from the text of
   the report alone. Drop or downgrade what does not reproduce.
 - Run `git apply --check` for every diff on that clean tree.
-- Re-check every `file:line` against `git show fc31b25:<path>`.
+- Re-check every `file:line` against `git show 6fe596d:<path>`.
 - The numbers in the Persian summary, in the table of findings and in the
   findings index agree.
 - No finding rests on a documented limit, and no "confirmed" finding contains

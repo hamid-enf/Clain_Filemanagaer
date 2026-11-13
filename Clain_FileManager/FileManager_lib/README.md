@@ -278,16 +278,31 @@ sees for `FM_File`, `FM_Dir`, `FM_Storage`, `FM_FS` and `FM_DirEntry` to
 `FM_NAME_MAX` or `FM_USE_*` set -- it returns `FM_ERR_INTERNAL` (-26)
 and initialises nothing, instead of letting the two sides write over
 each other's structures later.  Check its result.  The check sees only
-options that change one of those five sizes.  `-DFM_NO_ABI_CHECK=1`
+options that change one of those five sizes; it does not detect layout changes
+that preserve the sizes, or incompatible configuration that does not affect
+these structures.  `-DFM_NO_ABI_CHECK=1`
 removes the macro; `(FileManager_Init)()` calls the plain function.
+
+**Video audio and cache.** `SimpleVideo_AudioDataRead` returns interleaved
+16-bit stereo frames (mono is duplicated); provide room for two samples per
+frame. It consumes the same track as playback, at most one packet per call.
+An unsupported track returns `FM_ERR_UNSUPPORTED`; a mono packet that cannot
+fit returns `FM_ERR_TOO_LARGE`. This is a public behaviour change.
+
+The media cache skips an open entry when evicting, but the search is bounded
+to four busy candidates; it can fail to make room even if another entry
+could be evicted.
 
 **What the tests are, and are not.**  Everything above runs on a PC: the
 suite as a 64-bit and as a 32-bit program, under ASan / UBSan / TSan and
-in every combination of the `FM_USE_*` switches (`tools/check_matrix.sh`,
-`tools/check_32bit.sh`).  The ARM builds are compiled and measured (code
+in the configurations selected by `tools/check_matrix.sh` and
+`tools/check_32bit.sh`. The latest full matrix had an intermittent threaded
+media checksum failure; see `../../audit_prompts/01_file_storage_filesystem.md`
+for the result and reruns. Previous ARM builds were compiled and measured (code
 size, stack frames) but **nothing in this repository has been run on a
 board**: the STM32 ports, the QSPI / SD / I2S / DMA examples and the
-hardware JPEG path are tested against stub HALs.  Bring-up on real
+hardware JPEG path are tested against stub HALs. The firmware edits in the
+latest audit fix were not compiled for ARM. Bring-up on real
 hardware is still to be done by whoever uses them.
 
 ### STM32CubeIDE: the whole folder can sit in the project
