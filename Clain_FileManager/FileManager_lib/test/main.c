@@ -20682,6 +20682,7 @@ static void suite_leak_check(const char *suite)
 #include "audit_v3_tests.h"
 #include "audit_v4_tests.h"
 #include "audit_v5_tests.h"
+#include "audit_audio_late_tests.h"
 
 int main(void)
 {
@@ -20833,6 +20834,7 @@ int main(void)
 #if FM_USE_AUDIO
     RUN_SUITE(test_audit_v2_audio);
     RUN_SUITE(test_audit_v4_audio);
+    RUN_SUITE(test_audit_v5_audio_late);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_save);

@@ -479,6 +479,10 @@ audiorecordtest: $(LIBS)
 		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
 		tools/audio_record_host_test.c $(LIBS) -lm -o fm_audiorecordtest
 	@./fm_audiorecordtest
+	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 -DAUD5_TEST_TOP_API=1 \
+		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
+		tools/audio_record_host_test.c $(LIBS) -lm -o fm_audiorecordtest
+	@./fm_audiorecordtest
 
 # saveexamplestest — examples/examples_save_media.h RUN on the host: the
 # plain save examples and the "save what is playing through its callback"

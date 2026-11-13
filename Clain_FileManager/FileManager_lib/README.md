@@ -473,7 +473,11 @@ Audio_Close(&a);
 
 `Audio_ReadMono()` downmixes stereo sources to a single channel, so mono and
 stereo output are available separately.  MP3 input is streamed (no whole-file
-buffer) and ID3v2 tags are skipped automatically.
+buffer). A leading ID3v2 tag is skipped for MP3, AAC, WAV, FLAC,
+Vorbis and Opus. Detection reads behind one tag in a file; for an
+incomplete tag in a buffer it falls back to the extension or unknown.
+`SimpleAudio_Poll` keeps its restart budget through successful refills
+of the same track, so a repeatedly failing track eventually stops.
 
 ### Audio rules and limits
 
@@ -482,7 +486,9 @@ track in sample frames (one frame = one sample per channel) and
 `FM_Audio.frame_index` the position; `Player_GetDuration()` and
 `Player_GetPosition()` are these two divided by the sample rate.  The
 length is exact for WAV (PCM, G.711, IMA and Microsoft ADPCM), FLAC, Vorbis, Opus and
-MP3 with a Xing/Info header.  For MP3 without one it is computed from the
+MP3 with a Xing/Info header in decoded samples, including encoder delay
+and padding; this is not necessarily the gapless audible length. For MP3
+without one it is computed from the
 bit rate of the first frame: right for constant bit rate, **wrong for
 variable bit rate without a Xing header** (such files play, but length,
 position and seek are estimates).  It is 0, "not known", for AAC.
@@ -500,7 +506,9 @@ inside an MP3 or AAC stream are skipped to the next frame and playback
 goes on.
 
 **Seek.** `Audio_Seek(a, seconds)` refuses a negative time and NaN
-(`FM_ERR_INVALID_ARGUMENT`); a time past the end is the end.  It lands on
+(`FM_ERR_INVALID_ARGUMENT`); a time past the end is the end. An MP3
+past-end seek returns `FM_ERR_EOF` and leaves subsequent reads at EOF.
+It lands on
 the exact sample for WAV, FLAC, Vorbis, Opus and constant-bit-rate MP3.
 For variable-bit-rate MP3 it goes by the 100-entry table of the Xing
 header: the sound starts up to about 0.15 s after the request and

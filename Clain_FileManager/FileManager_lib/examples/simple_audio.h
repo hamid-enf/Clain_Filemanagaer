@@ -400,6 +400,7 @@ typedef struct
     AudioDma dma;        /* موتور پخش (audio_dma_player.h)          */
 
     uint32_t restart_count;   /* underrun‌های خودکارِ restart    */
+    uint32_t restart_track;   /* the track the budget belongs to */
 
     /* آمار refill (بدون اسپم کنسول) */
     uint32_t refill_count;
@@ -1189,6 +1190,13 @@ FM_Result SimpleAudio_Poll(void)
              * را رد می‌کند، پس حتی یک فایل خراب به‌تنهایی پلیر را
              * نمی‌کُشد.
              */
+            /* A newly advanced track can fail before any successful poll.
+             * It must not inherit the previous track's restart budget. */
+            if (sa.restart_count != 0u &&
+                Player_Current(&sa.dma.player) != sa.restart_track)
+            {
+                sa.restart_count = 0u;
+            }
             sa.restart_count++;
             FM_Log("SimpleAudio: playback error (%s, code %d) — "
                    "auto-restart %u/%u\n",
@@ -1198,7 +1206,10 @@ FM_Result SimpleAudio_Poll(void)
 
             if (sa.restart_count <= SIMPLE_AUDIO_MAX_RESTARTS)
             {
-                FM_Result r2 = audio_dma_play_from(
+                FM_Result r2;
+
+                sa.restart_track = Player_Current(&sa.dma.player);
+                r2 = audio_dma_play_from(
                     &sa.dma, Player_Current(&sa.dma.player));
 
                 if (r2 == FM_OK)
@@ -1215,8 +1226,14 @@ FM_Result SimpleAudio_Poll(void)
         }
     }
 
-    if (r == FM_OK)
+    if (r == FM_OK && sa.restart_count != 0u &&
+        Player_Current(&sa.dma.player) != sa.restart_track)
     {
+        /* A new track gets a new budget.  Clearing it on every ordinary
+         * success also cleared it while the same track was being
+         * restarted (a restart plays the track from its start, and the
+         * refill only fails later on), so a file whose read kept failing
+         * restarted for ever and the playlist never moved on. */
         sa.restart_count = 0u;
     }
     return r;

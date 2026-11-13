@@ -35,7 +35,11 @@ extern FM_Result PosixFS_Init(FM_FS *fs);
 
 /* Pulls in simple_audio.h + simple_video.h + fm_directory.h and the
  * example's own static helpers (audio_record_pre_dsp, audio_record_post_tap, ...). */
+#ifdef AUD5_TEST_TOP_API
+#include "../top_api/audio_record_with_tap.h"
+#else
 #include "audio_record_with_tap.h"
+#endif
 
 static int fails;
 
@@ -768,6 +772,29 @@ int main(void)
         (void)SimpleAudio_Stop();
         (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
         (void)Directory_DeleteRecursive("/keep");
+    }
+
+    /* AUD5-02: successful refills between failures must not clear the
+     * budget.  Concatenated MP3s change sample rate mid-track. */
+    {
+        static uint8_t bytes[160 * 1024];
+        size_t n1 = 0, n2 = 0;
+        int halves;
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        r = Directory_Create(SIMPLE_AUDIO_FOLDER);
+        if (r == FM_OK) r = File_ReadAll("/test/vectors/mp3_m2_22k_32k.mp3", bytes, sizeof(bytes), &n1);
+        if (r == FM_OK) r = File_ReadAll("/test/vectors/tone_mono.mp3", bytes + n1, sizeof(bytes) - n1, &n2);
+        if (r == FM_OK) r = File_WriteAll(SIMPLE_AUDIO_FOLDER "/a.mp3", bytes, n1 + n2);
+        if (r == FM_OK) r = save_make_track(SIMPLE_AUDIO_FOLDER "/b.wav", 16000, 1, 8000, 440.0);
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        halves = save_play_out(4000);
+        ok("AUD5-02: broken track stops after bounded restarts",
+           r == FM_OK && halves < 4000 && !SimpleAudio_IsRunning() &&
+           sa.restart_count > SIMPLE_AUDIO_MAX_RESTARTS);
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
     }
 
     /* ---- 8) saving video: MJPEG AVI ------------------------------- */

@@ -39,10 +39,13 @@ typedef enum
     FM_MEDIA_IMAGE_MAX
 } FM_MediaType;
 
-/* Detect from a path (reads the first FM_MEDIA_MAGIC_SCAN bytes). */
+/* Detect from a path: reads FM_MEDIA_MAGIC_SCAN bytes, then reads behind
+ * one leading ID3v2 tag if present. */
 FM_MediaType File_DetectType(const char *path);
 
-/* Detect from an in-memory buffer; ext may be NULL. */
+/* Detect from an in-memory buffer; ext may be NULL. For an incomplete
+ * leading ID3v2 tag, return the extension type or FM_MEDIA_UNKNOWN; the
+ * tag alone cannot establish which audio format follows it. */
 FM_MediaType Media_DetectBuffer(const void *buf, size_t len,
                                 const char *ext);
 
