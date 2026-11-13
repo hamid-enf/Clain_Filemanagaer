@@ -1,0 +1,80 @@
+diff --git a/examples/simple_audio.h b/examples/simple_audio.h
+index 4f0b3c6..3890e60 100644
+--- a/examples/simple_audio.h
++++ b/examples/simple_audio.h
+@@ -400,6 +400,7 @@ typedef struct
+     AudioDma dma;        /* موتور پخش (audio_dma_player.h)          */
+ 
+     uint32_t restart_count;   /* underrun‌های خودکارِ restart    */
++    uint32_t restart_track;   /* the track the budget belongs to */
+ 
+     /* آمار refill (بدون اسپم کنسول) */
+     uint32_t refill_count;
+@@ -1198,7 +1199,10 @@ FM_Result SimpleAudio_Poll(void)
+ 
+             if (sa.restart_count <= SIMPLE_AUDIO_MAX_RESTARTS)
+             {
+-                FM_Result r2 = audio_dma_play_from(
++                FM_Result r2;
++
++                sa.restart_track = Player_Current(&sa.dma.player);
++                r2 = audio_dma_play_from(
+                     &sa.dma, Player_Current(&sa.dma.player));
+ 
+                 if (r2 == FM_OK)
+@@ -1215,8 +1219,14 @@ FM_Result SimpleAudio_Poll(void)
+         }
+     }
+ 
+-    if (r == FM_OK)
++    if (r == FM_OK && sa.restart_count != 0u &&
++        Player_Current(&sa.dma.player) != sa.restart_track)
+     {
++        /* A new track gets a new budget.  Clearing it on every ordinary
++         * success also cleared it while the same track was being
++         * restarted (a restart plays the track from its start, and the
++         * refill only fails later on), so a file whose read kept failing
++         * restarted for ever and the playlist never moved on. */
+         sa.restart_count = 0u;
+     }
+     return r;
+diff --git a/top_api/simple_audio.h b/top_api/simple_audio.h
+index 5ffcaa5..0d2648c 100644
+--- a/top_api/simple_audio.h
++++ b/top_api/simple_audio.h
+@@ -399,6 +399,7 @@ typedef struct
+     AudioDma dma;        /* موتور پخش (audio_dma_player.h)          */
+ 
+     uint32_t restart_count;   /* underrun‌های خودکارِ restart    */
++    uint32_t restart_track;   /* the track the budget belongs to */
+ 
+     /* آمار refill (بدون اسپم کنسول) */
+     uint32_t refill_count;
+@@ -1197,7 +1198,10 @@ FM_Result SimpleAudio_Poll(void)
+ 
+             if (sa.restart_count <= SIMPLE_AUDIO_MAX_RESTARTS)
+             {
+-                FM_Result r2 = audio_dma_play_from(
++                FM_Result r2;
++
++                sa.restart_track = Player_Current(&sa.dma.player);
++                r2 = audio_dma_play_from(
+                     &sa.dma, Player_Current(&sa.dma.player));
+ 
+                 if (r2 == FM_OK)
+@@ -1214,8 +1218,14 @@ FM_Result SimpleAudio_Poll(void)
+         }
+     }
+ 
+-    if (r == FM_OK)
++    if (r == FM_OK && sa.restart_count != 0u &&
++        Player_Current(&sa.dma.player) != sa.restart_track)
+     {
++        /* A new track gets a new budget.  Clearing it on every ordinary
++         * success also cleared it while the same track was being
++         * restarted (a restart plays the track from its start, and the
++         * refill only fails later on), so a file whose read kept failing
++         * restarted for ever and the playlist never moved on. */
+         sa.restart_count = 0u;
+     }
+     return r;

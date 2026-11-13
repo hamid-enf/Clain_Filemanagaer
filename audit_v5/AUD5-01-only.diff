@@ -1,0 +1,204 @@
+diff --git a/src/fm_audio.c b/src/fm_audio.c
+index 57951cd..1c173df 100644
+--- a/src/fm_audio.c
++++ b/src/fm_audio.c
+@@ -510,7 +510,7 @@ static FM_Result pcmbuf_seek(FM_Audio *a, double seconds) {
+ #define AUDIO_SLURP_MAX_BYTES (10u * 1024u * 1024u)
+ #endif
+ #if FM_USE_FLAC
+-static FM_Result flac_file_open(FM_Audio *a) {
++static FM_Result flac_file_open(FM_Audio *a, uint64_t base) {
+     uint64_t sz = 0;
+     uint8_t *data = NULL;
+     uint32_t got = 0;
+@@ -522,10 +522,11 @@ static FM_Result flac_file_open(FM_Audio *a) {
+     FM_Result r = File_Size(&a->file, &sz);
+     if (r != FM_OK) return r;
+     if (sz < 42u) return FM_ERR_CORRUPTED;
+-    if (sz > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE;  /* valid, just too big */
++    if (sz - base > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE; /* valid, just too big */
++    sz -= base;                                /* an ID3v2 tag in front */
+     data = (uint8_t*)FM_Alloc((size_t)sz);
+     if (!data) return FM_ERR_NO_MEMORY;
+-    (void)File_Seek(&a->file, 0, FM_SEEK_SET);
++    (void)File_Seek(&a->file, (int64_t)base, FM_SEEK_SET);
+     r = File_Read(&a->file, data, (uint32_t)sz, &got);
+     if (r != FM_OK || got != sz) { FM_Free(data); return FM_ERR_IO; }
+     if (FM_Flac_Bits(data, (size_t)sz) > FM_FLAC_MAX_BITS) {
+@@ -643,7 +644,7 @@ static FM_Result flac_file_open(FM_Audio *a) {
+ }
+ #endif
+ #if FM_USE_VORBIS
+-static FM_Result vorbis_file_open(FM_Audio *a) {
++static FM_Result vorbis_file_open(FM_Audio *a, uint64_t base) {
+     uint64_t sz = 0;
+     uint8_t *data = NULL;
+     uint32_t got = 0;
+@@ -653,10 +654,11 @@ static FM_Result vorbis_file_open(FM_Audio *a) {
+     FM_Result r = File_Size(&a->file, &sz);
+     if (r != FM_OK) return r;
+     if (sz < 32u) return FM_ERR_CORRUPTED;
+-    if (sz > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE;  /* valid, just too big */
++    if (sz - base > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE; /* valid, just too big */
++    sz -= base;                                /* an ID3v2 tag in front */
+     data = (uint8_t*)FM_Alloc((size_t)sz);
+     if (!data) return FM_ERR_NO_MEMORY;
+-    (void)File_Seek(&a->file, 0, FM_SEEK_SET);
++    (void)File_Seek(&a->file, (int64_t)base, FM_SEEK_SET);
+     r = File_Read(&a->file, data, (uint32_t)sz, &got);
+     if (r != FM_OK || got != sz) { FM_Free(data); return FM_ERR_IO; }
+     v = stb_vorbis_open_memory(data, (int)sz, &error, NULL);
+@@ -768,7 +770,7 @@ static int32_t opus_gain_q12(int32_t gain_q8)
+  * granulepos of the final page (minus preskip) is the exact total
+  * number of 48 kHz samples, so the PCM buffer is sized exactly.
+  */
+-static FM_Result opus_file_open(FM_Audio *a) {
++static FM_Result opus_file_open(FM_Audio *a, uint64_t base) {
+     uint64_t sz = 0;
+     uint8_t *data = NULL;
+     uint32_t got = 0;
+@@ -781,10 +783,11 @@ static FM_Result opus_file_open(FM_Audio *a) {
+     r = File_Size(&a->file, &sz);
+     if (r != FM_OK) return r;
+     if (sz < 27u) return FM_ERR_CORRUPTED;
+-    if (sz > FM_OPUS_MAX_FILE_BYTES) return FM_ERR_TOO_LARGE;
++    if (sz - base > FM_OPUS_MAX_FILE_BYTES) return FM_ERR_TOO_LARGE;
++    sz -= base;                            /* an ID3v2 tag in front */
+     data = (uint8_t*)FM_Alloc((size_t)sz);
+     if (!data) return FM_ERR_NO_MEMORY;
+-    (void)File_Seek(&a->file, 0, FM_SEEK_SET);
++    (void)File_Seek(&a->file, (int64_t)base, FM_SEEK_SET);
+     r = File_Read(&a->file, data, (uint32_t)sz, &got);
+     if (r != FM_OK || got != sz) { FM_Free(data); return FM_ERR_IO; }
+     if (memcmp(data, "OggS", 4) != 0) { FM_Free(data); return FM_ERR_INVALID_FORMAT; }
+@@ -1063,7 +1066,7 @@ done:
+ }
+ #endif
+ 
+-static FM_Result audio_parse_wav(FM_Audio *a)
++static FM_Result audio_parse_wav(FM_Audio *a, uint64_t base)
+ {
+     uint8_t riff[12];
+     FM_Bool have_fmt = FM_FALSE;
+@@ -1071,6 +1074,10 @@ static FM_Result audio_parse_wav(FM_Audio *a)
+     uint64_t pos = 12;
+     uint64_t file_size = 0;
+ 
++    if (base != 0u && File_Seek(&a->file, (int64_t)base, FM_SEEK_SET) != FM_OK)
++    {
++        return FM_ERR_IO;
++    }
+     if (file_read_exact(&a->file, riff, sizeof(riff), NULL) != FM_OK ||
+         memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0)
+     {
+@@ -1080,6 +1087,10 @@ static FM_Result audio_parse_wav(FM_Audio *a)
+     {
+         return FM_ERR_IO;
+     }
++    /* Chunk offsets and the end of the data are relative to the RIFF
++     * header, which sits behind an ID3v2 tag when there is one. */
++    file_size -= base;
++    pos = 12u;
+ 
+     while (pos + 8 <= file_size)
+     {
+@@ -1162,14 +1173,14 @@ static FM_Result audio_parse_wav(FM_Audio *a)
+                 FM_EVENT_LOG("wav: data length 0, %lu bytes follow: played to the end of the file",
+                              (unsigned long)chunk_size);
+             }
+-            a->info.data_offset = payload;
++            a->info.data_offset = base + payload;
+             a->info.data_size = chunk_size;
+             have_data = FM_TRUE;
+         }
+ 
+         if (next > payload)
+         {
+-            if (File_Seek(&a->file, (int64_t)next, FM_SEEK_SET) != FM_OK)
++            if (File_Seek(&a->file, (int64_t)(base + next), FM_SEEK_SET) != FM_OK)
+             {
+                 return FM_ERR_IO;
+             }
+@@ -2571,6 +2601,7 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
+     uint8_t magic[12];
+     uint32_t got = 0;
+     uint64_t adts_at = 0;       /* ADTS frames behind an ID3v2 tag */
++    uint64_t tag_at = 0;        /* audio stream behind an ID3v2 tag */
+     FM_Result r;
+ 
+     FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
+@@ -2590,8 +2621,6 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
+      * format".  Look behind the tag first. */
+     if (got >= 10 && memcmp(magic, "ID3", 3) == 0)
+     {
+-        uint8_t after[2];
+-        uint32_t ag = 0;
+         uint64_t end = 10u + (((uint32_t)(magic[6] & 0x7Fu) << 21) |
+                               ((uint32_t)(magic[7] & 0x7Fu) << 14) |
+                               ((uint32_t)(magic[8] & 0x7Fu) << 7) |
+@@ -2601,11 +2630,24 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
+         {
+             end += 10u;                         /* the tag has a footer */
+         }
++        /* An ID3v2 tag is allowed in front of any stream, not only ADTS:
++         * FLAC, Ogg and WAV files tagged on the card were read from byte
++         * 0, none of the magic tests below matched, and the MP3 parser
++         * called the track "invalid format". */
+         if (File_Seek(&a->file, (int64_t)end, FM_SEEK_SET) == FM_OK &&
+-            File_Read(&a->file, after, sizeof(after), &ag) == FM_OK &&
+-            ag == 2u && after[0] == 0xFFu && (after[1] & 0xF6u) == 0xF0u)
++            File_Read(&a->file, magic, sizeof(magic), &got) == FM_OK &&
++            got >= 4u)
++        {
++            tag_at = end;
++            if (got >= 2u && magic[0] == 0xFFu && (magic[1] & 0xF6u) == 0xF0u)
++            {
++                adts_at = end;
++            }
++        }
++        else
+         {
+-            adts_at = end;
++            (void)File_Seek(&a->file, 0, FM_SEEK_SET);
++            (void)File_Read(&a->file, magic, sizeof(magic), &got);
+         }
+     }
+     r = File_Seek(&a->file, (int64_t)adts_at, FM_SEEK_SET);
+@@ -2615,12 +2657,12 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
+     }
+     else if (r == FM_OK && got >= 4 && memcmp(magic, "RIFF", 4) == 0)
+     {
+-        r = audio_parse_wav(a);
++        r = audio_parse_wav(a, tag_at);
+     }
+     else if (r == FM_OK && got >= 4 && memcmp(magic, "fLaC", 4) == 0)
+     {
+ #if FM_USE_FLAC
+-        r = flac_file_open(a);
++        r = flac_file_open(a, tag_at);
+ #else
+         r = FM_ERR_UNSUPPORTED;
+ #endif
+@@ -2629,19 +2671,20 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
+     {
+         uint8_t peek[256];
+         uint32_t pg = 0;
++        (void)File_Seek(&a->file, (int64_t)tag_at, FM_SEEK_SET);
+         (void)File_Read(&a->file, peek, sizeof(peek), &pg);
+         (void)File_Seek(&a->file, 0, FM_SEEK_SET);
+         int is_opus = 0;
+         for (uint32_t i=0;i+8<pg;++i) if (memcmp(peek+i, "OpusHead",8)==0) { is_opus=1; break; }
+         if (is_opus) {
+ #if FM_USE_OPUS
+-            r = opus_file_open(a);
++            r = opus_file_open(a, tag_at);
+ #else
+             r = FM_ERR_UNSUPPORTED;
+ #endif
+         } else {
+ #if FM_USE_VORBIS
+-            r = vorbis_file_open(a);
++            r = vorbis_file_open(a, tag_at);
+ #else
+             r = FM_ERR_UNSUPPORTED;
+ #endif

@@ -1,0 +1,24 @@
+M01_flac_sz: Results: 592/593 passed, 1 failures | TEST AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play ... FAIL: /test/vectors/test_vorbis.ogg tagged: open -6, read -6
+M02_vorbis_sz: Results: 592/593 passed, 1 failures | TEST AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play ... FAIL: /test/vectors/test_vorbis.ogg tagged: open -6, read -6
+M03_opus_dispatch: Results: 593/593 passed, 0 failures | -
+M04_ogghead: Results: 592/593 passed, 1 failures | TEST AUD5-01b: Ogg Opus behind an ID3v2 tag opens like the plain file ... FAIL: plain -11/0 samples, tagged -12/0
+M05_vorbis_dispatch: Results: 592/593 passed, 1 failures | TEST AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play ... FAIL: /test/vectors/test_vorbis.ogg tagged: open -12, read -12
+M06_wav_dispatch: Results: 592/593 passed, 1 failures | TEST AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play ... FAIL: /test/vectors/wav_alaw_8k.wav tagged: open -17, read -17
+M07_media_tagskip: Results: 592/593 passed, 1 failures | TEST AUD5-03: an ID3v2 tag does not make every file an MP3 ... FAIL: /test/vectors/test_flac.flac tagged (footer 0): buffer 6, file 15, want 15
+M08_media_footer: Results: 592/593 passed, 1 failures | TEST AUD5-03: an ID3v2 tag does not make every file an MP3 ... FAIL: /test/vectors/test_flac.flac tagged (footer 1): buffer 6, file 15, want 15
+M09_media_footer2: Results: 592/593 passed, 1 failures | TEST AUD5-03: an ID3v2 tag does not make every file an MP3 ... FAIL: /test/vectors/test_flac.flac tagged (footer 1): buffer 15, file 6, want 15
+M10_media_detecttype: Results: 592/593 passed, 1 failures | TEST AUD5-03: an ID3v2 tag does not make every file an MP3 ... FAIL: /test/vectors/test_flac.flac tagged (footer 0): buffer 15, file 6, want 15
+M11_adtsat: Results: 593/593 passed, 0 failures | -
+M12_aud401: Results: 590/593 passed, 3 failures | TEST AUD4-01: ADTS AAC behind an ID3v2 tag opens and plays ... FAIL: footer 0: result -17, codec '' 0 Hz 0 ch, 0 frames, 0 samples; TEST AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play ... FAIL: /test/vectors/test_flac.flac tagged: open -17, read -17
+M13_pcmclamp: Results: 593/593 passed, 0 failures | -
+M14_nseg: Results: 593/593 passed, 0 failures | -
+M15_granule: Results: 593/593 passed, 0 failures | -
+M16_outcap: Results: 592/593 passed, 1 failures | TEST F5: an AAC decoder that reports more than it was given room for ... FAIL: 8192 samples delivered (result 0)
+M17_wholeframes: Results: 593/593 passed, 0 failures | -
+M18_wavlen0: Results: 592/593 passed, 1 failures | TEST WAV: a data length of 0 with sound behind it plays to the end of the file ... FAIL: result -15, 0 frames in the info, 0 read, same 1
+M19_cbrpos: Results: 589/593 passed, 4 failures | TEST MP3: Audio_Seek lands on the requested second ... FAIL: mp3 seek accuracy (err=-26); TEST SimpleAudio: repeated manual Next/Prev across MP3+WAV tracks ... FAIL: simple audio manual transitions (err=-26)
+M20_openhz: Results: 592/593 passed, 1 failures | TEST AUD4-02: an MP3 whose sample rate changes ends there with a reason ... FAIL: result -15 then -15, 48000 Hz, 26496 samples
+M21_ex_reset: Results: 593/593 passed, 0 failures | restart: make: *** [Makefile:459: audiorestarttest] Error 1 (the failing track is given up on (the player stops)        FAIL; its restarts are bounded by SIMPLE_AUDIO_MAX_RESTARTS      FAIL) | -
+M22_ex_track: Results: 593/593 passed, 0 failures | restart: ALL PASS (0 failures) | -
+M23_top_reset: Results: 593/593 passed, 0 failures | restart: ALL PASS (0 failures) | -
+M24_mp3park: Results: 592/593 passed, 1 failures | TEST AUD5-04: a seek past the end of an MP3 reaches the end of the track ... FAIL: the read after it said 0, 512 samples (want FM_ERR_EOF, 0)

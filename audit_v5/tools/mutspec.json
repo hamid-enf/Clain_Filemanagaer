@@ -1,0 +1,151 @@
+[
+ {
+  "name": "M01_flac_sz",
+  "path": "src/fm_audio.c",
+  "old": "    sz -= base;                                /* an ID3v2 tag in front */\n",
+  "new": "",
+  "occ": 1
+ },
+ {
+  "name": "M02_vorbis_sz",
+  "path": "src/fm_audio.c",
+  "old": "    if (sz < 32u) return FM_ERR_CORRUPTED;\n    if (sz - base > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE; /* valid, just too big */\n    sz -= base;                                /* an ID3v2 tag in front */\n",
+  "new": "    if (sz < 32u) return FM_ERR_CORRUPTED;\n    if (sz - base > AUDIO_SLURP_MAX_BYTES) return FM_ERR_TOO_LARGE; /* valid, just too big */\n"
+ },
+ {
+  "name": "M03_opus_dispatch",
+  "path": "src/fm_audio.c",
+  "old": "            r = opus_file_open(a, tag_at);",
+  "new": "            r = opus_file_open(a, 0u);"
+ },
+ {
+  "name": "M04_ogghead",
+  "path": "src/fm_audio.c",
+  "old": "        (void)File_Seek(&a->file, (int64_t)tag_at, FM_SEEK_SET);\n        (void)File_Read(&a->file, peek, sizeof(peek), &pg);",
+  "new": "        (void)File_Seek(&a->file, 0, FM_SEEK_SET);\n        (void)File_Read(&a->file, peek, sizeof(peek), &pg);"
+ },
+ {
+  "name": "M05_vorbis_dispatch",
+  "path": "src/fm_audio.c",
+  "old": "            r = vorbis_file_open(a, tag_at);",
+  "new": "            r = vorbis_file_open(a, 0u);"
+ },
+ {
+  "name": "M06_wav_dispatch",
+  "path": "src/fm_audio.c",
+  "old": "        r = audio_parse_wav(a, tag_at);",
+  "new": "        r = audio_parse_wav(a, 0u);"
+ },
+ {
+  "name": "M07_media_tagskip",
+  "path": "src/fm_media.c",
+  "old": "    while (len >= 10u && p[0] == 'I' && p[1] == 'D' && p[2] == '3')",
+  "new": "    while (0)"
+ },
+ {
+  "name": "M08_media_footer",
+  "path": "src/fm_media.c",
+  "old": "        if ((p[5] & 0x10u) != 0u)\n        {\n            taglen += 10u;                   /* the tag has a footer */\n        }\n",
+  "new": ""
+ },
+ {
+  "name": "M09_media_footer2",
+  "path": "src/fm_media.c",
+  "old": "        if ((head[5] & 0x10u) != 0u)\n        {\n            skip += 10u;                   /* the tag has a footer */\n        }\n",
+  "new": ""
+ },
+ {
+  "name": "M10_media_detecttype",
+  "path": "src/fm_media.c",
+  "old": "        if (File_Seek(f, (int64_t)skip, FM_SEEK_SET) == FM_OK)",
+  "new": "        if (0)"
+ },
+ {
+  "name": "M11_adtsat",
+  "path": "src/fm_audio.c",
+  "old": "                adts_at = end;",
+  "new": "                adts_at = adts_at;"
+ },
+ {
+  "name": "M12_aud401",
+  "path": "src/fm_audio.c",
+  "old": "        if (File_Seek(&a->file, (int64_t)end, FM_SEEK_SET) == FM_OK &&\n            File_Read(&a->file, magic, sizeof(magic), &got) == FM_OK &&\n            got >= 4u)",
+  "new": "        if (0)"
+ },
+ {
+  "name": "M13_pcmclamp",
+  "path": "src/fm_audio.c",
+  "old": "    if (frame > frames) frame = frames;",
+  "new": "    if (0) frame = frames;"
+ },
+ {
+  "name": "M14_nseg",
+  "path": "src/fm_audio.c",
+  "old": "            if (nseg == 0) break;",
+  "new": "            if (nseg == 0) continue;",
+  "occ": 0
+ },
+ {
+  "name": "M15_granule",
+  "path": "src/fm_audio.c",
+  "old": "                if (gran > granule_final) granule_final = gran;",
+  "new": "                granule_final = gran;"
+ },
+ {
+  "name": "M16_outcap",
+  "path": "src/fm_audio.c",
+  "old": "        if (out_samples > cap)\n        {",
+  "new": "        if (0)\n        {"
+ },
+ {
+  "name": "M17_wholeframes",
+  "path": "src/fm_audio.c",
+  "old": "    n -= n % a->info.channels;              /* whole frames, any layout */",
+  "new": ""
+ },
+ {
+  "name": "M18_wavlen0",
+  "path": "src/fm_audio.c",
+  "old": "            if (chunk_size == 0u && have_fmt && file_size > payload)",
+  "new": "            if (0)"
+ },
+ {
+  "name": "M19_cbrpos",
+  "path": "src/fm_audio.c",
+  "old": "    num = (m->frame_file_off - m->audio_start) * (uint64_t)m->hz;",
+  "new": "    num = 0;"
+ },
+ {
+  "name": "M20_openhz",
+  "path": "src/fm_audio.c",
+  "old": "            if (m->open_hz != 0u && (uint32_t)info.hz != m->open_hz)",
+  "new": "            if (0)"
+ },
+ {
+  "name": "M21_ex_reset",
+  "path": "examples/simple_audio.h",
+  "old": "    if (r == FM_OK && sa.restart_count != 0u &&\n        Player_Current(&sa.dma.player) != sa.restart_track)",
+  "new": "    if (r == FM_OK)",
+  "extra": "make audiorestarttest 2>&1"
+ },
+ {
+  "name": "M22_ex_track",
+  "path": "examples/simple_audio.h",
+  "old": "                sa.restart_track = Player_Current(&sa.dma.player);\n",
+  "new": "",
+  "extra": "make audiorestarttest 2>&1"
+ },
+ {
+  "name": "M23_top_reset",
+  "path": "top_api/simple_audio.h",
+  "old": "    if (r == FM_OK && sa.restart_count != 0u &&\n        Player_Current(&sa.dma.player) != sa.restart_track)",
+  "new": "    if (r == FM_OK)",
+  "extra": "make audiorestarttest 2>&1"
+ },
+ {
+  "name": "M24_mp3park",
+  "path": "src/fm_audio.c",
+  "old": "        mp3dec_init(&m->dec);\n        m->in_len = 0;\n        m->in_off = 0;\n        m->pcm_len = 0;\n        m->pcm_pos = 0;\n        m->primed_frames = 0u;\n        m->in_file_off = m->file_size;",
+  "new": "        mp3dec_init(&m->dec);"
+ }
+]

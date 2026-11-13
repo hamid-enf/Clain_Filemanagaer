@@ -1,0 +1,30 @@
+diff --git a/src/fm_audio.c b/src/fm_audio.c
+index 57951cd..1c173df 100644
+--- a/src/fm_audio.c
++++ b/src/fm_audio.c
+@@ -1804,6 +1815,25 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
+     duration_frames = mp3_duration_frames(m);
+     if (duration_frames != 0u && target_frames >= duration_frames)
+     {
++        /* Past the end: say so (as this did) and also park the stream
++         * after the last frame, as every other format does here.  A
++         * caller that goes on reading after the error (SimpleAudio
++         * does not, Player_Seek callers may) used to get the sound
++         * from where the seek was asked, not the end of the track. */
++        mp3dec_init(&m->dec);
++        m->in_len = 0;
++        m->in_off = 0;
++        m->pcm_len = 0;
++        m->pcm_pos = 0;
++        m->primed_frames = 0u;
++        m->in_file_off = m->file_size;
++        if (m->file_size != 0u &&
++            File_Seek(m->file, (int64_t)m->file_size, FM_SEEK_SET) != FM_OK)
++        {
++            return FM_ERR_IO;
++        }
++        m->total_samples = duration_frames * (uint64_t)a->info.channels;
++        a->frame_index = duration_frames;
+         return FM_ERR_EOF;
+     }
+ 

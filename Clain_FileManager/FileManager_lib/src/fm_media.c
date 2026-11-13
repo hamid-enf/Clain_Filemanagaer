@@ -150,6 +150,31 @@ FM_MediaType Media_DetectBuffer(const void *buf, size_t len,
     }
 
     /* Magic numbers win over extension. */
+    /* An ID3v2 tag may sit in front of any audio stream, not only an MP3
+     * one: taggers write it into FLAC, Ogg and WAV files too, and the
+     * magic numbers are all behind it.  Every such file was reported as
+     * FM_MEDIA_MP3.  Skip whole tags (a chained file may have several),
+     * then read what the tag was hiding. */
+    while (len >= 10u && p[0] == 'I' && p[1] == 'D' && p[2] == '3')
+    {
+        size_t taglen = 10u + (((size_t)(p[6] & 0x7Fu) << 21) |
+                               ((size_t)(p[7] & 0x7Fu) << 14) |
+                               ((size_t)(p[8] & 0x7Fu) << 7) |
+                               (size_t)(p[9] & 0x7Fu));
+
+        if ((p[5] & 0x10u) != 0u)
+        {
+            taglen += 10u;                   /* the tag has a footer */
+        }
+        if (taglen + 4u > len)
+        {
+            /* the buffer ends inside the tag: nothing to read behind it */
+            return (by_ext != FM_MEDIA_UNKNOWN) ? by_ext : FM_MEDIA_MP3;
+        }
+        p += taglen;
+        len -= taglen;
+    }
+
     if (len >= 2 && p[0] == 0xFFu && p[1] == 0xD8u)
     {
         return FM_MEDIA_JPEG;
@@ -185,10 +210,6 @@ FM_MediaType Media_DetectBuffer(const void *buf, size_t len,
         p[11] == 'E')
     {
         return FM_MEDIA_WAV;
-    }
-    if (len >= 3 && p[0] == 'I' && p[1] == 'D' && p[2] == '3')
-    {
-        return FM_MEDIA_MP3;
     }
     if (len >= 2 && p[0] == 0xFFu && (p[1] & 0xF6u) == 0xF0u)
     {
@@ -296,6 +317,31 @@ FM_MediaType File_DetectType(const char *path)
         return Media_DetectByExtension(path);
     }
     r = File_Read(f, head, sizeof(head), &rd32);
+    if ((r == FM_OK || r == FM_ERR_EOF) && rd32 >= 10u &&
+        head[0] == 'I' && head[1] == 'D' && head[2] == '3')
+    {
+        /* An ID3v2 tag in front of the stream: the scan above only
+         * reaches into the tag, so every tagged FLAC, Ogg and WAV file
+         * was reported as MP3.  Read again from behind the tag. */
+        uint64_t skip = 10u + (((uint32_t)(head[6] & 0x7Fu) << 21) |
+                               ((uint32_t)(head[7] & 0x7Fu) << 14) |
+                               ((uint32_t)(head[8] & 0x7Fu) << 7) |
+                               (uint32_t)(head[9] & 0x7Fu));
+
+        if ((head[5] & 0x10u) != 0u)
+        {
+            skip += 10u;                   /* the tag has a footer */
+        }
+        if (File_Seek(f, (int64_t)skip, FM_SEEK_SET) == FM_OK)
+        {
+            rd32 = 0;
+            r = File_Read(f, head, sizeof(head), &rd32);
+        }
+        else
+        {
+            r = FM_ERR_IO;
+        }
+    }
     (void)File_Close(f);
     if (r != FM_OK && r != FM_ERR_EOF)
     {

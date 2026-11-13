@@ -451,6 +451,16 @@ hwjpegtest: $(LIBS)
 		test/hw_jpeg_host_test.c $(LIBS) -lm -o fm_hwjpegtest
 	@./fm_hwjpegtest
 
+# audiorestarttest — the SimpleAudio auto-restart budget (audit AUD5-02):
+# a track whose refill keeps failing is given up on after
+# SIMPLE_AUDIO_MAX_RESTARTS restarts instead of restarting for ever.
+audiorestarttest: $(LIBS)
+	@$(CC) -Wall -Wextra -std=gnu11 -Wno-unused-function -DFM_HOST_BUILD=1 \
+		-Iinclude -Iexamples -Ibackends -Isrc -Itools/halstub \
+		'-DSIMPLE_AUDIO_FOLDER="/aud5r"' \
+		tools/audio_restart_host_test.c $(LIBS) -lm -o fm_audiorestart
+	@./fm_audiorestart
+
 # audiorecordtest — audio_record_with_tap.h (record + taps + folder copy) against the real
 # library on the host: records a WAV, reopens it, verifies length and
 # level, installs every tap, and copies a nested tree.
@@ -493,7 +503,7 @@ fatfs:
 	@sh test/build_fatfs_host.sh
 
 # check — everything: tests, sanitizers, ports, examples
-check: test cachetest videohooks hwjpegtest audiorecordtest saveexamplestest tapstest asan ports fatfs
+check: test cachetest videohooks hwjpegtest audiorecordtest audiorestarttest saveexamplestest tapstest asan ports fatfs
 	@sh tools/check_switch_names.sh
 	@sh tools/check_flag_stamp.sh
 	@sh tools/check_examples.sh
@@ -504,7 +514,7 @@ check: test cachetest videohooks hwjpegtest audiorecordtest saveexamplestest tap
 clean:
 	rm -rf build-asan
 	rm -f $(FLAGS_STAMP)
-	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_hwjpegtest fm_audiorecordtest fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
+	rm -f $(LIBS) fm_test fm_cachetest fm_videohooks fm_hwjpegtest fm_audiorecordtest fm_audiorestart fm_saveexamplestest fm_tapstest fm_tsan.log fm_32bit.log $(EXAMPLES)
 	find src backends third_party -name "*.o" -delete
 
 test: fm_test

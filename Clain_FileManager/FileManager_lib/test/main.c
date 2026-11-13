@@ -20606,6 +20606,7 @@ int main(void)
 #if FM_USE_AUDIO
     RUN_SUITE(test_audit_v2_audio);
     RUN_SUITE(test_audit_v4_audio);
+    RUN_SUITE(test_audit_v5_audio);
 #endif
 #if FM_USE_AUDIO
     RUN_SUITE(test_audio_save);

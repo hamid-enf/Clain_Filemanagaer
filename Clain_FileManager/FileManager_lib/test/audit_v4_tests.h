@@ -1401,4 +1401,279 @@ static void test_audit_v4_audio(void)
     }
 #endif /* FM_USE_MP3 */
 }
+/* ---------------- AUD5-01: ID3v2 in front of FLAC / Ogg / WAV ------- */
+static void test_audit_v5_audio(void)
+{
+    char msg[200];
+    FM_Result r = FM_OK;
+    FM_Result r2 = FM_OK;
+    uint64_t n_tag = 0, n_plain = 0;
+    uint64_t first_tag = 0, first_plain = 0;
+    size_t len_tag = 0, len_plain = 0;
+
+    printf("\n[External audit v5: audio]\n");
+    restore_posix_root();
+
+    TEST("AUD5-01: FLAC / Ogg / WAV behind an ID3v2 tag open and play");
+    {
+        static const char *const plain[3] = {
+            "/test/vectors/test_flac.flac",
+            "/test/vectors/test_vorbis.ogg",
+            "/test/vectors/wav_alaw_8k.wav"
+        };
+        static int16_t pcm[4096];
+        int bad = 0;
+        unsigned k;
+
+        for (k = 0; k < 3u && !bad; k++)
+        {
+            uint64_t sz = 0;
+            size_t rd = 0;
+            size_t taglen;
+
+            memset(g_av4_abuf, 0, 8192u);
+            if (File_ReadAll(plain[k], g_av4_abuf + 1024,
+                             (uint32_t)(sizeof(g_av4_abuf) - 1024u),
+                             &rd) != FM_OK || rd == 0u)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "cannot read %s", plain[k]);
+                break;
+            }
+            taglen = av4_id3(g_av4_abuf, 1000u, 0);
+            memmove(g_av4_abuf + taglen, g_av4_abuf + 1024, (size_t)rd);
+            len_tag = taglen + (size_t)rd;
+            if (File_WriteAll("/av5tag.bin", g_av4_abuf,
+                              (uint32_t)len_tag) != FM_OK)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "cannot write the tagged copy");
+                break;
+            }
+            n_tag = 0;
+            first_tag = 0;
+            r2 = FM_OK;
+            {
+                FM_Audio t;
+                r2 = Audio_Open("/av5tag.bin", &t);
+                if (r2 == FM_OK) (void)Audio_Close(&t);
+            }
+            {
+                FM_Result rr = (r2 == FM_OK)
+                    ? av4_read_all("/av5tag.bin", NULL, &n_tag, &r)
+                    : r2;
+
+                if (rr != FM_ERR_EOF)
+                {
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg),
+                                   "%s tagged: open %d, read %d",
+                                   plain[k], (int)r2, (int)rr);
+                    break;
+                }
+            }
+            (void)File_Delete("/av5tag.bin");
+            n_plain = 0;
+            first_plain = 0;
+            if (av4_read_all(plain[k], NULL, &n_plain, &r) != FM_ERR_EOF)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg), "%s plain: read %d",
+                               plain[k], (int)r);
+                break;
+            }
+            (void)sz;
+            if (n_tag != n_plain)
+            {
+                bad = 1;
+                (void)snprintf(msg, sizeof(msg),
+                               "%s: %lu samples tagged, %lu plain",
+                               plain[k], (unsigned long)n_tag,
+                               (unsigned long)n_plain);
+            }
+        }
+        (void)pcm;
+        (void)len_plain;
+        (void)first_tag;
+        (void)first_plain;
+        if (bad) FAIL(msg); else PASS();
+    }
+
+    TEST("AUD5-01b: Ogg Opus behind an ID3v2 tag opens like the plain file");
+    {
+        /* The Ogg branch of Audio_Open looked for OpusHead at byte 0 and
+         * read opus_file_open() from byte 0, so a tagged Opus file was
+         * either sent to the Vorbis decoder (FM_ERR_CORRUPTED) or read
+         * from inside the tag.  Both files must give the same result:
+         * FM_OK with libopus, FM_ERR_UNSUPPORTED without it. */
+        size_t rd = 0;
+        size_t taglen;
+        FM_Result plain, tagged;
+        uint64_t n_plain = 0, n_tag = 0;
+
+        msg[0] = '\0';
+        memset(g_av4_abuf, 0, 8192u);
+        if (File_ReadAll("/test/vectors/test_opus.ogg", g_av4_abuf + 1024,
+                         sizeof(g_av4_abuf) - 1024u, &rd) != FM_OK || rd == 0u)
+        {
+            FAIL("cannot read /test/vectors/test_opus.ogg");
+        }
+        else
+        {
+            taglen = av4_id3(g_av4_abuf, 1000u, 0);
+            memmove(g_av4_abuf + taglen, g_av4_abuf + 1024, (size_t)rd);
+            if (File_WriteAll("/av5opus.bin", g_av4_abuf,
+                              (uint32_t)(taglen + (size_t)rd)) != FM_OK)
+            {
+                FAIL("cannot write the tagged copy");
+            }
+            else
+            {
+                plain = av4_read_all("/test/vectors/test_opus.ogg", NULL,
+                                     &n_plain, &r);
+                tagged = av4_read_all("/av5opus.bin", NULL, &n_tag, &r);
+                (void)File_Delete("/av5opus.bin");
+                if (tagged != plain || n_tag != n_plain)
+                {
+                    (void)snprintf(msg, sizeof(msg),
+                                   "plain %d/%lu samples, tagged %d/%lu",
+                                   (int)plain, (unsigned long)n_plain,
+                                   (int)tagged, (unsigned long)n_tag);
+                    FAIL(msg);
+                }
+                else
+                {
+                    PASS();
+                }
+            }
+        }
+    }
+    TEST("AUD5-03: an ID3v2 tag does not make every file an MP3");
+    {
+        static const struct
+        {
+            const char *path;
+            FM_MediaType want;
+        } cases[] = {
+            { "/test/vectors/test_flac.flac",   FM_MEDIA_FLAC },
+            { "/test/vectors/test_vorbis.ogg",  FM_MEDIA_OGG  },
+            { "/test/vectors/wav_alaw_8k.wav",  FM_MEDIA_WAV  },
+            { "/test/vectors/tone_mono.mp3",    FM_MEDIA_MP3  }
+        };
+        unsigned k;
+        int footer;
+        int bad = 0;
+
+        msg[0] = '\0';
+        /* With and without a footer: both move the magic further back. */
+        for (k = 0; k < sizeof(cases) / sizeof(cases[0]) && !bad; k++)
+        {
+            for (footer = 0; footer < 2 && !bad; footer++)
+            {
+                size_t rd = 0;
+                size_t taglen;
+                FM_MediaType buf_type;
+                FM_MediaType file_type;
+
+                memset(g_av4_abuf, 0, 8192u);
+                if (File_ReadAll(cases[k].path, g_av4_abuf + 1024,
+                                 sizeof(g_av4_abuf) - 1024u, &rd) != FM_OK ||
+                    rd == 0u)
+                {
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg), "cannot read %s",
+                                   cases[k].path);
+                    break;
+                }
+                taglen = av4_id3(g_av4_abuf, 1000u, footer);
+                memmove(g_av4_abuf + taglen, g_av4_abuf + 1024, (size_t)rd);
+                len_tag = taglen + (size_t)rd;
+                if (File_WriteAll("/av5det.bin", g_av4_abuf,
+                                  (uint32_t)len_tag) != FM_OK)
+                {
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg),
+                                   "cannot write the tagged copy");
+                    break;
+                }
+                buf_type  = Media_DetectBuffer(g_av4_abuf, len_tag,
+                                               "/av5det.bin");
+                file_type = File_DetectType("/av5det.bin");
+                (void)File_Delete("/av5det.bin");
+                if (buf_type != cases[k].want || file_type != cases[k].want)
+                {
+                    bad = 1;
+                    (void)snprintf(msg, sizeof(msg),
+                                   "%s tagged (footer %d): buffer %d, "
+                                   "file %d, want %d",
+                                   cases[k].path, footer,
+                                   (int)buf_type, (int)file_type,
+                                   (int)cases[k].want);
+                }
+            }
+        }
+        if (bad) FAIL(msg); else PASS();
+    }
+
+    TEST("AUD5-04: a seek past the end of an MP3 reaches the end of the track");
+    {
+        /* mp3_seek returned FM_ERR_EOF for a time past the duration and
+         * left the stream where it was (0.001 s in), so a caller that
+         * ignores the result - MediaIO_AudioSeek() and Player_Seek()
+         * return it, the board UART path does not - went on playing the
+         * sound from where the seek was asked instead of the end.  Every
+         * other format parks the stream at the end and the next read
+         * says FM_ERR_EOF. */
+        static FM_Audio z;
+        static int16_t zpcm[512];
+        FM_Result q;
+        size_t got2 = 0;
+
+        msg[0] = '\0';
+        q = Audio_Open("/test/vectors/mp3_m2_22k_32k.mp3", &z);
+        if (q != FM_OK)
+        {
+            (void)snprintf(msg, sizeof(msg), "cannot open the MP3 (%d)", (int)q);
+            FAIL(msg);
+        }
+        else
+        {
+            q = Audio_Read(&z, zpcm, 512, &got2);
+            q = Audio_Seek(&z, 1e9);
+            if (q != FM_ERR_EOF)
+            {
+                (void)snprintf(msg, sizeof(msg),
+                               "the seek said %d, not FM_ERR_EOF", (int)q);
+            }
+            else
+            {
+                got2 = 99;
+                q = Audio_Read(&z, zpcm, 512, &got2);
+                if (q != FM_ERR_EOF || got2 != 0u)
+                {
+                    (void)snprintf(msg, sizeof(msg),
+                                   "the read after it said %d, %lu samples "
+                                   "(want FM_ERR_EOF, 0)",
+                                   (int)q, (unsigned long)got2);
+                }
+                else if (z.frame_index != z.info.total_frames)
+                {
+                    (void)snprintf(msg, sizeof(msg),
+                                   "position %lu, not the end %lu",
+                                   (unsigned long)z.frame_index,
+                                   (unsigned long)z.info.total_frames);
+                }
+                else
+                {
+                    msg[0] = '\0';
+                }
+            }
+            (void)Audio_Close(&z);
+            if (msg[0] != '\0') FAIL(msg); else PASS();
+        }
+    }
+
+}
+
+
 #endif /* FM_USE_AUDIO */
