@@ -478,6 +478,9 @@ Vorbis and Opus. Detection reads behind one tag in a file; for an
 incomplete tag in a buffer it falls back to the extension or unknown.
 `SimpleAudio_Poll` keeps its restart budget through successful refills
 of the same track, so a repeatedly failing track eventually stops.
+A `SimpleAudio_Stop` requested inside a PCM callback is deferred until
+its refill unwinds; during the initial prefill it completes before
+`SimpleAudio_Begin` returns. Other callback reentrancy is not guaranteed.
 
 ### Audio rules and limits
 

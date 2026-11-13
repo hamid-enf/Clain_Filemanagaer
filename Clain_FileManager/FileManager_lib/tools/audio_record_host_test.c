@@ -54,6 +54,59 @@ static void ok(const char *what, int cond)
     if (!cond) fails++;
 }
 
+static long aud_live_blocks;
+static void *aud_count_alloc(size_t n, void *ctx)
+{
+    void *p; (void)ctx; p = malloc(n); if (p != NULL) ++aud_live_blocks; return p;
+}
+static void *aud_count_realloc(void *p, size_t n, void *ctx)
+{
+    void *q; int was_null = (p == NULL); (void)ctx;
+    q = realloc(p, n); if (q != NULL && was_null) ++aud_live_blocks; return q;
+}
+static void aud_count_free(void *p, void *ctx)
+{
+    (void)ctx; if (p != NULL) { --aud_live_blocks; free(p); }
+}
+
+static int aud_track_stop_count;
+static void aud_track_stop(void *ctx, const char *path, const FM_AudioInfo *info)
+{
+    (void)ctx; (void)path; (void)info;
+    ++aud_track_stop_count;
+    (void)SimpleAudio_Stop();
+}
+
+static int aud_overrun_count;
+static void aud_overrun_callback(void *ctx, int16_t *pcm, size_t samples,
+                                 uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)pcm; (void)samples; (void)rate; (void)channels;
+    ++aud_overrun_count;
+    /* Simulate the DMA requesting the same half while it is being filled. */
+    AudioDma_HalfCallback(&sa.dma);
+    SimpleAudio_SetDataCallback(NULL, NULL);
+}
+
+static int aud_stop_count;
+static void aud_stop_callback(void *ctx, int16_t *pcm, size_t samples,
+                              uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)pcm; (void)samples; (void)rate; (void)channels;
+    ++aud_stop_count;
+    (void)SimpleAudio_Stop();
+    SimpleAudio_SetDataCallback(NULL, NULL);
+}
+
+static int aud_self_remove_count;
+static void aud_self_remove(void *ctx, int16_t *pcm, size_t samples,
+                            uint32_t rate, uint16_t channels)
+{
+    (void)ctx; (void)pcm; (void)samples; (void)rate; (void)channels;
+    aud_self_remove_count++;
+    SimpleAudio_SetDataCallback(NULL, NULL);
+}
+
 /* callbacks of section 6: count what reaches the application */
 static int keep_data_calls, keep_monitor_calls, keep_starts, keep_ends;
 static int keep_data_peak;
@@ -394,6 +447,136 @@ int main(void)
         ok("cleanup precondition sane", exists == FM_TRUE);
         (void)Directory_DeleteRecursive("/recsrc");
         (void)Directory_DeleteRecursive("/recdst");
+    }
+
+    /* S-02: a failed start must not desynchronise the requested volume,
+     * the next start's gain, or the public snapshot. Also remove a data
+     * callback from inside itself and check it does not run again. */
+    {
+        int halves;
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        (void)SimpleAudio_SetVolume(200);
+        r = SimpleAudio_Begin();
+        ok("S-02: empty playlist refuses to start", r != FM_OK);
+        (void)SimpleAudio_SetVolume(50);
+        r = save_make_track(SIMPLE_AUDIO_FOLDER "/volume.wav", 16000, 1,
+                            16000, 440.0);
+        (void)SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        aud_self_remove_count = 0;
+        SimpleAudio_SetDataCallback(aud_self_remove, NULL);
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        ok("S-02: volume survives failed start and agrees with live gain",
+           r == FM_OK && SimpleAudio_GetVolume() == 50u &&
+           sa.dma.volume == (int32_t)((50u * 0x7FFFu) / 100u));
+        halves = save_play_out(4000);
+        ok("audio callback can remove itself", halves < 4000 &&
+           aud_self_remove_count == 1 && sa_cfg.data_cb == NULL &&
+           sa.dma.pcm_tap_pre == NULL);
+        (void)SimpleAudio_Stop();
+        SimpleAudio_SetDataCallback(NULL, NULL);
+        (void)SimpleAudio_SetVolume(100);
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+    }
+
+    /* Reentrant Stop from a data callback during a live refill. */
+    {
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        {
+            static int16_t samples[16000];
+            size_t j;
+            int k;
+            for (j = 0; j < 16000u; ++j) samples[j] = (int16_t)(j % 2000u);
+            r = SimpleAudio_RecStart(SIMPLE_AUDIO_FOLDER "/stop.wav", 16000, 1);
+            for (k = 0; k < 8 && r == FM_OK; ++k)
+                r = SimpleAudio_RecWrite(samples, 16000u);
+            if (r == FM_OK) r = SimpleAudio_RecStop();
+        }
+        (void)SimpleAudio_SetOutput(FM_AUDIO_OUT_BOTH);
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        SimpleAudio_SetDataCallback(NULL, NULL);
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        aud_stop_count = 0;
+        SimpleAudio_SetDataCallback(aud_stop_callback, NULL);
+        AudioDma_HalfCallback(&sa.dma);
+        if (r == FM_OK) r = SimpleAudio_Poll();
+        ok("audio callback stops playback during refill safely",
+           r == FM_OK && aud_stop_count == 1 && !SimpleAudio_IsRunning());
+        aud_stop_count = 0;
+        SimpleAudio_SetDataCallback(aud_stop_callback, NULL);
+        r = SimpleAudio_Begin();
+        ok("audio callback can stop during initial prefill",
+           r == FM_OK && aud_stop_count == 1 && !SimpleAudio_IsRunning());
+        SimpleAudio_SetDataCallback(NULL, NULL);
+        r = SimpleAudio_Begin();
+        ok("audio can restart after callback stop", r == FM_OK && SimpleAudio_IsRunning());
+        aud_overrun_count = 0;
+        SimpleAudio_SetDataCallback(aud_overrun_callback, NULL);
+        AudioDma_HalfCallback(&sa.dma);
+        if (r == FM_OK) r = SimpleAudio_Poll();
+        ok("simulated refill overrun is detected",
+           r == FM_OK && aud_overrun_count == 1 && sa.dma.underrun != 0);
+        if (r == FM_OK) r = SimpleAudio_Poll();
+        ok("simulated overrun restarts the track once",
+           r == FM_OK && SimpleAudio_IsRunning() && sa.restart_count == 1u);
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+    }
+
+    /* Lifecycle callbacks can also request Stop during start and EOF. */
+    {
+        int halves;
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        r = save_make_track(SIMPLE_AUDIO_FOLDER "/short.wav", 16000, 1, 8000, 440.0);
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_REPEAT_ALL);
+        aud_track_stop_count = 0;
+        SimpleAudio_SetTrackStartCallback(aud_track_stop, NULL);
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        ok("track-start callback can stop before Begin returns",
+           r == FM_OK && aud_track_stop_count == 1 && !SimpleAudio_IsRunning());
+        SimpleAudio_SetTrackStartCallback(NULL, NULL);
+        aud_track_stop_count = 0;
+        SimpleAudio_SetTrackEndCallback(aud_track_stop, NULL);
+        r = SimpleAudio_Begin();
+        halves = save_play_out(4000);
+        ok("track-end callback can stop instead of repeat",
+           r == FM_OK && aud_track_stop_count == 1 && halves < 4000 &&
+           !SimpleAudio_IsRunning());
+        SimpleAudio_SetTrackEndCallback(NULL, NULL);
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+    }
+
+    /* End-of-playlist leaves the player initialised but not running. A
+     * later Begin must release that playlist before resetting the state. */
+    {
+        FM_Allocator saved = *FM_Allocator_Get();
+        FM_Allocator counter = { aud_count_alloc, NULL, aud_count_realloc,
+                                 aud_count_free, NULL };
+        int round;
+        (void)SimpleAudio_Stop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        r = save_make_track(SIMPLE_AUDIO_FOLDER "/eof.wav", 16000, 1, 8000, 440.0);
+        (void)SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        aud_live_blocks = 0;
+        if (r == FM_OK && FM_Allocator_Set(&counter) != FM_OK) r = FM_ERR_INTERNAL;
+        for (round = 0; r == FM_OK && round < 3; ++round)
+        {
+            r = SimpleAudio_Begin();
+            if (r == FM_OK && save_play_out(4000) >= 4000) r = FM_ERR_INTERNAL;
+        }
+        (void)SimpleAudio_Stop();
+        ok("repeated Begin after EOF frees every playlist",
+           r == FM_OK && aud_live_blocks == 0);
+        (void)FM_Allocator_Set(&saved);
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
     }
 
     /* ---- 6) output switch + callbacks survive Stop()/Begin() ------ */

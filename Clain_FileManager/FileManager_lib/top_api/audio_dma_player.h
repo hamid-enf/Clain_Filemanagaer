@@ -539,7 +539,9 @@ static inline FM_Result audio_dma_start_current(AudioDma *state)
     state->underrun = 0;
 
     AUDIO_DMA_DEBUG_LOG("start_current: fill half 0\n");
+    state->refilling[0] = 1;
     r = audio_dma_fill_half(state, 0);
+    state->refilling[0] = 0;
     if (r != FM_OK)
     {
         return r;
@@ -548,7 +550,9 @@ static inline FM_Result audio_dma_start_current(AudioDma *state)
     if (!state->draining)
     {
         AUDIO_DMA_DEBUG_LOG("start_current: fill half 1\n");
+        state->refilling[1] = 1;
         r = audio_dma_fill_half(state, 1);
+        state->refilling[1] = 0;
         if (r != FM_OK)
         {
             return r;
@@ -617,6 +621,8 @@ static inline FM_Result audio_dma_play_from(AudioDma *state,
      * EOF-driven advance): report the interrupted track's end once.  EOF
      * already reported it in audio_dma_handle_eof, so track_active is 0. */
     audio_dma_notify_track_end(state);
+    /* A track-end callback may stop and deinitialise the player. */
+    if (!state->player_initialized) return FM_OK;
 
     for (tried = 0; tried < count; tried++)
     {
@@ -976,6 +982,7 @@ static inline FM_Result audio_dma_handle_eof(AudioDma *state)
     if (count == 0u) return FM_ERR_NOT_FOUND;
     /* The current track has played to the end: notify before switching. */
     audio_dma_notify_track_end(state);
+    if (!state->player_initialized) return FM_OK;
     if (m == FM_PLAY_MODE_STOP) {
         state->running = FM_FALSE;
         (void)state->port->stop(state->port_context);

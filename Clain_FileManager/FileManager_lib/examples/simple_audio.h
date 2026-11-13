@@ -427,6 +427,7 @@ typedef struct
 #define SA_CMD_PLAY    3u
 #define SA_CMD_SEEK    4u
 #define SA_CMD_RESUME  5u
+#define SA_CMD_STOP    6u
 
 static SimpleAudioState sa;
 
@@ -697,6 +698,14 @@ FM_Result SimpleAudio_Begin(void)
 #endif
     simple_audio_rec_service();      /* فایلِ بازِ پخش قبلی بسته شود */
 
+    /* A playlist can have reached EOF without being deinitialised.  Do
+     * not memset away its item array when Begin starts the next session. */
+    if (sa.dma.player_initialized)
+    {
+        r = AudioDma_Stop(&sa.dma);
+        if (r != FM_OK) return r;
+    }
+
     SimpleI2S_Take(simple_audio_i2s_half, simple_audio_i2s_full,
                    simple_audio_i2s_err, SimpleAudio_Stop);
 
@@ -725,6 +734,18 @@ FM_Result SimpleAudio_Begin(void)
         SimpleI2S_Drop(SimpleAudio_Stop);
         SimpleIdle_Remove(simple_audio_idle);
         return r;
+    }
+
+    /* A callback in an initial prefill may have requested a stop.  The
+     * prefill must unwind before the player and its decoder are closed. */
+    if (sa.pending_cmd == SA_CMD_STOP)
+    {
+        return SimpleAudio_Stop();
+    }
+    /* A track-start callback may already have stopped the player. */
+    if (!sa.dma.player_initialized)
+    {
+        return FM_OK;
     }
 
     FM_Log("SimpleAudio: playing %s (%s %lu Hz %uch) — playlist %lu\n",
@@ -792,6 +813,11 @@ static FM_Result simple_audio_apply_pending(void)
     if (cmd == SA_CMD_NONE)
     {
         return FM_OK;
+    }
+
+    if (cmd == SA_CMD_STOP)
+    {
+        return SimpleAudio_Stop();
     }
 
     if (cmd == SA_CMD_RESUME)
@@ -1257,11 +1283,21 @@ FM_Result SimpleAudio_Start(void)
 }
 
 /* توقف کامل (DMA + لیست پخش). برای شروع دوباره: SimpleAudio_Begin() یا
- * SimpleAudio_Start(). تنظیم‌ها (خروجی، کالبک‌ها، ولوم) می‌مانند. */
+ * SimpleAudio_Start(). تنظیم‌ها (خروجی، کالبک‌ها، ولوم) می‌مانند.
+ * From a PCM callback inside a refill, the stop is deferred until that
+ * refill has unwound (during initial prefill, until Begin returns). */
 FM_Result SimpleAudio_Stop(void)
 {
     FM_Result r;
 
+    /* A data/monitor/recording callback runs inside a refill. Closing the
+     * player here invalidates the decoder that refill is still using.
+     * Apply the stop as soon as the refill has unwound instead. */
+    if (sa.dma.refilling[0] || sa.dma.refilling[1])
+    {
+        sa.pending_cmd = SA_CMD_STOP;
+        return FM_OK;
+    }
     sa.pending_cmd = SA_CMD_NONE;
     sa.paused = 0u;
     sa.pause_need_restart = 0u;
