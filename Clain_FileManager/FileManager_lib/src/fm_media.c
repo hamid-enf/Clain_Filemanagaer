@@ -323,8 +323,8 @@ FM_MediaType File_DetectType(const char *path)
         return Media_DetectByExtension(path);
     }
     r = File_Read(f, head, sizeof(head), &rd32);
-    if ((r == FM_OK || r == FM_ERR_EOF) && rd32 >= 10u &&
-        head[0] == 'I' && head[1] == 'D' && head[2] == '3')
+    while ((r == FM_OK || r == FM_ERR_EOF) && rd32 >= 10u &&
+           head[0] == 'I' && head[1] == 'D' && head[2] == '3')
     {
         /* An ID3v2 tag in front of the stream: the scan above only
          * reaches into the tag, so every tagged FLAC, Ogg and WAV file
@@ -338,7 +338,9 @@ FM_MediaType File_DetectType(const char *path)
         {
             skip += 10u;                   /* the tag has a footer */
         }
-        if (File_Seek(f, (int64_t)skip, FM_SEEK_SET) == FM_OK)
+        /* File_Read advanced by rd32 bytes; seek relative to the start of
+         * this tag, not the start of the file. */
+        if (File_Seek(f, (int64_t)skip - (int64_t)rd32, FM_SEEK_CUR) == FM_OK)
         {
             rd32 = 0;
             r = File_Read(f, head, sizeof(head), &rd32);

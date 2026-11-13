@@ -1340,26 +1340,24 @@ static void mp3_release(FM_Mp3Stream *m)
 static FM_Result mp3_skip_id3(FM_File *f, uint64_t *off)
 {
     uint8_t h[10];
-    FM_Result r = file_read_exact(f, h, sizeof(h), NULL);
-
-    if (r != FM_OK && r != FM_ERR_EOF)
+    FM_Result r;
+    uint64_t size;
+    *off = 0u;
+    r = File_Size(f, &size);
+    if (r != FM_OK) return r;
+    for (;;)
     {
-        return r;
-    }
-    if (r == FM_OK && memcmp(h, "ID3", 3) == 0)
-    {
-        uint32_t size = mp3_syncsafe(h + 6);
-        uint32_t total = 10u + size;
-
-        if (h[5] & 0x10u)
-        {
-            total += 10u; /* footer present */
-        }
-        *off = total;
-    }
-    else
-    {
-        *off = 0;
+        uint64_t total;
+        r = File_Seek(f, (int64_t)*off, FM_SEEK_SET);
+        if (r != FM_OK) return r;
+        r = file_read_exact(f, h, sizeof(h), NULL);
+        if (r == FM_ERR_EOF) break;
+        if (r != FM_OK) return r;
+        if (memcmp(h, "ID3", 3) != 0) break;
+        total = 10u + (uint64_t)mp3_syncsafe(h + 6);
+        if (h[5] & 0x10u) total += 10u;
+        if (total > size - *off) return FM_ERR_INVALID_FORMAT;
+        *off += total;
     }
     return File_Seek(f, (int64_t)*off, FM_SEEK_SET);
 }
@@ -2619,9 +2617,9 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
      * tests below: the file went to the MP3 parser, which skips the tag,
      * finds no MP3 frame behind it and calls a playable file "invalid
      * format".  Look behind the tag first. */
-    if (got >= 10 && memcmp(magic, "ID3", 3) == 0)
+    while (got >= 10 && memcmp(magic, "ID3", 3) == 0)
     {
-        uint64_t end = 10u + (((uint32_t)(magic[6] & 0x7Fu) << 21) |
+        uint64_t end = tag_at + 10u + (((uint32_t)(magic[6] & 0x7Fu) << 21) |
                               ((uint32_t)(magic[7] & 0x7Fu) << 14) |
                               ((uint32_t)(magic[8] & 0x7Fu) << 7) |
                               (uint32_t)(magic[9] & 0x7Fu));
@@ -2648,6 +2646,8 @@ FM_Result Audio_Open(const char *path, FM_Audio *a)
         {
             (void)File_Seek(&a->file, 0, FM_SEEK_SET);
             (void)File_Read(&a->file, magic, sizeof(magic), &got);
+            tag_at = 0;
+            break;
         }
     }
     r = File_Seek(&a->file, (int64_t)adts_at, FM_SEEK_SET);

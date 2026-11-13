@@ -121,7 +121,8 @@ static FM_Result aud5_tagged(const char *src, int footer, FM_MediaType kind)
     static int16_t ref[512], gotpcm[512];
     size_t n, got = 0, nref = 0, ngot = 0;
     FM_Result r;
-    n = av4_id3(g_av4_abuf, 1000u, footer);
+    n = av4_id3(g_av4_abuf, 1000u, footer & 1);
+    if (footer >= 2) n += av4_id3(g_av4_abuf + n, 1200u, !(footer & 1));
     r = File_ReadAll(src, g_av4_abuf + n, sizeof(g_av4_abuf) - n, &got);
     if (r == FM_OK) r = File_WriteAll("/aud5_tag.bin", g_av4_abuf, n + got);
 #if FM_USE_MEDIA_DETECT
@@ -210,23 +211,32 @@ static void test_audit_v5_audio_late(void)
     }
     CHECK_RESULT(r, "AAC plugin short/zero/error handling");
 #endif
-    for (footer = 0; footer <= 1; ++footer)
+#if FM_USE_MP3
+    TEST("S-03: chained ID3 tags before MP3");
+    r = aud5_tagged("/test/vectors/tone_mono.mp3", 2, FM_MEDIA_MP3);
+    CHECK_RESULT(r, "chained MP3 tags");
+#endif
+    for (footer = 0; footer <= 3; ++footer)
     {
-        TEST(footer ? "AUD5-01: tagged WAV with footer" : "AUD5-01: tagged WAV");
+        TEST(footer >= 2 ? "S-03: chained ID3 tags before WAV" :
+             (footer ? "AUD5-01: tagged WAV with footer" : "AUD5-01: tagged WAV"));
         r = aud5_tagged("/test/vectors/wav_alaw_8k.wav", footer, FM_MEDIA_WAV);
         CHECK_RESULT(r, "tagged WAV");
 #if FM_USE_FLAC
-        TEST(footer ? "AUD5-01: tagged FLAC with footer" : "AUD5-01: tagged FLAC");
+        TEST(footer >= 2 ? "S-03: chained ID3 tags before FLAC" :
+             (footer ? "AUD5-01: tagged FLAC with footer" : "AUD5-01: tagged FLAC"));
         r = aud5_tagged("/test/vectors/test_flac.flac", footer, FM_MEDIA_FLAC);
         CHECK_RESULT(r, "tagged FLAC");
 #endif
 #if FM_USE_VORBIS
-        TEST(footer ? "AUD5-01: tagged Vorbis with footer" : "AUD5-01: tagged Vorbis");
+        TEST(footer >= 2 ? "S-03: chained ID3 tags before Vorbis" :
+             (footer ? "AUD5-01: tagged Vorbis with footer" : "AUD5-01: tagged Vorbis"));
         r = aud5_tagged("/test/vectors/test_vorbis.ogg", footer, FM_MEDIA_OGG);
         CHECK_RESULT(r, "tagged Vorbis");
 #endif
 #if FM_USE_OPUS && FM_OPUS_USE_LIBOPUS
-        TEST(footer ? "AUD5-01: tagged Opus with footer" : "AUD5-01: tagged Opus");
+        TEST(footer >= 2 ? "S-03: chained ID3 tags before Opus" :
+             (footer ? "AUD5-01: tagged Opus with footer" : "AUD5-01: tagged Opus"));
         r = aud5_tagged("/test/vectors/test_opus.ogg", footer, FM_MEDIA_OGG);
         CHECK_RESULT(r, "tagged Opus");
 #endif
