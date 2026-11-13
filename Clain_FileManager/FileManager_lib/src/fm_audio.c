@@ -1278,6 +1278,10 @@ typedef struct
     uint32_t granule_samples;
     uint32_t xing_frames;
     uint32_t xing_bytes;
+    uint32_t encoder_delay;
+    uint32_t encoder_padding;
+    uint32_t gapless_skip;       /* remaining leading frames on initial read */
+    uint8_t  gapless;
     uint8_t  xing_toc[100];
     uint8_t  have_toc;
     uint8_t  have_xing;          /* first frame is a Xing/Info header */
@@ -1620,16 +1624,46 @@ static void mp3_try_xing(FM_Mp3Stream *m)
                 p += 4u;
                 left -= 4u;
             }
+            else if ((flags & 1u) != 0u) return;
             if ((flags & 2u) != 0u && left >= 4u)
             {
                 m->xing_bytes = mp3_be32(p);
                 p += 4u;
                 left -= 4u;
             }
+            else if ((flags & 2u) != 0u) return;
             if ((flags & 4u) != 0u && left >= 100u)
             {
                 memcpy(m->xing_toc, p, 100u);
                 m->have_toc = 1u;
+                p += 100u;
+                left -= 100u;
+            }
+            else if ((flags & 4u) != 0u) return;
+            if ((flags & 8u) != 0u)
+            {
+                if (left < 4u) return;
+                p += 4u;
+                left -= 4u;
+            }
+            /* A recognized LAME-compatible encoder extension, wholly in
+             * the first MPEG Layer III frame. Never interpret arbitrary
+             * audio bytes or an unrecognized extension as trimming data. */
+            if (m->xing_frames != 0u && left >= 24u && i >= 4u &&
+                hdr_valid(m->in) && HDR_GET_LAYER(m->in) == 1 &&
+                i == 4u + (HDR_TEST_MPEG1(m->in) ?
+                            (HDR_IS_MONO(m->in) ? 17u : 32u) :
+                            (HDR_IS_MONO(m->in) ? 9u : 17u)) &&
+                (size_t)(p - m->in) + 24u <=
+                    (size_t)(hdr_frame_bytes(m->in, 0) + hdr_padding(m->in)) &&
+                (memcmp(p, "LAME", 4) == 0 || memcmp(p, "Lavc", 4) == 0 ||
+                 memcmp(p, "Lavf", 4) == 0))
+            {
+                uint32_t v = ((uint32_t)p[21] << 16) |
+                             ((uint32_t)p[22] << 8) | (uint32_t)p[23];
+                m->encoder_delay = v >> 12;
+                m->encoder_padding = v & 4095u;
+                m->gapless = 1u;
             }
             return;
         }
@@ -1640,7 +1674,9 @@ static uint64_t mp3_duration_frames(const FM_Mp3Stream *m)
 {
     if (m->xing_frames != 0u && m->granule_samples != 0u)
     {
-        return (uint64_t)m->xing_frames * (uint64_t)m->granule_samples;
+        uint64_t frames = (uint64_t)m->xing_frames * m->granule_samples;
+        if (m->gapless) frames -= (uint64_t)m->encoder_delay + m->encoder_padding;
+        return frames;
     }
     if (m->bitrate_kbps != 0u && m->hz != 0u && m->file_size > m->audio_start)
     {
@@ -1707,6 +1743,21 @@ static FM_Result mp3_open(FM_Audio *a)
         m->audio_start = m->frame_file_off;
     }
     (void)File_Size(&a->file, &m->file_size);
+    if (m->gapless)
+    {
+        uint64_t raw = (uint64_t)m->xing_frames * m->granule_samples;
+        uint64_t trim = (uint64_t)m->encoder_delay + m->encoder_padding;
+        /* The synthesis decoder contributes 529 samples of delay.  If the
+         * end padding is smaller we cannot emit all audible frames without
+         * a decoder flush; leave such streams untrimmed. */
+        if (m->encoder_padding < 529u || trim >= raw ||
+            (m->xing_bytes != 0u && m->file_size > m->first_frame &&
+             ((uint64_t)m->xing_bytes > m->file_size - m->first_frame ||
+              m->file_size - m->first_frame - m->xing_bytes > m->xing_bytes / 16u)))
+            m->gapless = 0u;
+        else
+            m->gapless_skip = m->encoder_delay + 529u;
+    }
     a->info.sample_rate = m->hz;
     a->info.channels = (uint16_t)m->channels;
     a->info.bits_per_sample = 16;
@@ -1736,6 +1787,8 @@ static FM_Result mp3_read(FM_Audio *a, int16_t *samples, size_t count,
 
     while (total < count)
     {
+        if (m->gapless && m->total_samples >=
+            mp3_duration_frames(m) * (uint64_t)a->info.channels) break;
         if (m->pcm_pos >= m->pcm_len)
         {
             FM_Result r = mp3_decode_one(m);
@@ -1750,6 +1803,19 @@ static FM_Result mp3_read(FM_Audio *a, int16_t *samples, size_t count,
             size_t avail = m->pcm_len - m->pcm_pos;
             size_t n = count - total;
 
+            if (m->gapless_skip != 0u)
+            {
+                size_t skip = (size_t)m->gapless_skip * a->info.channels;
+                if (skip > avail) skip = avail;
+                m->pcm_pos += skip;
+                m->gapless_skip -= (uint32_t)(skip / a->info.channels);
+                continue;
+            }
+            if (m->gapless)
+            {
+                uint64_t left = mp3_duration_frames(m) * a->info.channels - m->total_samples;
+                if ((uint64_t)n > left) n = (size_t)left;
+            }
             if (n > avail)
             {
                 n = avail;
@@ -1824,6 +1890,7 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
         m->pcm_len = 0;
         m->pcm_pos = 0;
         m->primed_frames = 0u;
+        m->gapless_skip = 0u;
         m->in_file_off = m->file_size;
         if (m->file_size != 0u &&
             File_Seek(m->file, (int64_t)m->file_size, FM_SEEK_SET) != FM_OK)
@@ -1833,6 +1900,41 @@ static FM_Result mp3_seek(FM_Audio *a, double seconds)
         m->total_samples = duration_frames * (uint64_t)a->info.channels;
         a->frame_index = duration_frames;
         return FM_ERR_EOF;
+    }
+
+    if (m->gapless)
+    {
+        /* Exact logical sample seek: replay from the first audio frame so
+         * the Layer III reservoir and synthesis history are correct. This
+         * is deliberately linear rather than guessing a position from a
+         * Xing TOC; long files can take time to seek. */
+        uint64_t skip = target_frames + m->encoder_delay + 529u;
+        mp3dec_init(&m->dec);
+        m->in_len = m->in_off = m->pcm_len = m->pcm_pos = 0u;
+        m->primed_frames = 0u;
+        m->in_file_off = m->first_frame;
+        m->gapless_skip = 0u;
+        r = File_Seek(m->file, (int64_t)m->first_frame, FM_SEEK_SET);
+        if (r != FM_OK) return r;
+        r = mp3_decode_one(m); /* Xing metadata frame */
+        if (r != FM_OK) return r;
+        m->pcm_pos = m->pcm_len;
+        while (skip != 0u)
+        {
+            uint64_t available;
+            if (m->pcm_pos >= m->pcm_len)
+            {
+                r = mp3_decode_one(m);
+                if (r != FM_OK) return r;
+            }
+            available = (m->pcm_len - m->pcm_pos) / a->info.channels;
+            if (available > skip) available = skip;
+            m->pcm_pos += (size_t)available * a->info.channels;
+            skip -= available;
+        }
+        m->total_samples = target_frames * a->info.channels;
+        a->frame_index = target_frames;
+        return FM_OK;
     }
 
     audio_bytes = (m->xing_bytes != 0u) ? (uint64_t)m->xing_bytes

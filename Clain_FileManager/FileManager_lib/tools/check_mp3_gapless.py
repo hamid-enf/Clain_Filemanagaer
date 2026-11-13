@@ -3,7 +3,7 @@
 
 Run from the library root: python3 tools/check_mp3_gapless.py /path/to/ffmpeg
 It generates its fixtures in a temporary directory; it does not change the
-library or the repository. This measures one encoder, not every MP3 encoder.
+sources. It rebuilds library artifacts. This checks one encoder, not every MP3 encoder.
 """
 import os
 import pathlib
@@ -20,7 +20,7 @@ FF = sys.argv[1] if len(sys.argv) > 1 else shutil.which("ffmpeg")
 if not FF or not pathlib.Path(FF).is_file():
     raise SystemExit("Pass a path to an ffmpeg executable with libmp3lame")
 
-subprocess.run(["make", "-s", "-j2", "libfilemanager.a"], cwd=ROOT, check=True)
+subprocess.run(["make", "-s", "-B", "-j2", "libfilemanager.a"], cwd=ROOT, check=True)
 with tempfile.TemporaryDirectory(prefix="fm_mp3_gapless_") as d:
     d = pathlib.Path(d)
     cc = os.environ.get("CC", "gcc")
@@ -53,6 +53,8 @@ with tempfile.TemporaryDirectory(prefix="fm_mp3_gapless_") as d:
         lead = int(np.argmax(corr[:10000]))
         count = min(len(a), len(b) - lead)
         error = np.abs(b[lead:lead + count] - a[:count])
+        if len(a) != len(b) or lead != 0 or error.max() > 2:
+            raise AssertionError(f"{name}: gapless output differs from FFmpeg")
         print(f"{name}: ffmpeg={len(a)}, library={len(b)}, lead={lead}, "
               f"tail={len(b)-lead-len(a)}, max_delta={error.max():.0f}, "
               f"mean_delta={error.mean():.5f} (mono samples)")

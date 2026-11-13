@@ -489,9 +489,11 @@ track in sample frames (one frame = one sample per channel) and
 `FM_Audio.frame_index` the position; `Player_GetDuration()` and
 `Player_GetPosition()` are these two divided by the sample rate.  The
 length is exact for WAV (PCM, G.711, IMA and Microsoft ADPCM), FLAC, Vorbis, Opus and
-MP3 with a Xing/Info header in decoded samples, including encoder delay
-and padding; this is not necessarily the gapless audible length. For MP3
-without one it is computed from the
+MP3 with a recognized and valid LAME/Lavc/Lavf gapless extension. Its
+encoder delay and padding are trimmed; exact seeking in these streams
+replays from the beginning, so long seeks can be slow. Other Xing/Info MP3
+reports decoded length including delay and padding. For MP3 without a Xing
+header length is computed from the
 bit rate of the first frame: right for constant bit rate, **wrong for
 variable bit rate without a Xing header** (such files play, but length,
 position and seek are estimates).  It is 0, "not known", for AAC.

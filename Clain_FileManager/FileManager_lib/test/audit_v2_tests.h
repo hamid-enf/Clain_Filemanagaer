@@ -2283,7 +2283,7 @@ static void test_audit_v2_audio(void)
             { "test_vorbis.ogg", 1.0 },
 #endif
 #if FM_USE_MP3
-            { "mp3_info_44k.mp3", 46080.0 / 44100.0 },
+            { "mp3_info_44k.mp3", 1.0 },
 #endif
         };
         static FM_Player pl;

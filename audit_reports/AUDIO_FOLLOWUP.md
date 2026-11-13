@@ -1,5 +1,7 @@
 # پیگیری تست‌های باز صوت
 
+> Update: subsequent MP3 gapless changes and their verified scope are described in `MP3_GAPLESS_FOLLOWUP.md`; observations below are historical.
+
 ## اصلاح و تست‌شده
 
 - `SimpleAudio_Stop` در callback داده، مانیتور یا ضبط اکنون بستن پلیر را تا خروج از refill به تعویق می‌اندازد؛ در prefill اولیه تا پیش از بازگشت `Begin` انجام می‌شود. توقف در callback شروع و پایان ترک نیز در تست میزبان بررسی شد. این رفتار جدید به‌معنای تضمین همهٔ انواع بازورودی callback نیست.

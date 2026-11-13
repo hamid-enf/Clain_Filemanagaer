@@ -28,8 +28,11 @@ typedef struct
     uint16_t block_align;      /* WAV: bytes per block (ADPCM framing) */
     uint64_t total_frames;     /* length in sample frames; 0 = not known
                                 * (AAC).  Exact for WAV, FLAC, Vorbis,
-                                * Opus and MP3 with a Xing/Info header;
-                                * for other MP3 an estimate from the
+                                * Opus and MP3 with a Xing/Info header.
+                                * Recognized LAME-compatible gapless tags
+                                * describe audible frames; other MP3 counts
+                                * include encoder delay and padding.
+                                * Without Xing/Info, an estimate from the
                                 * bitrate of the first frame.           */
 } FM_AudioInfo;
 

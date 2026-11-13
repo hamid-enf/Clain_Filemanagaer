@@ -1,5 +1,7 @@
 # Review of ReportV41.txt — delayed audio V5
 
+> Update: subsequent MP3 gapless changes and their verified scope are described in `MP3_GAPLESS_FOLLOWUP.md`; observations below are historical.
+
 The report audited `fc31b25` and arrived after `6fe596d`. Its four diffs were
 extracted from the report, applied to the current branch, reviewed and
 supplemented. The separate `audit_v5/` harness directory named in the report

@@ -1,5 +1,7 @@
 # Closed-loop host media audit
 
+> Update: subsequent MP3 gapless changes and their verified scope are described in `MP3_GAPLESS_FOLLOWUP.md`; observations below are historical.
+
 Date: 2026-11-10. This is a synthetic host simulation, not a board test.
 
 ## Reproduction

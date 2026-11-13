@@ -112,20 +112,16 @@ def exercise(ff, executable, work, seed, env):
             raise AssertionError(f"{fmt}: max PCM delta {delta.max() if delta.size else 'empty'}")
         print(f"  external {fmt}: {len(got)} samples, max PCM delta {delta.max()}")
     image_comparison(work / "decoded_external_h264.rgb", reference, FRAMES, 12)
-    # MP3 carries encoder delay/padding; align the independently decoded PCM
-    # rather than falsely require gapless output, which is an open limitation.
-    refmp3 = np.fromfile(work / "ff_external_mp3.pcm", dtype="<i2").astype(float)
-    libmp3 = np.fromfile(work / "decoded_external_mp3.pcm", dtype="<i2").astype(float)
-    if len(refmp3) < 4000 or len(libmp3) < len(refmp3):
-        raise AssertionError("MP3 decode is too short")
-    nfft = 1 << (len(libmp3) + len(refmp3) - 1).bit_length()
-    corr = np.fft.irfft(np.fft.rfft(libmp3, nfft) * np.conj(np.fft.rfft(refmp3, nfft)), nfft)
-    lead = int(np.argmax(corr[:min(4000, len(libmp3)-len(refmp3)+1)]))
-    delta = np.abs(libmp3[lead:lead+len(refmp3)] - refmp3)
-    if float(delta.mean()) > 2:
-        raise AssertionError(f"MP3 aligned mean delta {delta.mean():.3f} exceeds 2")
-    print(f"  external MP3: lead={lead}, tail={len(libmp3)-lead-len(refmp3)}, "
-          f"aligned MAE={delta.mean():.3f}, max={delta.max():.0f}")
+    # FFmpeg/libmp3lame writes a recognized gapless tag: the complete
+    # decoded output must match, not merely an aligned interior window.
+    refmp3 = np.fromfile(work / "ff_external_mp3.pcm", dtype="<i2").astype(np.int32)
+    libmp3 = np.fromfile(work / "decoded_external_mp3.pcm", dtype="<i2").astype(np.int32)
+    if len(refmp3) == 0 or len(refmp3) != len(libmp3):
+        raise AssertionError("gapless MP3 sample count mismatch")
+    delta = np.abs(libmp3 - refmp3)
+    if delta.max() > 2:
+        raise AssertionError(f"gapless MP3 max sample delta {delta.max()} exceeds 2")
+    print(f"  external MP3: {len(refmp3)} samples, max PCM delta {delta.max()}")
     for name in ("ff_avi.rgb", "decoded_external_video.rgb", "decoded_library_video.rgb"):
         image_comparison(work / name, reference, FRAMES, 8)
     for name in ("ff_wav.pcm", "ff_flac.pcm", "ff_avi.pcm", "decoded_external.pcm",
