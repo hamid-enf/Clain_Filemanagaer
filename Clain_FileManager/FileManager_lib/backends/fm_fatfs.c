@@ -23,6 +23,21 @@
 #include "fm_sd_bounce.h"
 #endif
 
+/* Optional clockless fallback. The real project can define a strong
+ * get_fattime() backed by its RTC; it overrides this on GCC/Clang. FatFS
+ * configured without RTC supplies timestamps itself, so emit no symbol. */
+#if FM_FATFS_PROVIDE_FATTIME && \
+    !(defined(FF_FS_NORTC) && FF_FS_NORTC) && \
+    !(defined(_FS_NORTC) && _FS_NORTC)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak))
+#endif
+DWORD get_fattime(void)
+{
+    return (DWORD)FM_FATFS_FATTIME_VALUE;
+}
+#endif
+
 /* ------------------------------------------------------------------ */
 /* FatFS Version Compatibility Macros                                 */
 /* ------------------------------------------------------------------ */

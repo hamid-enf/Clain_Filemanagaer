@@ -42,6 +42,20 @@ extern FM_Result PosixFS_Init(FM_FS *fs);
 #endif
 
 static int fails;
+static FM_FS_FileWriteFn stall_original_write;
+static int stall_injected;
+static FM_Result stall_write(FM_FS *fs, void *fh, const void *buf,
+                             uint32_t len, uint32_t *written)
+{
+    if (!stall_injected && sa.dma.refilling[0])
+    {
+        /* Model the half completing again before this synchronous write
+         * returns; not a measurement of any real SD-card latency. */
+        stall_injected = 1;
+        AudioDma_HalfCallback(&sa.dma);
+    }
+    return stall_original_write(fs, fh, buf, len, written);
+}
 
 /* The board's main.c owns the I2S handles; under the HAL stub the test
  * provides them so simple_audio.h / simple_i2s_mux.h link. */
@@ -1105,6 +1119,39 @@ int main(void)
 
         (void)SimpleVideo_RecSetQuality(0);
         (void)Directory_DeleteRecursive("/vrec");
+    }
+
+    /* SAV3-04 characterization: simulate an I2S deadline arriving while
+     * the filesystem write called from the refill is blocked. */
+    {
+        static int16_t samples[4096];
+        unsigned i;
+        (void)SimpleAudio_Stop();
+        (void)SimpleAudio_RecStop();
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
+        (void)Directory_Create(SIMPLE_AUDIO_FOLDER);
+        r = SimpleAudio_RecStart(SIMPLE_AUDIO_FOLDER "/stall.wav", 48000, 1);
+        for (i = 0; r == FM_OK && i < 12u; ++i)
+            r = SimpleAudio_RecWrite(samples, 4096u);
+        if (r == FM_OK) r = SimpleAudio_RecStop();
+        if (r == FM_OK) r = SimpleAudio_SetPlayMode(FM_PLAY_MODE_NEXT);
+        if (r == FM_OK) r = SimpleAudio_RecPlaying("/stall-capture.wav");
+        if (r == FM_OK) r = SimpleAudio_Begin();
+        stall_original_write = fs.ops.file_write;
+        stall_injected = 0;
+        if (r == FM_OK)
+        {
+            fs.ops.file_write = stall_write;
+            AudioDma_HalfCallback(&sa.dma);
+            (void)SimpleAudio_Poll();
+            fs.ops.file_write = stall_original_write;
+        }
+        ok("SAV3-04: simulated deadline during recorder write flags underrun",
+           r == FM_OK && stall_injected && sa.dma.underrun != 0u);
+        (void)SimpleAudio_Stop();
+        (void)SimpleAudio_RecStop();
+        (void)File_Delete("/stall-capture.wav");
+        (void)Directory_DeleteRecursive(SIMPLE_AUDIO_FOLDER);
     }
 
     printf("\nResults: %s\n", fails == 0 ? "all PASS" : "FAILURES");

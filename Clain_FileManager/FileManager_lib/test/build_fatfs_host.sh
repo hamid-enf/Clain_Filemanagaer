@@ -12,6 +12,12 @@
 # was not part of `make check`.  It is now.
 set -e
 cd "$(dirname "$0")/.."
+sh tools/check_fattime.sh
+if command -v python3 >/dev/null 2>&1; then
+    python3 tools/test_restore_fatfs_lock.py
+else
+    echo "SKIP FatFS lock helper test: python3 not installed"
+fi
 
 CC=${CC:-gcc}
 OUT=$(mktemp -d)

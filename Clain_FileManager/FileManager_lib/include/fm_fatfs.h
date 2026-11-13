@@ -16,8 +16,10 @@
  *   1  this adapter does, mapping a FatFS drive number to an FM_Storage
  *      driver bound with FatFS_BindStorage().  Selected by FM_SD_DISKIO =
  *      FILEMANAGER, or by -DFM_FATFS_PROVIDE_DISKIO=1.  The project
- *      still provides get_fattime() (Cube's fatfs.c has one) unless its
- *      ffconf.h sets _FS_NORTC / FF_FS_NORTC to 1.
+ *      On GCC/Clang a weak fallback get_fattime() is provided when FatFS
+ *      uses an RTC; the application's strong definition takes precedence.
+ *      The fallback is a fixed date, not a clock. Other compilers must
+ *      provide their own function unless explicitly enabled below.
  *
  * Usage:
  *     FM_Storage storage;
@@ -53,6 +55,23 @@ FM_BEGIN_DECLS
 #else
 #define FM_FATFS_PROVIDE_DISKIO 0
 #endif
+#endif
+
+/* Override to 0 to require the application's get_fattime, or 1 to supply
+ * the fallback even when diskio is external. GCC/Clang use a weak symbol;
+ * on other compilers an explicitly enabled fallback is a strong symbol.
+ * If the RTC implementation is in a static archive, ensure its object is
+ * actually linked: an existing weak definition may not pull it in. */
+#ifndef FM_FATFS_PROVIDE_FATTIME
+#if defined(__GNUC__) || defined(__clang__)
+#define FM_FATFS_PROVIDE_FATTIME FM_FATFS_PROVIDE_DISKIO
+#else
+#define FM_FATFS_PROVIDE_FATTIME 0
+#endif
+#endif
+/* FAT packed date/time for 2020-01-01 00:00:00; override at build time. */
+#ifndef FM_FATFS_FATTIME_VALUE
+#define FM_FATFS_FATTIME_VALUE 0x50210000u
 #endif
 
 /* Initialize the adapter for the given FatFS drive number (0..FF_VOLUMES-1).
