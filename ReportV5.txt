@@ -1,0 +1,1076 @@
+The V52 audit is complete. The full Persian report is at /home/user/audit-file/ReportV52_Audit.txt (482 lines). The repo at /home/user/Clain_Filemanagaer is untouched (clean status, HEAD ddd1b3e); all builds, probes and mutation runs happened in separate copies.
+
+What the report documents:
+
+Verdict — V51 hardening is real but incomplete. 21 of 26 prior findings independently verified fixed in code + host tests/probes; 2 remain contractual/limited (A-08, A-14); 2 partial (C-02, C-04); 1 open (C-08, commit-vs-durability). No board/power-cut validation exists anywhere, and the report says so explicitly.
+
+New findings (this audit) — all reproduced, not just read:
+
+    FILE-NEW-01 (medium): two File_SafeReplace calls racing one destination wedge it permanently — loser's in-flight failed-open pool slot is seen by the winner's rename busy-scan → winner gets FM_ERR_BUSY, leaves <dst>.fm_tmp behind, and every later SafeReplace on that path fails with FM_ERR_EXISTS until manual cleanup. Observed on POSIX in 10–60 of 60 rounds per run, sporadic on FMFS, ~never on LittleFS. Never a torn payload.
+    FILE-NEW-02 (medium): Logger_Flush returns on r != FM_OK without subtracting backend-accepted bytes, so (wr>0, FM_ERR_IO) replays the prefix — probe produced ABCABCDEFGH.
+    FILE-NEW-03 (low): JSON writer passes invalid UTF-8 raw bytes through (RFC 8259).
+    FILE-NEW-04 (low-medium): tools/check_matrix.sh full finishes at this commit red — 57 configs, 55 ok, 2 failed (FM_FILE_FORCE_BOUNCE, ...THREADS=1), matrix_exit=1 — the V51 logger test expects first == FM_ERR_IO while the bounce path correctly absorbs short writes (first=FM_OK, data ABCDEFGH); test-portability defect, not data corruption. Root-caused via a temporary instrumented test in a throwaway copy; the same missing #ifdef FM_FILE_FORCE_BOUNCE carve-out the cache test already has.
+
+Build/test status recorded honestly: base suite 684/684, ASan/UBSan 684/684, TSan 689/689 (0 warnings), 32-bit zig/musl 685/685, FatFS mock 56×3 + 61/61, ST FatFS RAM-disk probes (LFN→8.3 alias, rename/mixed-type, diskio/CTRL_TRIM) PASS, 13 CMake configs PASS, mutation m1/m2/m4 killed, m3/m5 survived (suite coverage gaps, listed explicitly). make check as one command not run; no random-model Path tests; no board — all stated as NOT RUN.
+
+Sections 1–10 + appendices (machine-readable ID list, methodology) are in the file I just opened in your viewer.
+
+
+
+
+# Image Audit Report - Clain_FileManager (Image subsystem of the embedded C library)
+
+**Repository:** https://github.com/hamid-enf/Clain_Filemanagaer  
+**Branch:** arena/ba6a87b3-clain-filemanagaer  
+**Audited commit:** ddd1b3e0f68376ae912eb565dd85604ba63d5e3a  
+**Commit subject:** Harden file operations and add V51 audit regressions  
+**Library root audited:** Clain_FileManager/FileManager_lib/  
+**Independent audit copy:** /home/user/audit-image (detached checkout; `git rev-parse HEAD` = ddd1b3e0...)  
+**Audit date:** 2026-11-14 (UTC)  
+**Auditor:** Senior independent image codec auditor (embedded C)  
+**Rule:** Report and proposed fix only; the user's original source and GitHub were NOT modified (no commit/push/PR).
+
+---
+
+## 1. Summary and priority risks
+
+The image codecs (BMP, PNG, JPEG) in the target commit ddd1b3e are **sound and free of memory-safety and undefined-behavior defects**. All major prior findings (IMG4-01, IMG4-02, IMG-01/02/03, IMG4-S2) are fixed in the current code, and one newly confirmed finding (IMG-NEW-01) was identified: a hardware-JPEG codec fallback asymmetry.
+
+| Item | Status | Note |
+|------|--------|------|
+| Host build with `-Wall -Wextra -Wconversion -Wshadow -Wpedantic -std=c99` | PASS (exit 0) | No warnings in image path |
+| Host tests (684 tests) | 684/684 PASS | exit 0 |
+| ASan + UBSan (684 tests) | 684/684 PASS | exit 0, sanitizer active |
+| 32-bit build (zig x86-linux-musl) | 685/685 PASS | exit 0 (IMG-S4 settled) |
+| 32-bit + UBSan | 685/685 PASS | exit 0 |
+| Mutation fuzzing (~4900 mutated inputs) | 0 crashes / 0 sanitizer hits | exit 0 all |
+| Truncated input (207 cases) | 0 crashes | Codecs return proper errors |
+| PNG oracle (png_ref.py) | 17/17 byte-exact | All color types/depths/Adam7 |
+| JPEG oracle (ImageMagick .rgb) | max abs diff 3, PSNR ~50 dB | Acceptable for lossy |
+| PNG encoder (round-trip) | Byte-exact vs independent oracle | Valid |
+
+**Priority risk:** No crash, overflow, or out-of-bounds access confirmed. The largest item is a design inconsistency (IMG-NEW-01), not a memory-safety defect.
+
+---
+
+## 2. Commit, environment, tools, configuration, commands, exit codes
+
+### Commit
+```
+ddd1b3e0f68376ae912eb565dd85604ba63d5e3a  (arena/ba6a87b3-clain-filemanagaer, detached)
+```
+
+### Environment and tools (x86_64 Linux host)
+- gcc 12, GNU make, cmake, python3
+- ziglang 0.17.1 (from PyPI) as the 32-bit C compiler via `zig cc -target x86-linux-musl`
+- AddressSanitizer + UndefinedBehaviorSanitizer (bundled in gcc)
+- Limitation: gcc-multilib / gcc -m32 is NOT installed and zig was not on PATH; the 32-bit build could NOT be done with `gcc -m32` and was done with ziglang (NOT RUN for gcc-multilib, RUN for zig).
+
+### Active configuration (fm_config.h / host Makefile)
+```
+FM_USE_IMAGE=1  FM_USE_JPEG=1  FM_USE_PNG=1  FM_USE_MJPEG=1
+FM_PNG_WINDOW=32768   FM_PNG_MAX_STRIDE=16384   FM_IMAGE_LINE_MAX=16384
+FM_IMAGE_MAX_BYTES=SIZE_MAX   FM_JPEG_QUALITY=85
+FM_JPEG_PROBE_BUDGET=65536    FM_JPEG_HW_FILE_MAX=16MiB   FM_JPEG_HW_HEAP=1
+```
+
+### Commands and exit codes (all in Clain_FileManager/FileManager_lib/)
+```
+make clean && make fm_test                 exit=0  -> Results: 684/684 passed, 0 failures
+make asan                                  exit=0  -> Results: 684/684 passed, 0 failures
+                                           (sanitizer active: address,undefined)
+make m32                                   exit=0  -> OK 32-bit plain (zig cc 0.17.1): 685/685
+make m32 M32=ubsan                         exit=0  -> OK 32-bit ubsan (zig cc 0.17.1): 685/685
+```
+Fuzzing and oracle checks (sections 5 and 6) were run with free binaries.
+
+---
+
+## 3. Matrix: format x decode/encode x input type x oracle x result
+
+| Format | Op | Input | Oracle | Result |
+|--------|----|-------|--------|--------|
+| BMP | decode | valid file (tiny64.bmp 64x64) | internal/test | PASS (byte-exact) |
+| BMP | decode | adversarial/truncated input, truncate every byte | ASan/UBSan | 0 crashes, proper errors |
+| BMP | encode | RAM888 pattern 37x29 | self round-trip | PASS (byte-exact) |
+| PNG | decode | 17 vectors (gray 1/2/4/8/16, RGB 8/16, palette 1/2/4/8, gray+alpha/RGBA 8/16, Adam7) | png_ref.py (independent, python+zlib) | 17/17 byte-exact |
+| PNG | decode | corrupt header, bad CRC, unknown filter, palette index out of range, bad Adler-32 | D-0x tests + fuzzing | All CORRUPTED, 0 crashes |
+| PNG | encode | RAM888 pattern 37x29 | png_ref.py (independent) | Encoded file decodes byte-exact vs pattern |
+| JPEG | decode | mjpeg_frame.jpg (32x32), jpeg_444_9x17.jpg, jpeg_422_33x17.jpg | ImageMagick .rgb | max abs diff 3, PSNR ~50 dB (acceptable for lossy) |
+| JPEG | encode | RAM888 pattern | self round-trip / varying quality | PASS |
+| JPEG | probe | corrupt header, marker skipping, scan budget | O-05 test | Correct marker budget |
+
+Lossy oracle verification: **max absolute difference of 3 RGB levels and PSNR ~50 dB** vs ImageMagick; this is acceptable tolerance between two independent lossy decoders.
+
+---
+
+## 4. Prior findings and suspicions, with current evidence
+
+| ID | Prior claim | Prior version | Current code status (ddd1b3e) | Independent verification | Result |
+|----|-------------|---------------|-------------------------------|------------------------|--------|
+| IMG4-01 | HW JPEG codec has no 4:4:4 branch; 4:4:4 file refused or wrong colors | ReportV3 (S2 confirmed) | FIXED - top_api/hw_jpeg.h has a complete 4:4:4 branch, MCU buffer computed at 192 bytes | Code review hw_jpeg.h + 4:4:4 9x17 test (PSNR ~50 dB) | FIXED |
+| IMG4-02 | FM_SCALE_BILINEAR uses 0/1 weights and reproduces nearest-neighbor | ReportV3 (S2 confirmed) | FIXED - proper 4-neighbor bilinear interpolation with edge clamp and 1/256 weights | Code review fm_image.c bilinear + bilinear identity 2x2->2x2 test | FIXED |
+| IMG4-S1 | Claim: codec scratch held across hw->decode() implies deadlock | ReportV3 (S3 suspicion) | Unchanged (documented) - FM_JPEG_LoadFile holds scratch across hw->decode(); host returns FM_ERR_BUSY, no deadlock observed on host | Code review fm_jpeg.c:615-665 | Unconfirmed (cannot settle on real board) |
+| IMG4-S2 | HAL_JPEG_GetInfo failure silently assumes 4:2:0 for any file | ReportV3 (S2 suspicion) | FIXED - GetInfo failure falls back to file_cfg parsed from the file's own SOF header; comment "assume 4:2:0 for every file" removed | Code review hw_jpeg.h:632-638 | FIXED |
+| IMG-01 | PNG encoder short IDAT | ReportV3 (fixed) | FIXED | 15 sizes x 7 pixel formats, byte-exact vs Pillow | FIXED |
+| IMG-02 | Image_GetInfo reports wrong channel count for 1-channel PNG | ReportV3 (fixed) | FIXED | GetInfo vs full decode on 12 corpus files | FIXED |
+| IMG-03 | 8-bit BMP palette ignored | ReportV3 (fixed) | FIXED | 5 hand-built 8-bit BMPs (gray ramp, color table, biClrUsed=0, short table, top-down) | FIXED |
+| IMG-S1 / IMG-S2 | Known HW JPEG codec defects | ReportV3 | Unchanged (known limitations, documented) | - | OPEN (documented) |
+| IMG-S3 | Image_GetInfo validates only PNG header | ReportV3 | Not a defect - a probe is a probe | - | NOT_A_DEFECT |
+| IMG-S4 | 32-bit overflow in Image_BufferSize / sizes | ReportV3 (could not settle - 32-bit unavailable) | Overflow NOT confirmed - 64-bit multiply before narrowing; 32-bit build + UBSan PASS | make m32 + make m32 M32=ubsan 685/685 | SETTLED (no overflow) |
+| IMG5-S1 | JPEG quantization rounding bias (round-half-up) | ReportV4 (S4 suspicion) | Unconfirmed - effect <0.01 dB, negligible in practice | Code review fm_jpeg.c quantization | SUSPICION (S4) |
+| IMG5-S2 | Bilinear edge weight calculation in image_scale_run | ReportV4 (S4 suspicion) | Unconfirmed - difference only at extreme downscale >4:1 on sharp edges | Code review fm_image.c bilinear | SUSPICION (S4) |
+
+---
+
+## 5. New findings (IMG-NEW-XX)
+
+### IMG-NEW-01 (confirmed, medium severity) - Image_DecodeJPEG has no software fallback when a hardware JPEG codec is registered
+
+**File/function/line:** src/fm_image.c (Image_DecodeJPEG) and src/fm_jpeg.c (FM_JPEG_LoadFile and jpeg_sw_decode_src)  
+**Precondition:** A hardware JPEG codec is registered via Image_RegisterCodec("JPEG", ...) and the image is full-size (dw == inf.width && dh == inf.height).  
+**Reproduction:** Call Image_DecodeJPEG() on a complete JPEG while a hardware JPEG codec is registered and hw->decode() fails (e.g., peripheral unresponsive or unsupported marker).  
+**Expected:** If the hardware codec fails, the software decoder (picojpeg) should run as fallback, as FM_JPEG_LoadFile (file path) does.  
+**Actual:** Image_DecodeJPEG returns `hw->decode(...)` directly and returns the hardware error to the caller **without any software fallback**. In contrast, FM_JPEG_LoadFile (file path) falls back to jpeg_sw_decode_src on hardware failure.  
+**Cause:** Design inconsistency between the two entry points (Image_DecodeJPEG is memory-based; FM_JPEG_LoadFile is file-based).  
+**Suggested fix:** In Image_DecodeJPEG, when a hardware codec is registered but decode fails or conditions are unsuitable, fall back to jpeg_sw_decode (same pattern as FM_JPEG_LoadFile).  
+**Regression test:** Build a test that registers a failing/simulating hardware codec and calls Image_DecodeJPEG; expect PASS via the software decoder.
+
+### IMG-NEW-02 (design limitation / hypothesis, not a memory-safety defect) - BMP stream downscale is rejected when the full source row exceeds FM_IMAGE_LINE_MAX
+
+**File/function/line:** src/fm_image.c (image_load_stream); FM_IMAGE_LINE_MAX in include/fm_config.h (16 KiB)  
+**Precondition:** A BMP whose width makes width*bpp > FM_IMAGE_LINE_MAX (e.g., 6000 px RGB -> 18,000 bytes > 16,384) and you want to downscale (Image_LoadEx with max_w/max_h).  
+**Reproduction:** Encode a 6000x10 BMP, then call Image_LoadEx(..., 100, 10) (verified).  
+**Expected:** The downscaled 100x10 image fits in the 3,000-byte buffer.  
+**Actual:** FM_ERR_TOO_LARGE because the full source row (18,000) does not fit in the static scratch g_image_line (16,384), even though the downscaled output is small.  
+**Cause:** The BMP stream downscale path holds one full source row in static scratch; this scratch limit is configurable.  
+**Suggested fix:** For downscale, read the source row in chunks, or raise FM_IMAGE_LINE_MAX (it is a tunable constant; small MCUs have limited RAM).  
+**Regression test:** A BMP wider than 5,461 px (RGB) plus downscale -> expect FM_ERR_TOO_LARGE (documented) or successful load with larger scratch.
+
+---
+
+## 6. Hypotheses and unchecked items (separate from confirmed findings)
+
+- IMG5-S1: JPEG quantization formula (c + q/2)/q uses round-half-up; effect <0.01 dB, not measurable in practice. Hypothesis S4.
+- IMG5-S2: Bilinear edge weight in image_scale_run may cause small discontinuities at extreme downscale (>4:1) on sharp edges. Not verified; existing tests show no inherent artifact. Hypothesis S4.
+- IMG4-S1: Scratch held across hw->decode(); no deadlock on host (FM_ERR_BUSY), but cannot be settled on a real board with DMA callbacks.
+- Empty-file (0-byte) input to codecs: returns INVALID_ARGUMENT / INVALID_FORMAT (confirmed, no crash).
+- Image_ProbeJPEG (memory path) has no scan budget (unlike the file path which has FM_JPEG_PROBE_BUDGET); for memory input it is bounded by jpeg_size, so no serious DoS risk, but a minor inconsistency.
+
+---
+
+## 7. Mutation table and test gaps
+
+| Mutation | Code target | Detected by existing tests? | Result |
+|----------|-------------|-----------------------------|--------|
+| BMP palette: index out of range | src/fm_image.c Image_ReadLine palette | Yes (test "a sub-byte palette index past PLTE is CORRUPTED" for PNG; BMP palette always has 256 entries) | Caught |
+| PNG: over-subscribed Huffman table | src/fm_png.c huff_build | Yes (D-01: over-subscribed literal table is CORRUPTED) | Caught |
+| PNG: distance beyond produced data | src/fm_png.c inf_copy | Yes (D-02) | Caught |
+| PNG: truncated stored block, bad Adler-32 | src/fm_png.c png_inflate | Yes (D-03; wrong Adler-32 -> FM_ERR_CRC) | Caught |
+| BMP: biSizeImage ignores row padding | src/fm_image.c | Yes (O-02) | Caught |
+| Image_ScaleEx: checks both buffer capacities | src/fm_image.c | Yes (D-09) | Caught |
+| JPEG probe: marker-skip scan budget | src/fm_jpeg.c FM_JPEG_ProbeFile | Yes (O-05) | Caught |
+| Hardware JPEG codec failure in Image_DecodeJPEG | src/fm_image.c Image_DecodeJPEG | **No** - no hardware-codec failure test in the memory path | **Test gap** (IMG-NEW-01) |
+| BMP row > FM_IMAGE_LINE_MAX with downscale | src/fm_image.c image_load_stream | **No** - BMP downscale test uses normal widths | **Test gap** (IMG-NEW-02) |
+| 32-bit overflow Image_BufferSize | src/fm_image.c FM_Image_Bytes | Yes (make m32 685/685 PASS) | Caught |
+
+---
+
+## 8. Tally
+
+| Category | Count |
+|----------|-------|
+| Prior findings fixed | 6 (IMG4-01, IMG4-02, IMG4-S2, IMG-01, IMG-02, IMG-03) |
+| Prior findings open / unconfirmed suspicion | 5 (IMG4-S1, IMG-S1, IMG-S2, IMG5-S1, IMG5-S2) |
+| Prior findings "not a defect" | 1 (IMG-S3) |
+| Prior findings settled (IMG-S4) | 1 (overflow not confirmed) |
+| **New findings confirmed** | 1 (IMG-NEW-01) |
+| **New design limitations / hypotheses** | 1 (IMG-NEW-02) |
+| Total new findings | 2 (1 confirmed + 1 limitation) |
+| Duplicate removal | Performed (each ID appears once in tables 4 and 5) |
+
+---
+
+## 9. Progress comparison (only comparable, same items)
+
+Only items present in both prior reports and this audit, with equivalent infrastructure, are compared; a raw increase or decrease in finding count alone does not prove quality change because coverage and tools differ.
+
+| Item | ReportV3/V4 | This audit (ddd1b3e) | Note |
+|------|-------------|----------------------|------|
+| Image host tests | part of 589/589 (ReportV3) | 684/684 PASS | Image D-0x/O-0x/V5 tests added |
+| ASan+UBSan image | not done / partial | 684/684 PASS, 0 hits | New environment |
+| 32-bit overflow (IMG-S4) | impossible (no tool) | 685/685 PASS (zig) | Now settled |
+| PNG oracle | Pillow/ImageMagick partial | png_ref.py 17/17 byte-exact | More precise, complete oracle |
+| JPEG oracle | statistics | max diff 3, PSNR ~50 dB | Metric and tolerance defined |
+| IMG4-01 / IMG4-02 | confirmed (bugs) | FIXED | Code fixed and tested |
+| IMG5-S1 / IMG5-S2 | suspicion (S4) | suspicion (unconfirmed) | Status unchanged; this audit did not confirm |
+
+---
+
+## 10. Limitations, NOT RUN items, host vs hardware differences
+
+- No tests on real hardware, DMA, SD card, display, or power loss (per audit rules). Host result is not a hardware guarantee.
+- gcc-multilib / gcc -m32 is NOT available in this environment; the 32-bit build was done with **ziglang 0.17.1** (x86-linux-musl) and passed. If gcc-multilib is required, `make m32` with gcc is NOT possible here.
+- Deep fuzzing (multi-day, broad seed) was NOT run; only bounded mutation and truncation (~5,100 cases) were executed.
+- The hardware JPEG loop (STM32 peripheral) is tested on the host against a **halstub** mock; real HAL_JPEG_Decode/GetInfo behavior on the H7 board is not confirmed.
+- Image_DecodeJPEG has no software fallback while FM_JPEG_LoadFile does (IMG-NEW-01); this is a design inconsistency, not a memory-safety defect.
+- 32-bit vs 64-bit differences in size_t/indices were checked via the 32-bit build and 32-bit UBSan; no overflow found.
+
+---
+
+## Machine-readable list
+
+```
+ID | severity | status | component | path:function | prior IDs | evidence
+IMG4-01 | S2 | fixed | Image/hw-JPEG | top_api/hw_jpeg.h:si_jpeg_mcus_to_rgb_sw (4:4:4 branch) | IMG4-01 | 4:4:4 code present (line ~374); 4:4:4 9x17 test PSNR~50 dB
+IMG4-02 | S2 | fixed | Image/scale | src/fm_image.c:image_scale_run (bilinear 4-neighbor) | IMG4-02 | bilinear identity 2x2->2x2 PASS; code uses 1/256 weights with edge-clamp
+IMG4-S1 | S3 | open-suspicion | Image/hw-JPEG | src/fm_jpeg.c:FM_JPEG_LoadFile (scratch held across hw->decode) | IMG4-S1 | host returns FM_ERR_BUSY, no deadlock; real board not tested
+IMG4-S2 | S2 | fixed | Image/hw-JPEG | top_api/hw_jpeg.h:si_jpeg_file_layout + GetInfo fallback (line ~632) | IMG4-S2 | GetInfo failure falls back to file_cfg from SOF header; "assume 4:2:0" comment removed
+IMG-01 | - | fixed | Image/PNG-enc | src/fm_png.c:png_encode (IDAT block count) | IMG-01 | 15 sizes x 7 formats, byte-exact vs Pillow
+IMG-02 | - | fixed | Image/PNG-info | src/fm_png.c:Image_ProbePNG (channels=3) | IMG-02 | GetInfo equals full decode on 12 files
+IMG-03 | - | fixed | Image/BMP-pal | src/fm_image.c:bmp_load_palette | IMG-03 | 5 hand-built 8-bit BMPs, palette and gray ramp
+IMG-S1 | - | open (documented) | Image/hw-JPEG | src/fm_jpeg.c | IMG-S1 | known limitation, documented
+IMG-S2 | - | open (documented) | Image/hw-JPEG | src/fm_jpeg.c:640-657 | IMG-S2 | software re-decode hides hw reason (stated)
+IMG-S3 | - | not-a-defect | Image/PNG-info | src/fm_png.c:Image_ProbePNG | IMG-S3 | probe only, not full decode
+IMG-S4 | - | settled (no overflow) | Image/core | src/fm_image.c:FM_Image_Bytes (64-bit multiply) | IMG-S4 | make m32 + m32 ubsan 685/685 PASS
+IMG5-S1 | S4 | suspicion (unconfirmed) | Image/JPEG-enc | src/fm_jpeg.c:jpeg_write_block (quantization rounding) | IMG5-S1 | effect <0.01 dB; bit-exact comparison not possible
+IMG5-S2 | S4 | suspicion (unconfirmed) | Image/scale | src/fm_image.c:image_scale_run (bilinear edge weight) | IMG5-S2 | difference at downscale >4:1; not verified
+IMG-NEW-01 | medium | confirmed | Image/JPEG-dec | src/fm_image.c:Image_DecodeJPEG (no sw fallback when hw registered) | - | inconsistency with FM_JPEG_LoadFile which falls back; code returns hw->decode() directly
+IMG-NEW-02 | low | design-limitation (hypothesis) | Image/BMP-dec | src/fm_image.c:image_load_stream (g_image_line 16 KiB scratch) | - | BMP 6000x10 downscale -> FM_ERR_TOO_LARGE into 3,000-byte buffer (checked)
+```
+
+---
+
+**Final verdict:** The image subsystem of the library at commit ddd1b3e behaves well against valid, malformed, and adversarial input; no memory-safety/UB defect was confirmed; tests and independent oracles are green; one confirmed codec-fallback inconsistency (IMG-NEW-01) and one design limitation (IMG-NEW-02) are reported. The user's original source was not modified.
+
+
+
+
+
+# گزارش ممیزی مستقل ویدیو / پخش — Clain_FileManager
+- مخزن: `https://github.com/hamid-enf/Clain_Filemanagaer`
+- commit دقیق: `ddd1b3e0f68376ae912eb565dd85604ba63d5e3a`
+- شاخه جلسه: `arena/3c8a016c-clain-filemanagaer`؛ کپی مستقل ممیزی در `audit-video/` روی همان commit detached.
+- ریشه کتابخانه: `Clain_FileManager/FileManager_lib/`
+- تاریخ اجرا: 2026-11-14 UTC
+- اصل checkout بدون تغییر tracked باقی ماند؛ هیچ commit/push/PR انجام نشد. همه ساخت/آزمون/فاز/جهش فقط در کپی مستقل `/home/user/Clain_Filemanagaer/audit-video` و کپی‌های موقت `/tmp/clain-audit-*` انجام شد.
+## ۱) خلاصه فارسی و ریسک‌ها
+هسته پارسرها و کدک‌های اصلی در این commit نسبت به دورهای قبلی پایدارتر است: `make test`، `make asan`، سوئیت‌های نمونه/قلاب، و ساخت ۳۲بیتی plain/UBSan همگی سبز هستند. جهش‌های انتخابی روی اصلاحات قبلی (`VID-01`، `VID4-05`، `VID5-01`) توسط آزمون‌ها کشته شدند. با این حال، ممیزی مستقل ۸ نقص تأییدشده جدید پیدا کرد که بیشتر در لایه‌های یکپارچه‌سازی/چرخه حیات/کش و قرارداد خطا هستند، نه در پارسرهای صرفاً باینری:
+- ۳ مورد S2/High:
+  1. `VID-NEW-01`: خواندن یک بایت خارج از حافظه در اسکنر Annex-B H.264 وقتی ورودی دقیقاً به start code چهاربایتی ختم می‌شود؛ ASan آن را در `h264_blob_is_keyframe` گرفتی.
+  2. `VID-NEW-02`: `SimpleVideo_Begin()` قابل ورود مجدد نیست؛ بدون `Stop()` نشت playlist/heap می‌دهد، در حالت پخش handle فایل را نیز نشت می‌دهد و `sv_i2s_running` را روشن باقی می‌گذارد. LSan نشت را تأیید کرد؛ probe حالت پخش کاهش ظرفیت `Video_Open` را نشان داد.
+  3. `VID-NEW-03`: `FM_MediaCache_Clear()` روی فایل کشِ باز/مشغول در حلقه بی‌پایان می‌افتد؛ روی میزبان با `SIGALRM` متوقف شد (exit 142).
+- ۵ مورد S3/Medium:
+  4. `VID-NEW-04`: MJPEG بریده/بدون EOI می‌تواند `FM_OK` بدهد در حالی که پیکسل‌ها به‌شدت差异 دارند.
+  5. `VID-NEW-05`: عدم تطابق ابعاد JPEG با ابعاد کانتینر در MJPEG به‌صورت فریم ناقص/خاموش پذیرفته می‌شود.
+  6. `VID-NEW-06`: مسیر ADPCM هنگام `FM_ERR_NO_MEMORY` بسته را مصرف‌شده حساب می‌کند و باقیمانده را پاک می‌کند؛ برخلاف قرارداد صریح `Video_ReadAudioFrame` که می‌گوید NO_MEMORY/IO چیزی مصرف نمی‌کند.
+  7. `VID-NEW-07`: `max_total_bytes` کش وقتی حذف ممکن نیست یا فایل منفرد بزرگ‌تر از بودجه است نقض می‌شود.
+  8. `VID-NEW-08`: اعتبارسنجی hit کش فقط اندازه است؛ محتوای هم‌اندازه اما تغییرکرده به‌صورت کش قدیمی سرو می‌شود، برخلاف وعده هدر «اندازه + CRC».
+ریسک عملی: روی MCU، `VID-NEW-01` می‌تواند读到 حافظه نامعتبر/MPU fault بدهد؛ `VID-NEW-02` با Beginهای تکراری heap/handle/I2S را فرسوده می‌کند؛ `VID-NEW-03` می‌تواند به watchdog/reset منجر شود؛ `VID-NEW-04/05` تصویر خراب را بدون خطا نمایش می‌دهند؛ `VID-NEW-06` پس از OOM صدا را می‌پراند؛ `VID-NEW-07/08` کش را بیش از بودجه یا با محتوای اشتباه نگه می‌دارند.
+هیچ‌کدام از این‌ها آزمون سخت‌افزار واقعی نیستند. همه شواهد host/POSIX/stub هستند.
+## ۲) محیط، اوراکل‌ها، دستورها و exit code
+### محیط
+- OS: Linux x86_64، میزبان sandbox، بدون برد/SD/DMA/نمایشگر واقعی.
+- کامپایلرها: GCC/G++ 12.2، `zig cc 0.13.0` با target `x86-linux-musl` برای ۳۲بیتی.
+- Python 3.11.2؛ بسته‌های موقت در `/tmp/clain-audit-python`:
+  - `imageio-ffmpeg==0.6.0` → FFmpeg `7.0.2-static`
+  - `numpy==2.2.6`
+  - `Pillow==11.3.0`
+  - `ziglang==0.13.0`
+- اوراکل ویدیو/صدا: FFmpeg 7.0.2 static raw RGB24 / s16le. محدودیت: `ffprobe` نصب نبود؛ از `ffmpeg -i`/decode خام و `trace_headers` استفاده شد. FFmpeg برای some اندازه‌های فرد `testsrc2` را به زوج گرد می‌کند؛ برای ابعاد فرد واقعی باید crop جدا ساخته شود. در این ممیزی فایل‌های موسوم به `33x17` در عمل توسط FFmpeg به `32x16` تولید شدند و به‌عنوان نقص کتابخانه گزارش نشدند.
+- اوراکل سخت‌افزار: ندارد. `hwjpegtest` فقط stub است.
+### دستورهای اصلی و نتیجه
+| دستور/هدف | exit | نتیجه |
+|---|---:|---|
+| `git rev-parse HEAD` در کپی مستقل | 0 | `ddd1b3e0f68376ae912eb565dd85604ba63d5e3a` |
+| `make -j2 test` | 0 | `684/684 passed, 0 failures` |
+| `make saveexamplestest` | 0 | `Results: all PASS` |
+| `make videohooks` | 0 | 0 failures |
+| `make hwjpegtest` | 0 | `73 checks, 0 failed` — فقط stub |
+| `sh tools/check_deps.sh` | 0 | `check_deps: OK (6 headers)` |
+| `make -j2 asan` | 0 | ASan/UBSan/LSan suite: `684/684` |
+| `sh tools/check_32bit.sh plain` | 0 | zig x86-linux-musl: `685/685` |
+| `sh tools/check_32bit.sh ubsan` | 0 | zig x86-linux-musl UBSan trap: `685/685` |
+| `fuzz.py 120` | 0 | 120 mutant seeded، 0 crash/timeout |
+| `fuzz_payload.py 100` | 0 | 100 mutant payload-aware، 0 crash/timeout |
+| `mutations.py` | 1 | ۳ جهش کشته شد؛ جهش M-04 در script اولیه به‌دلیل regex ماتریس ناتمام ماند؛ بعداً جدا تکمیل شد |
+| `make saveexamplestest` پس از جهش VID5-01 | 2 | FAIL — کشته شد |
+| `make test` پس از جهش VID4-05 | 2 | `681/684` — کشته شد |
+| `make test` پس از جهش VID-01 | 2 | `683/684` — کشته شد |
+| `make test` پس از جهش M-04 row BT.709-full | 0 | `684/684` — blind spot؛ differential جداگانه差异 را نشان داد |
+لاگ‌ها: `_audit/logs/`. فایل‌های exit: `_audit/logs/*.exit`.
+### probeهای مستقل
+سورس‌ها در `_audit/harness/` نگه داشته شدند؛ باینری‌های حجیم پس از ثبت لاگ پاک شدند تا artifactها کوچک بمانند. نمونه دستورهای بازتولید:
+```sh
+cd audit-video/Clain_FileManager/FileManager_lib
+make -j2 libfilemanager.a
+gcc -std=gnu11 -O1 -g -DFM_HOST_BUILD=1 -Iinclude -Isrc -Ithird_party/h264bsd/src \
+  ../../_audit/harness/probe.c libfilemanager.a -lm -o ../../_audit/harness/probe
+gcc -std=gnu11 -O1 -g -DFM_HOST_BUILD=1 -Iinclude \
+  ../../_audit/harness/decode_probe.c libfilemanager.a -lm -o ../../_audit/harness/decode_probe
+```
+از ریشه `audit-video/`، مسیرهای FM باید root-relative باشند، مثلاً `/_audit/inputs/...` نه `/home/user/...`.
+نمونه اجراها:
+```sh
+./_audit/harness/probe open /_audit/inputs/rate_2997.avi
+./_audit/harness/probe adpcm_fault /_audit/inputs/healthy_avi_adpcm_ima.avi 0
+./_audit/harness/decode_probe /_audit/inputs/truncated_mjpeg.avi
+./_audit/harness/decode_probe /_audit/inputs/mjpeg_dim_mismatch.avi
+```
+برای ASan، در کپی موقت `/tmp/clain-audit-asan` هدف `asan` اجرا شد و خط clean پایانی آن هدف حذف شد تا کتابخانه instrumented باقی بماند؛ سپس:
+```sh
+gcc -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -DFM_HOST_BUILD=1 -Iinclude -Isrc -Ithird_party/h264bsd/src \
+  _audit/harness/h264_probe.c libfilemanager.a -lm -o h264_probe_asan
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./h264_probe_asan trailing 4
+```
+نتیجه: `heap-buffer-overflow READ of size 1` در `src/fm_h264.c:386`، exit 1.
+## ۳) ماتریس پوشش
+| حوزه | روش مستقل | نتیجه | شکاف/NOT RUN |
+|---|---|---|---|
+| AVI parser/index/seek | probe open/dump/audio + FFmpeg differential + truncation | سالم‌ها باز/دیکد شدند؛ `no_idx1` و truncationها رد/مدیریت شدند؛ ADPCM fault نقص داشت | همه FourCCهای legacy؛ فایل دوربین/QuickTime واقعی |
+| MP4/MOV | healthy H264/MJPEG، nested_750، size64_zero، VFR، differential | depth/box guard فعلی کار می‌کند؛ H264 baseline سالم decode شد | ffprobe نبود؛ VFR کامل timestamp-aware نه |
+| MKV/WebM | healthy MKV H264/MJPEG decode + baseline | باز/دیکد شد | per-frame timestamp/gaps؛ WebM واقعی کم |
+| FLV | healthy FLV H264+MP3 decode | باز/دیکد شد | FLV+MJPEG توسط FFmpeg ساخته نشد؛ timestamp gap |
+| FMRV | baseline/save tests | سبز | probe مستقل جدید نه |
+| MJPEG | cut JPEG، container truncated، dimension mismatch، differential | نقص‌های VID-NEW-04/05 | progressive/arithmetic JPEG؛ HW JPEG واقعی |
+| H.264 | baseline، healthy baseline در AVI/MP4/MKV/FLV، resolution-change، trailing start code ASan | OOB تأییدشده؛ High-profile پشتیبانی نمی‌شود و نباید به‌عنوان باگ سالم فرض شود | B-frame/High profile؛ fuzz عمیق vendored decoder |
+| PCM audio | differential AVI PCM | max diff 0 | endianهای کمیاب به‌صورت مستقل نه |
+| MP3 audio | baseline + healthy MP4/FLV | سبز | cap below contract بررسی جدید نه |
+| ADPCM | IMA/MS healthy differential + fault injection 64/32-bit | MS diff 0؛ IMA mono diff معنادار/مشکوک؛ OOM packet loss تأییدشده | وکتور Microsoft video blind spot قبلی هنوز مستقل جهش نخورد |
+| G.711/FLAC/Vorbis/Opus/AAC | عمدتاً baseline/save tests | سبز در سوئیت | probe مستقل جدید برای همه نه |
+| Media cache | clear_busy/control، budget_busy، single_oversize، stale | ۳ نقص تأییدشده | FatFS/QSPI/LittleFS واقعی؛ power-cut |
+| Player/playlist | baseline + SimpleVideo probes | اسکن/پخش سالم | recursion بسیار عمیق filesystem؛ race |
+| SimpleVideo lifecycle | Begin idle/running، Pause/Resume، Seek، output switch، Stop | Begin re-entry نقص؛ Pause/Seek/Stop در stub رفتار قابل قبول | I2S/DMA/LCD واقعی؛ clock drift طولانی |
+| Recording/round-trip | `saveexamplestest` | all PASS | power-cut/card-full واقعی نه |
+| 32-bit | suite plain/UBSan + probe32 rate/ADPCM/cache/decode | سبز؛ ADPCM/cache缺陷 همانند 64-bit | ARM alignment/MPU واقعی نه |
+| Sanitizers | ASan/UBSan suite + probeهای هدفمند | OOB و leak گرفته شد؛ fuzz سبک بدون crash | TSan/coverage gcov اجرا نشد |
+## ۴) وضعیت یافته‌های قبلی با شواهد مستقل
+| ID قبلی | وضعیت در این commit | شواهد مستقل این دور | جهش/محدودیت |
+|---|---|---|---|
+| VID-01 | اصلاح‌شده | `nested_750.mp4` → `open=-17`؛ baseline PASS | جهش depth cap → `make test` exit 2، `683/684` |
+| M-01 | اصلاح‌شده | baseline MP3 tests PASS | جهش جدید نه |
+| M-02a IMA | اصلاح‌شده | baseline PASS؛ differential IMA mono اختلاف کم اما غیرصفر دارد | جهش جدید نه |
+| M-02b MS ADPCM | اصلاح‌شده، شکاف وکتور ویدیو طبق دور قبل | differential MS mono max=0؛ baseline PASS | video vector blind spot قبلی مستقل جهش نخورد |
+| M-03 | اصلاح‌شده | baseline Vorbis PASS | جهش جدید نه |
+| M-04 | مقدار فعلی درست، آزمون کور | differential `h264_709full` max=2؛ جهش row3→row2 suite را pass داد ولی differential max=20/mean=9.37 | blind spot تأییدشده |
+| M-05 | اصلاح‌شده | baseline MJPEG-in-MP4 PASS | جهش جدید نه |
+| M-06 | اصلاح‌شده | baseline big-endian PCM PASS | جهش جدید نه |
+| M-07 | اصلاح‌شده | baseline edit-list PASS | جهش جدید نه |
+| M-08 | اصلاح‌شده | baseline 4GB-index PASS | جهش جدید نه |
+| VID4-01 | اصلاح‌شده | baseline SPS cap PASS | جهش جدید نه؛ SIGFPE قبلی بازتولید نشد |
+| VID4-02 | اصلاح‌شده | `mp4_size64_zero.mp4` → `open=-17`؛ baseline PASS | جهش جدید نه |
+| VID4-03 | اصلاح‌شده | `saveexamplestest` seekهای بلند PASS | جهش جدید نه |
+| VID4-04 | اصلاح‌شده | `saveexamplestest` track acceptance PASS | جهش جدید نه |
+| VID4-05 | اصلاح‌شده | `rate_2997.avi` → `fps=30,num=1000000,den=33367` در 64/32-bit | جهش → `681/684` exit 2 |
+| VID4-06 | اصلاح‌شده | baseline FLAC TOO_LARGE PASS | جهش جدید نه |
+| VID4-07 | اصلاح‌شده | MKV/FLV سالم باز/دیکد شد؛ baseline PASS | جهش جدید نه |
+| VID5-01 | اصلاح‌شده | `saveexamplestest` mono PASS | جهش count مونو → FAIL exit 2 |
+| VID5-02 | اصلاح‌شده | `check_deps: OK (6 headers)`؛ ساخت‌های جهشی rebuild کردند | جهش جدید نه |
+### مشکوک‌ها/محدودیت‌های قبلی
+| ID | ارزیابی این دور |
+|---|---|
+| V4 S-1 G.711 alloc-before-cap | در کد فعلی مسیر capacity-first دیده شد؛ آزمون مستقل فشار heap اجرا نشد. وضعیت: بهبودیافته/آزمون مستقل NOT RUN. |
+| V4 S-2 Info outside playback | اکنون بالای `SimpleVideo_Info` مستند شده که فیلدها فقط هنگام پخش معتبرند؛ probe بعد از Stop نام خالی/duration صفر داد. وضعیت: محدودیت مستند، نه نقص جدید. |
+| V4 S-3 eviction فایل در حال پخش | `mc_evict_one` فایل busy را تا ۴ entry رد می‌کند؛ اما `Clear` هنوز حلقه می‌زند و budget نقض می‌شود. FatFS/QSPI واقعی NOT RUN. |
+| V3 S-1/S-2 UB در vendored FLAC/H264 | fuzz سبک این دور UBSan جدید نگرفت؛ عمق کافی نیست. وضعیت: مشکوک/NOT RUN عمیق. |
+| V3 S-3 MP3 cap below 4608 | قرارداد هدر precondition دارد؛ این دور نقص جدید تلقی نشد. |
+| V3 S-4 Vorbis/Opus end trim | اوراکل مستقل جدید حل نکرد. |
+| V3 S-5 picture clock vs I2S clock | فقط stub؛ PLL واقعی NOT RUN. محدودیت طراحی/سخت‌افزار. |
+| V3 S-6 fuzz MKV کند | بازتولید نشد. |
+| V3 S-7 wrap `elapsed_ms*fps` | مسیر فعلی از fraction/64-bit استفاده می‌کند؛ جهش/آزمون بلندمدت مستقل نه. |
+## ۵) یافته‌های جدید تأییدشده
+### VID-NEW-01 — H.264 Annex-B trailing start code OOB read
+- شدت: S2/High
+- مسیر/تابع/خط: `src/fm_h264.c:h264_blob_is_keyframe:386`؛ الگوی مشابه در `h264_blob_scan_nals:324`
+- پیش‌شرط: `FM_USE_H264=1`؛ فراخوانی codec plugin با payload که دقیقاً به `00 00 00 01` ختم می‌شود و بایت NAL header بعدی وجود ندارد.
+- ورودی: ۴ بایت heap_exact `00 00 00 01`؛ همچنین از مسیر container/frame مخرب قابل تحویل است.
+- بازتولید: `_audit/harness/h264_probe.c trailing 4` با ASan.
+- واقعی: `AddressSanitizer: heap-buffer-overflow READ of size 1` در `fm_h264.c:386`، exit 1.
+- انتظار: خواندن خارج از بافر ممنوع؛ start code بدون NAL header باید رد/نادیده گرفته شود.
+- علت: شرط `while (i + 4 <= n)` برای start code چهاربایتی کافی نیست؛ سپس `s[i + sc]` وقتی `i+sc==n` خوانده می‌شود.
+- اصلاح پیشنهادی: قبل از خواندن type، `i + sc < n` را الزام کند؛ برای start code سه‌بایتی نیز `i + 3 < n`. حلقه/پیمایش بعدی باید مرز `n` را رعایت کند.
+- رگرسیون: exact trailing `00 00 00 01` و `00 00 01` زیر ASan/UBSan؛ چند NAL سالم با/بدون trailing start code.
+### VID-NEW-02 — SimpleVideo_Begin re-entry leak / stale I2S
+- شدت: S2/High
+- مسیر/تابع/خط: `top_api/simple_video.h:SimpleVideo_Begin:2809`؛ twin در `examples/simple_video.h`
+- پیش‌شرط: `SimpleVideo_Begin()` بیش از یک بار بدون `SimpleVideo_Stop()`؛ چه idle و چه در حال پخش.
+- ورودی: playlist ساده `/videos/clip.avi`؛ حالت running با I2S stub.
+- بازتولید: `_audit/harness/sv_probe.c begin_leak 4` و `begin_running`.
+- واقعی:
+  - idle: `live_blocks` 1→4؛ LSan: `Direct leak of 7872 byte(s) in 3 object(s)` از `scan_cb → Player_ScanFolder → SimpleVideo_Begin`.
+  - running: `rebegin`ها `live` را زیاد کردند، `i2s=1` باقی ماند، و ظرفیت `Video_Open` اضافی از ۴ در control به ۳ کاهش یافت.
+- انتظار: Begin باید یا حالت قبلی را کامل teardown کند (playlist/file/codec/I2S/present) یا در حالت running خطای BUSY بدهد؛ نشت handle/heap و DMA روشن مجاز نیست.
+- علت: `memset(&sv, ...)` قبل از `Player_Deinit`/stop؛ pointerهای قبلی دور ریخته می‌شوند. `sv_i2s_running` بیرون از `sv` است و reset نمی‌شود.
+- اصلاح پیشنهادی: در ابتدای Begin، اگر `sv.player_ok` یا running/paused است، `SimpleVideo_Stop()`/`Player_Deinit` و stop I2S/present wait صدا زده شود؛ سپس hooks حفظ و state reset شود. یا policy صریح BUSY.
+- رگرسیون: Begin×N idle با LSan؛ Begin×N.running با شمارش handle و `sv_i2s_running`؛ Stop idempotent.
+### VID-NEW-03 — MediaCache_Clear infinite loop on busy file
+- شدت: S2/High
+- مسیر/تابع/خط: `src/fm_mediacache.c:FM_MediaCache_Clear:449`
+- پیش‌شرط: یک فایل کش‌شده باز است و backend حذف را `FM_ERR_BUSY` می‌دهد (POSIX open file).
+- ورودی: cache با یک فایل ۶۰ بایتی، `File_Open` روی مسیر کش، سپس `Clear`.
+- بازتولید: `_audit/harness/cache_probe.c clear_busy` در cwd جدا؛ `alarm(2)` و timeout.
+- واقعی: تا SIGALRM برنگشت؛ exit 142. کنترل بدون handle باز: exit 0.
+- انتظار: Clear باید فایل‌های busy را رد کند/خطای BUSY بدهد/کراندار باشد، نه حلقه بی‌پایان.
+- علت: اولین فایل هر بار انتخاب می‌شود، `File_Delete` نادیده گرفته می‌شود، directory دوباره باز می‌شود و همان انتخاب تکرار می‌شود.
+- اصلاح پیشنهادی: مانند `mc_evict_one` لیست busy/سقف تلاش؛ نتیجه Delete بررسی شود؛ اگر پیشرفتی نیست بازگشت کنترل‌شده.
+- رگرسیون: busy/control؛ چند فایل busy؛ backend شبیه‌سازی‌شده BUSY.
+### VID-NEW-04 — MJPEG truncated JPEG accepted as FM_OK
+- شدت: S3/Medium
+- مسیر/تابع/خط: `src/fm_mjpeg.c:mjpeg_decode_run:222`
+- پیش‌شرط: JPEG بریده پس از بخشی از entropy scan؛ decoder به `PJPG_NO_MORE_BLOCKS` می‌رسد بدون تکمیل تصویر/EOI.
+- ورودی: `healthy_64x48.jpg` بریده در 800/1000/1478 بایت؛ container `truncated_mjpeg.avi`.
+- بازتولید: `probe mjpeg ... 800` و `decode_probe /_audit/inputs/truncated_mjpeg.avi`.
+- واقعی: cut800 → `result=0`؛ اختلاف با full: `6526` بایت، max 156، mean 36.7. container truncated → `SUMMARY ok=4`.
+- انتظار: فریم بریده/بدون EOI باید `FM_ERR_INVALID_FORMAT`/`FM_ERR_CORRUPTED` بدهد یا دست‌کم وضعیت ناقص را گزارش کند، نه تصویر کاملِ سالم.
+- علت: `PJPG_NO_MORE_BLOCKS` بدون بررسی تعداد MCUهای کامل/EOI به `FM_OK` نگاشت می‌شود؛ callback خواندن EOF را خطا نمی‌کند.
+- اصلاح پیشنهادی: شمارش MCU مورد انتظار و مقایسه با `MCUSPerRow*MCUSPerCol`؛ بررسی EOI/وضعیت callback؛ برگرداندن خطا برای truncation.
+- رگرسیون: cutهای 20/100/.../1478؛ full matching؛ container با اولین فریم بریده.
+### VID-NEW-05 — MJPEG dimension mismatch silent partial frame
+- شدت: S3/Medium
+- مسیر/تابع/خط: `src/fm_mjpeg.c:mjpeg_init:58` و `mjpeg_decode_run:211`؛ قرارداد `Video_DecodeFrame` در `src/fm_video.c:5175`
+- پیش‌شرط: کانتینر ابعاد `64x48` اعلام می‌کند اما JPEG payload `32x32` است.
+- ورودی: `_audit/inputs/mjpeg_dim_mismatch.avi`.
+- بازتولید: `decode_probe /_audit/inputs/mjpeg_dim_mismatch.avi`.
+- واقعی: `open w=64 h=48`؛ هر چهار فریم `r=0`؛ بافر به‌عنوان `64x48` تفسیر می‌شود در حالی که payload کوچک‌تر فقط بخشی را می‌نویسد. حالت معکوس `64x48` در ظرف `32x32` به‌درستی `FM_ERR_TOO_LARGE` داد.
+- انتظار: یا خطای invalid format، یا انتشار ابعاد واقعی/stride مانند H264؛ قبول خاموش فریم ناقص مجاز نیست.
+- علت: `mjpeg_init` info را نادیده می‌گیرد و ctx فقط sentinel است؛ decode فقط ظرفیت را می‌سنجد نه تطابق ابعاد مورد انتظار.
+- اصلاح پیشنهادی: ctx ابعاد مورد انتظار را نگه دارد و mismatch را رد کند؛ یا API خروجی actual size را منتشر کند و `Video_DecodeFrame` آن را اعمال کند.
+- رگرسیون: payload کوچک‌تر/بزرگ‌تر از header؛ H264 resolution-change به‌عنوان رفتار درست مقایسه‌ای.
+### VID-NEW-06 — ADPCM OOM consumes packet / drops remainder
+- شدت: S3/Medium
+- مسیر/تابع/خط: `src/fm_video.c:video_adpcm_read:6404` و `:6416`
+- پیش‌شرط: ترک ADPCM در AVI؛ `FM_Alloc` هنگام خواندن بسته شکست می‌خورد.
+- ورودی: `healthy_avi_adpcm_ima.avi` و `healthy_avi_adpcm_ms.avi`.
+- بازتولید: `probe adpcm_fault ... 0` و `... 1`؛ همین probe در ۳۲بیتی.
+- واقعی: `first=-14` (NO_MEMORY)، `cursor_after_error=1`؛ retry موفق `cursor_after_retry=2`. یعنی بسته قبلی پرید. در حالت partial/remainder نیز `audio_part_left` پاک می‌شود.
+- انتظار: طبق `include/fm_video.h:255`، `FM_ERR_NO_MEMORY, FM_ERR_IO nothing was consumed; the call can be retried`.
+- علت: `audio_frame_index++` قبل از alloc/read انجام می‌شود و در شکست alloc فقط `audio_part_left=0` می‌گردد.
+- اصلاح پیشنهادی: increment cursor پس از موفقیت؛ در NO_MEMORY/IO همان offset/remainder حفظ شود؛ مانند مسیرهای PCM/MP3 قرارداد retry.
+- رگرسیون: fault-injection alloc در اولین/دومین بسته؛ cap کوچک برای remainder؛ IMA و MS، mono/stereo، 32/64-bit.
+### VID-NEW-07 — MediaCache budget bypass
+- شدت: S3/Medium
+- مسیر/تابع/خط: `src/fm_mediacache.c:FM_MediaCache_Resolve:364-377`
+- پیش‌شرط: `max_total_bytes` فعال؛ eviction به‌دلیل busy ممکن نیست یا فایل منفرد از بودجه بزرگ‌تر است.
+- ورودی: دو فایل ۶۰ بایتی با limit=100 و یکی باز؛ یا یک فایل ۶۰ بایتی با limit=50.
+- بازتولید: `cache_probe budget_busy`؛ `cache_probe2 single_oversize`؛ نسخه ۳۲بیتی.
+- واقعی: `total=120 limit=100` و `total=60 limit=50`؛ Resolve هنوز مسیر کش را برمی‌گرداند.
+- انتظار: طبق هدر، کش نباید از `max_total_bytes` فراتر رود؛ در بدترین حالت باید مسیر مبدأ برگردد.
+- علت: پس از حلقه eviction، بدون بررسی مجدد بودجه `FM_Transfer_Copy` انجام می‌شود.
+- اصلاح پیشنهادی: اگر پس از eviction هنوز `total+size > limit` است، copy انجام نشود و source path برگردد؛ فایل منفرد بزرگ‌تر از limit نیز bypass شود.
+- رگرسیون: busy، single oversize، guard=64، verify روشن/خاموش.
+### VID-NEW-08 — MediaCache stale same-size hit
+- شدت: S3/Medium
+- مسیر/تابع/خط: `src/fm_mediacache.c:mc_is_valid:105`
+- پیش‌شرط: فایل منبع پس از کش‌شدن با همان اندازه ولی محتوای متفاوت تغییر می‌کند.
+- ورودی: `/src/a.avi` ابتدا `0x5A...` سپس `0xA5...`، هر دو ۶۰ بایت.
+- بازتولید: `cache_probe2 stale`.
+- واقعی: Resolve دوم همان مسیر کش را داد، `hits=1`؛ بایت اول کش `5A` ولی منبع `A5`، `same=0`.
+- انتظار: هدر می‌گوید تغییر با «اندازه + CRC» تشخیص داده می‌شود؛ hit باید معتبر باشد یا invalidate شود.
+- علت: `mc_is_valid` فقط `File_SizeOf` را مقایسه می‌کند؛ `verify` فقط پس از کپی است نه روی hit.
+- اصلاح پیشنهادی: manifest اندازه+CRC/mtime؛ یا CRC روی hit؛ یا حداقل مستندسازی صریح اندازه-only و تغییر وعده هدر. ترجیح: اعتبارسنجی محتوا.
+- رگرسیون: same-size content change؛ اندازه متفاوت؛ verify=true/false؛ cache hit/miss stats.
+## ۶) مشکوک‌ها، محدودیت‌های طراحی و موارد قابل گزارش اما نه نقص تأییدشده
+1. **AVI با `dwMicroSecPerFrame=0`**: `rate_125_us0.avi` باز می‌شود ولی `fps=0,num=0,den=1` می‌دهد و `strh rate/scale` را fallback نمی‌کند. SimpleVideo با fallback ده‌تایی پخش کرد و crash ندیدیم. این را فعلاً محدودیت/شکاف metadata می‌دانیم، نه S2؛ اگر قرارداد `fps_num/fps_den` را «نرخ دقیق هر AVI مشروع» بدانیم، باید اصلاح شود.
+2. **VFR/MP4/MKV/FLV timestamps**: پخش عمدتاً بر نرخ متوسط/اولین delta استوار است. وکتور VFR ساخته شد اما اوراکل کامل timestamp-per-frame و A/V sync بلندمدت نداریم. وضعیت: محدودیت طراحی/شکاف آزمون، نه نقص تأییدشده جدید.
+3. **IMA ADPCM mono differential**: میانگین اختلاف با FFmpeg حدود ۳٫۶۷ و max ۱۵ روی وکتور mono تولیدشده. می‌تواند rounding/initial predictor باشد؛ هنوز به‌عنوان نقص قطعی گزارش نشد. MS ADPCM mono exact بود.
+4. **H.264 High profile**: فایل‌های اولیه به‌اشتباه High profile تولید شدند و decode نشدند؛ این نقص کتابخانه نیست چون backend vendored baseline/Main را هدف گرفته. پس از اصلاح اوراکل به baseline، decode سالم شد.
+5. **ابعاد فرد اوراکل**: `testsrc2=size=33x17` در FFmpeg استفاده‌شده عملاً خروجی زوج داد؛ بنابراین ادعای باگ ابعاد فرد روی آن فایل‌ها پس گرفته شد.
+6. **کش روی FatFS/QSPI**: رفتار BUSY/delete/evict روی میزبان POSIX لزوماً همان FatFS نیست؛ hardware NOT RUN.
+## ۷) جهش‌ها و blind spotها
+| جهش | هدف | exit | نتیجه |
+|---|---|---:|---|
+| VID5-01: `*got_frames = got * 2u` در مونو | `saveexamplestest` | 2 | کشته شد؛ FAIL count/order |
+| VID4-05: AVI `fps_num=fps, fps_den=1` | `make test` | 2 | کشته شد؛ ۳ شکست |
+| VID-01: `if (depth + 1u >= MP4_MAX_NEST)` → `if (0)` | `make test` | 2 | کشته شد؛ ۱ شکست |
+| M-04: row BT.709-full با row video-range جایگزین شد | `make test` | 0 | زنده ماند؛ `684/684`؛ differential جداگانه max=20, mean=9.37 در برابر FFmpeg |
+| M-04 canary: row full صفر شد | differential | — | max=211؛ نشان داد harness تغییر ماتریس را می‌بیند |
+نکته ساخت: هدف `make test` در این Makefile آبجکت‌ها را مستقیم لینک می‌کند و لزوماً `libfilemanager.a` را به‌روز نمی‌کند. برای differential جهش M-04، کتابخانه جداگانه با `make libfilemanager.a` بازسازی شد. این خودش یک تله ابزار ممیزی است، نه لزوماً نقص محصول.
+Blind spotهای باقی‌مانده:
+- M-04 هنوز در `make test` کور است؛ وکتور BT.709-full باید به سوئیت اضافه شود.
+- M-02b video vector طبق دور قبل کور بود؛ این دور جهش مستقل جدید روی آن نزدیم.
+- `make test` به‌تنهایی SimpleVideo/cache lifecycle را پوشش نمی‌دهد؛ نقص‌های جدید دقیقاً در همین ناحیه‌اند.
+- fuzz این دور سبک بود: ۲۲۰ mutant، بدون crash؛ بسیاری در open رد شدند. این عدم‌یافتن، اثبات عدم‌وجود نیست.
+## ۸) شمارش deduplicated و ارزیابی پیشرفت قابل مقایسه
+- یافته‌های جدید تأییدشده: **۸**
+  - S2: **۳** (`VID-NEW-01..03`)
+  - S3: **۵** (`VID-NEW-04..08`)
+- اصلاحات قبلیِ تأییدشده/سبز در این دور: **۱۸ ردیف اصلی** (VID-01، M-01..M-08، VID4-01..07، VID5-01/02). دو شکاف آزمون شناخته‌شده باقی است: M-04 و وکتور ویدیوی M-02b.
+- مشکوک/محدودیت/NOT RUN: جداگانه در §۶ و §۹؛ در شمارش نقص تأییدشده نیامده‌اند.
+مقایسه با دورهای قبل فقط تحت پوشش comparable: دور V3 fuzz بسیار سنگین‌تر (~۱٫۳۶M اجرا) داشت ولی `fm_mediacache.c` و `fm_player.c` را پوشش نمی‌داد. این دور fuzz سبک‌تر است اما probeهای هدفمند cache/player/SimpleVideo/ADPCM-fault/32-bit اضافه شده‌اند. بنابراین افزایش شمارش خام نسبت به V5 (۲ یافته) به‌معنی پسرفت هسته نیست؛ نشان‌دهنده پوشش جدید لایه‌های integration است. هسته پارسر/کدک با جهش‌های انتخابی همچنان اصلاحات قبلی را نگه داشته؛ ریسک اصلی اکنون چرخه حیات، کش و قرارداد خطا است.
+## ۹) NOT RUN / محدودیت host در برابر hardware
+- برد واقعی STM32، SD کارت، SDMMC، DMA2D/LTDC، JPEG سخت‌افزاری، I2S واقعی، LCD/SPI، power-cut، card-full واقعی: **NOT RUN**.
+- FatFS/QSPI/LittleFS روی فلش واقعی و رفتار delete/open/busy/evict: **NOT RUN**.
+- clock drift واقعی PLL/I2S در ۳۰ دقیقه: **NOT RUN**؛ فقط stub.
+- TSan/thread race، gcov/branch coverage، clang، ffprobe: **NOT RUN**.
+- همه ۱۷ جهش قبلی: **NOT RUN**؛ فقط ۴ جهش انتخابی + canary.
+- وکتورهای واقعی دوربین/QuickTime/phone، High-profile/B-frame H264، progressive JPEG: **NOT RUN**.
+- `hwjpegtest` و `videohooks` اجرا شدند ولی stub هستند؛ اعتبار سخت‌افزاری محسوب نمی‌شوند.
+## ۱۰) فهرست ماشین‌خوان
+```text
+ID | severity | status | component | path:function | prior IDs | evidence
+VID-NEW-01 | S2 | confirmed | H264 wrapper | src/fm_h264.c:h264_blob_is_keyframe | - | _audit/logs/h264-trailing4-asan.log
+VID-NEW-02 | S2 | confirmed | SimpleVideo lifecycle | top_api/simple_video.h:SimpleVideo_Begin | - | _audit/logs/sv-begin-leak-asan.log; _audit/logs/sv-begin-running.log
+VID-NEW-03 | S2 | confirmed | media cache | src/fm_mediacache.c:FM_MediaCache_Clear | V4-S-3 related | _audit/logs/cache-clear-busy.log; _audit/logs/cache-clear-busy.exit
+VID-NEW-04 | S3 | confirmed | MJPEG decode | src/fm_mjpeg.c:mjpeg_decode_run | - | _audit/logs/mjpeg-cuts.log; _audit/logs/decode-truncated_mjpeg.avi.log
+VID-NEW-05 | S3 | confirmed | MJPEG/container contract | src/fm_mjpeg.c:mjpeg_init | - | _audit/logs/decode-mjpeg_dim_mismatch.avi.log
+VID-NEW-06 | S3 | confirmed | video audio ADPCM | src/fm_video.c:video_adpcm_read | M-02 related | _audit/logs/probe32-adpcm-fault.log; adpcm_fault probe logs
+VID-NEW-07 | S3 | confirmed | media cache budget | src/fm_mediacache.c:FM_MediaCache_Resolve | V4-S-3 related | _audit/logs/cache-budget-busy.log; _audit/logs/cache-single_oversize.log
+VID-NEW-08 | S3 | confirmed | media cache validity | src/fm_mediacache.c:mc_is_valid | - | _audit/logs/cache-stale.log
+```
+
+ID,severity,status,component,path,function,prior_IDs,evidence
+VID-NEW-01,S2,confirmed,H264 wrapper,src/fm_h264.c,h264_blob_is_keyframe,,_audit/logs/h264-trailing4-asan.log
+VID-NEW-02,S2,confirmed,SimpleVideo lifecycle,top_api/simple_video.h,SimpleVideo_Begin,,_audit/logs/sv-begin-leak-asan.log;_audit/logs/sv-begin-running.log
+VID-NEW-03,S2,confirmed,media cache,src/fm_mediacache.c,FM_MediaCache_Clear,V4-S-3 related,_audit/logs/cache-clear-busy.log;_audit/logs/cache-clear-busy.exit
+VID-NEW-04,S3,confirmed,MJPEG decode,src/fm_mjpeg.c,mjpeg_decode_run,,_audit/logs/mjpeg-cuts.log;_audit/logs/decode-truncated_mjpeg.avi.log
+VID-NEW-05,S3,confirmed,MJPEG/container contract,src/fm_mjpeg.c,mjpeg_init,,_audit/logs/decode-mjpeg_dim_mismatch.avi.log
+VID-NEW-06,S3,confirmed,video audio ADPCM,src/fm_video.c,video_adpcm_read,M-02 related,_audit/logs/probe32-adpcm-fault.log;_audit/logs/adpcm-fault-ima-0.log
+VID-NEW-07,S3,confirmed,media cache budget,src/fm_mediacache.c,FM_MediaCache_Resolve,V4-S-3 related,_audit/logs/cache-budget-busy.log;_audit/logs/cache-single_oversize.log
+VID-NEW-08,S3,confirmed,media cache validity,src/fm_mediacache.c,mc_is_valid,,_audit/logs/cache-stale.log
+
+# Independent audio & playback audit — `ddd1b3e0`
+**Target:** `hamid-enf/Clain_Filemanagaer`
+**Commit audited:** `ddd1b3e0f68376ae912eb565dd85604ba63d5e3a` ("Harden file operations and add V51 audit regressions")
+**Scope:** audio decode, type detection, WAV/MP3/G.711/ADPCM/FLAC/Vorbis/Opus/AAC framing, ID3, playlist/player/seek/gapless, buffering/sample-rate/channel conversion, callbacks, output switching, `SimpleAudio`, `AudioDma`, and the audio/video boundary.
+**Nature of this document:** audit report and proposals only. The audited source was **not** modified. No commit, push or PR was made against the user's repository. All builds, harnesses, fuzzing, mutation and instrumentation live in a separate clone at `/home/user/audit-audio`.
+> **This report makes no claim of "zero errors".** It states exactly what was executed, what it showed, and what was **not** run.
+---
+## 0. Read this first — three corrections to earlier findings
+The previous audit round reported two candidate defects. Both were **re-examined in this round and found to be defects of the test harness, not of the product.** They are recorded here so that they are not carried forward as product bugs.
+| Prior candidate | Status now | Why |
+|---|---|---|
+| "ID3v2.2 behind an MP3 truncates the track to 6912 samples (FFmpeg: 178560)" | **Retracted — test defect** | The fixture was built with an 8-byte v2.2 header (3-byte plain size). The ID3v2.2 specification states the tag header is **10 bytes with a 4-byte synchsafe size**, identical to v2.3/v2.4. With a spec-conformant v2.2 tag the library returns 176400 samples, exactly matching FFmpeg. |
+| "A valid ID3v2.2 tag in front of a WAV/FLAC is rejected with `-17`" | **Retracted — test defect** | Same wrong header layout. With a conformant tag, WAV (22050 samples), FLAC (22050) and MP3 all open and match FFmpeg. |
+**Source for the corrected layout:** the ID3v2.2 specification defines *"ID3 size: 4 * %0xxxxxxx"*, i.e. a 4-byte synchsafe integer in a 10-byte header — the three-byte sizes belong to the *frames*, not to the tag header. See §10 for the citation.
+Consequence: the earlier "ID3v2.2" line of investigation is closed. The remaining ID3 findings below are different and are backed by mutation witnesses.
+---
+## 1. What was actually executed
+| Activity | Where | Result |
+|---|---|---|
+| Baseline suite | `make fm_test` | **684/684 passed, 0 failures** |
+| ASan + UBSan + LSan suite | `tools/check_matrix.sh asan` style flags | **684/684 passed, 0 failures**, zero sanitizer reports |
+| TSan suite | `-fsanitize=thread` | **689/689 passed, 0 failures**, zero warnings |
+| 32-bit build | `zig cc 0.17.1`, `x86-linux-musl`, `make m32` | **685/685 passed** |
+| 32-bit + UBSan | same | **685/685 passed** |
+| Feature matrix (8 configs) | `sh tools/check_matrix.sh quick` | **8 configurations, 0 failed** (345…684 tests each) |
+| gapless differential (official tool) | `tools/test_mp3_gapless.py` | **PASS**, all 12 rate/channel/bitrate combos + 5 malformed-metadata cases |
+| Raw-PCM differential vs FFmpeg 9.0.2 | 10 generated MP3s + 6 WAV codec vectors | length exact, max sample difference 1 |
+| Corruption/truncation sweep | ~3 800 mutated opens under ASan+UBSan | **no crash, no leak, no sanitizer report** |
+| Fault injection | allocation-failure sweep, ADPCM/FLAC/Vorbis/MP3/G.711 | no leak, no close-after-failed-open |
+| Mutation testing | 15 mutations, full suite each | 12 killed, 3 survived (§5) |
+| API invariant sweep | new harness, chunk sizes 1/4096/65536/whole | 0 failures on conformant input |
+Not run, and therefore not claimed: real hardware, I2S/DMA, SD cards, power loss, audio equipment, and any timing/underrun behaviour on a real board. Host tests are **not** a substitute for hardware (see §9).
+---
+## 2. Verified as working (independent witnesses)
+These are things the previous rounds claimed. Each was re-checked here with a witness that is independent of the project's own expectations.
+| Claim | Independent witness | Result |
+|---|---|---|
+| AAC/ADTS behind an ID3v2.3 tag opens and plays (`AUD4-01`) | synthetic AAC plugin; 88 access units; compared to FFmpeg | **Confirmed fixed.** 90 112 samples both for a plain ADTS file and for the same file behind an ID3v2.3 tag; FFmpeg reports 90 112 samples for the same file. |
+| Mid-file sample-rate change in MP3 is refused (`AUD4-02`) | two MP3s at 44.1 kHz and 22.05 kHz concatenated | **Confirmed.** Fails cleanly with `FM_ERR_UNSUPPORTED` (-11) at the boundary, 177 408 of 178 560 samples delivered; no repeat, no garbage. |
+| AAC resync over a damaged stretch (`AUD4-03`) | 200 zero bytes and a fake ADTS-looking header injected mid-stream | **Confirmed.** All 88 access units recovered in both cases; sample count identical to the clean file. |
+| Gapless: LAME/Info tag, exact length | official `test_mp3_gapless.py` | **PASS** at 8/12/22.05/44.1/48 kHz, CBR and VBR |
+| Gapless: unusable metadata must not over-trim | same tool | **PASS** (unknown encoder, unusable padding, invalid size, concatenated streams, no Xing) |
+| Chained ID3v2.3 before an MP3 | chain of two tags, 176 400 samples | **Correct** on the unmodified library |
+| ID3v2.2 / v2.3 / v2.4 / v2.4+footer before MP3, WAV, FLAC | 8 fixtures vs FFmpeg | **Correct** for conformant tags |
+| `Audio_Convert` end-to-end | MP3 → WAV, MP3 → mono WAV, MP3 → FLAC | frame counts exactly equal; max sample difference 1 vs FFmpeg |
+| `Audio_ReadMono` / `Audio_ReadStereo` | 4 vectors, mono and stereo | downmix and upmix both **0 mismatches** |
+| `AudioDma` refill → sink | host-model sink, 26 track switches | **0 sample mismatches**, start/stop balanced (26 starts / 25 stops, the last stop being the final `Stop`) |
+| `Audio_Stream` / `SetCallback` | 4 codec families | callback sample totals **exactly equal** to `Audio_Read` totals |
+| Audio track of containers (AVI/MKV/MP4) | `Video_ReadAudioFrame` on 8 vectors incl. 24-bit and float PCM, FLAC-in-MP4, ADPCM, MP3, Vorbis | all `decodable=1`, all delivered audio |
+| WAV 8-bit / 16-bit stereo / G.711 / ADPCM | vs FFmpeg | length exact, PCM byte-identical for ADPCM/G.711 |
+| Documented limits (WAV 24-bit, >2 channels, …) | README §"What is decoded" | **match the code**; refusing them is a documented contract limitation, not a defect |
+---
+## 3. Findings — new in this round (`AUD-NEW-XX`)
+| ID | Severity | Status | Component | Path:function | Prior IDs | Evidence |
+|---|---|---|---|---|---|---|
+| `AUD-NEW-01` | low | confirmed (test defect) | test suite / ID3 | `tools/audio_record_host_test.c` (fixture), `test/audit_audio_late_tests.h:aud5_tagged` | (supersedes the retracted ID3v2.2 candidate) | The "S-03: chained ID3 tags before MP3" test uses `tone_mono.mp3`, a **single-frame** file with no Xing/Info header. A wrong start offset is silently repaired by the MP3 resync, so the test passes for every wrong-offset implementation. Proof: mutation `M03_id3_single_tag_only` (skip only the first tag) leaves the suite at **684/684**, while the same mutation on a real CBR file with an Info/LAME header changes `total_frames` from **176 400 to 179 707** |
+| `AUD-NEW-02` | low | confirmed (test defect) | test suite / gapless | `Makefile`, `tools/test_mp3_gapless.py` | — | The project's own gapless differential is **never invoked** by `make test`, by any script, or by CI (no CI config exists). `make test` is `fm_test` only. Consequently the LAME `+529` synthesis delay and gapless seek have **no coverage in the suite**: `M01_gapless_skip_no529` and `M11_gapless_seek_disabled` both survive at 684/684, yet the official tool catches both immediately (`PCM mismatch frame=0 channel=0 delta=11133`, exit 4; and exit 6 for the seek mutant). This is the single largest coverage gap found. |
+| `AUD-NEW-03` | low | confirmed (test defect) | playlist restart accounting | `examples/simple_audio.h:SimpleAudio_*`, `tools/audio_record_host_test.c` | — | `restart_count` is reset when the current track changes so that a newly advanced track does not inherit the previous track's exhausted budget. Mutation `M14_restart_budget_not_per_track` deletes that reset and the **entire suite passes**, including `fm_audiorecordtest` which is not part of `make test` at all. No fixture advances to a second track after the budget is spent. |
+| `AUD-NEW-04` | low | confirmed (API doc / consistency) | seek past end | `src/fm_audio.c:mp3_seek` vs `aac_seek`, `pcmbuf_seek`, WAV/ADPCM seek | — | A seek past the end of a **known-length** MP3 returns `FM_ERR_EOF` (-15); for WAV, G.711, ADPCM, FLAC, Vorbis and Opus it returns `FM_OK` (0). All of them correctly park at the end (subsequent read returns EOF, `frame_index == total_frames`). README line 513 documents the MP3 case but does not say the others differ. Two callers in the same file, `SimpleAudio` (`examples/simple_audio.h`, `SA_CMD_SEEK` at ~line 906 vs `SA_CMD_RESUME` at ~line 831), handle the two results with different control flow. Evidence: `Audio_Seek(1e6)` on 6 codecs → MP3 `-15`, all others `0` |
+| `AUD-NEW-05` | info | confirmed (contract limitation, documented) | WAV PCM widths | `src/fm_audio.c:audio_parse_wav` | — | 24-bit, 32-bit, 32-bit float and >2-channel WAV are refused with `FM_ERR_UNSUPPORTED` while FFmpeg decodes them. The README table states exactly this, so this is **not** a defect — recorded so the refusal is not mistaken for corruption. Note the asymmetry: the **video** layer decodes 24/32-bit and float PCM, the **audio** layer does not. |
+| `AUD-NEW-06` | info | confirmed (by design) | `Audio_Read` frame alignment | `src/fm_audio.c:Audio_Read` | — | A `count` that is not a whole number of frames returns `FM_ERR_INVALID_ARGUMENT` and zero samples. The behaviour is correct and deliberate (documented in the `.c` file) but the **public header** only says "Read up to count samples". A stereo caller passing `count=3` silently gets an error instead of one frame. Proposal: document it in `include/fm_audio.h`. |
+### 3.1 What is *not* a finding
+Two crashes were produced by the audit's own harnesses and are **not** product defects; they are listed so they are not mistaken for bugs:
+* a harness passed `count = SIZE_MAX/2` with an 8 192-sample buffer, and another passed `SIZE_MAX/4`. `Audio_Read` honours `count` by contract, so the harness overran its own buffer (MP3 path segfault, WAV path silent clamp). Crashes caused by violating the documented buffer-size contract.
+* a harness passed `%s` for an enum field and segfaulted in `printf`.
+Neither indicates a library defect.
+---
+## 4. Root-cause classification
+| Class | Items |
+|---|---|
+| **Confirmed product behaviour, correct** | `AUD4-01`, `AUD4-02`, `AUD4-03` and all §2 rows |
+| **Confirmed test defects (coverage gaps)** | `AUD-NEW-01`, `AUD-NEW-02`, `AUD-NEW-03` |
+| **Confirmed API/doc inconsistency** | `AUD-NEW-04`, `AUD-NEW-06` |
+| **Documented contract limitation** | `AUD-NEW-05` |
+| **Hypothesis / not proven** | none remaining — every prior candidate either became a confirmed item above or was retracted in §0 |
+| **NOT RUN** | hardware, I2S/DMA, SD, power loss, long-run timing, real audio equipment (§9) |
+---
+## 5. Mutation testing (15 mutations, full suite each)
+Method: copy the library, apply one textual mutation, rebuild `fm_test` with `-Werror`, run the whole suite. A mutation is "killed" if the suite fails.
+| Mutation | Targets | Result |
+|---|---|---|
+| `M01_gapless_skip_no529` | LAME `+529` synthesis delay | **SURVIVED** 684/684 (caught by `tools/test_mp3_gapless.py`, §6) |
+| `M02_gapless_duration_notrimmed` | gapless duration trim | killed (2 failures) |
+| `M03_id3_single_tag_only` | chained ID3 tags | **SURVIVED** 684/684 (§6) |
+| `M04_id3_tag_beyond_file_ok` | tag size past EOF | **SURVIVED** 684/684 — analysed, **equivalent mutant** (see below) |
+| `M05_mp3_rate_change_ignored` | mid-file sample-rate refusal | killed (1 failure) |
+| `M06_mp3_rate_change_ignored2` | mid-file sample-rate refusal, 2nd branch | killed (1 failure) |
+| `M07_seek_past_end_ok` | past-end seek returns OK | killed (2 failures) |
+| `M08_time_to_frame_no_cap` | `audio_time_to_frame` cap | killed (1 failure) |
+| `M09_wav_data_len0_not_played` | WAV `data` length 0 → play to EOF | killed (1 failure) |
+| `M10_adpcm_decodes_unread_bytes` | ADPCM must decode only bytes read | **SURVIVED** 684/684 — analysed, **defensive-only** (see below) |
+| `M11_gapless_seek_disabled` | exact gapless sample seek | **SURVIVED** 684/684 (caught by `tools/test_mp3_gapless.py`) |
+| `M12_mp3_frame_consumed_twice` | MP3 frame pointer advance | killed — **suite segfaulted** (rc = -11) |
+| `M13_aac_find_sync_bytewise` | AAC sync search granularity | killed (1 failure) |
+| `M14_restart_budget_not_per_track` | per-track restart budget | **SURVIVED** 684/684 (§6) |
+| `M15_detect_single_id3_tag` | detection skips all chained tags | killed (13 failures) |
+**15 mutations, 12 killed (80 %), 3 survived.** Full record: `/home/user/audit-audio/harness/mutation_results.json`.
+### 5.1 The survivors, analysed honestly
+* **`M01`, `M03`, `M11` — real coverage gaps.** Each mutation changes observable output, each is caught by something that exists in the repository, and each is invisible to `make test`. These are the three items behind `AUD-NEW-01` and `AUD-NEW-02`.
+* **`M04` — equivalent mutant, not a gap.** The mutation makes a tag whose declared size runs past EOF skip to the end of the file instead of returning `FM_ERR_INVALID_FORMAT`. Probed with four fixtures (tag ending exactly at EOF, tag overrunning into audio, zero-length tag, second tag of a chain overrunning): the mutated build produces **identical** results to the baseline in all four, because the MP3 opener independently rejects an audio start at or past EOF. The failure path is unreachable from that entry point, so no test can distinguish the mutant. Not a defect.
+* **`M10` — defensive-only, not a gap.** The mutation decodes the whole ADPCM block instead of only the bytes actually read. Probed with a truncated final block (two cut points) and with a `data` chunk that claims 20 000 bytes more than the file holds: **byte-identical PCM** to the baseline in all three. The `got_bytes` clamp matters only when a read returns short *inside* the final block, which the host backends never do. Keep the guard (it is correct on a flaky SD card) but do not expect a host test to reach it.
+* **`M12`** segfaults the suite rather than failing an assertion. That is a crash of the *mutated* build, and it does mean the suite notices — but the diagnosis is poor. Worth a `-fsanitize` run in CI so such a mutation reports a line instead of a signal.
+---
+## 6. Proposed regression tests
+File: `/home/user/audit-audio/harness/audit_audio_v6_tests.h` (proposed patch, not applied).
+Each test **passes on the current library and fails on a mutation the suite currently misses** — that is the property that makes it a regression test rather than a restatement.
+| Test | Kills | Fixture |
+|---|---|---|
+| `audit_v6_chained_id3_mp3` | `M03` | two ID3v2.3 tags in front of a real CBR MP3 carrying Info/LAME; asserts tagged and untagged streams deliver the same `total_frames` and the same sample count |
+| `audit_v6_gapless_529` | `M01` | the same source encoded with and without the LAME tag; asserts the two decodes line up sample by sample (a wrong `+529` shifts the whole file, |Δ| ≈ 10 000+) |
+| `audit_v6_odd_count` | — (pins `AUD-NEW-06`) | stereo stream, `count = 3`; asserts `FM_ERR_INVALID_ARGUMENT` with `*read == 0` |
+| restart-budget-per-track test | `M14` | needs the `SimpleAudio` poll harness from `tools/audio_record_host_test.c`; fixture sketch in the header |
+Two additional recommendations that are **process**, not code:
+1. **Wire `tools/test_mp3_gapless.py` into `make test`** (guarded on `python3` + FFmpeg being present, skipped with a loud message otherwise). This one change closes `AUD-NEW-02` and kills `M01`/`M11`. It is the highest-value single change in this report.
+2. **Wire `fm_audiorecordtest` (`make audiorecordtest`) into `make test`** and add the per-track-budget fixture. Today it builds and passes but nothing runs it automatically.
+---
+## 7. 32-bit, overflow, alignment, memory, ISR — explicit analysis
+| Concern | Analysis | Evidence |
+|---|---|---|
+| 32-bit `size_t` | `pcmbuf_seek` clamps before narrowing (`frame > frames → frames`), with an in-code comment about a real wrap that played from the start. `Audio_Read` caps `n` against `UINT32_MAX / bytes_per_sample`. | 32-bit suite 685/685 plain and under UBSan |
+| Overflow in time → frame | `audio_time_to_frame` caps at `1<<40`; `Seek(1e300)` and `Seek(INFINITY)` return cleanly, not UB | `aud_edge`: `1e300`/`inf` → `FM_OK`, park at end |
+| NaN / negative time | `!(x >= 0.0)` idiom catches NaN; `Seek(-1)`, `Seek(NaN)` → `FM_ERR_INVALID_ARGUMENT` | verified on WAV/MP3/FLAC/ADPCM |
+| Alignment | 16-bit reads go through `rd16`; ADPCM block buffers are byte-based; `Audio_ReadStereo` refuses odd capacities | whole suite clean under UBSan (`-fno-sanitize-recover`) |
+| Allocation failure | injector at every Nth allocation for ADPCM/FLAC/Vorbis/MP3/G.711; no leak, `Audio_Close` after a failed `Audio_Open` is a no-op | `aud_fault` sweep |
+| ISR safety | `AudioDma_HalfCallback`/`FullCallback` only set a volatile flag; no allocation, no FS, no log. Verified by reading the code, **not** by measurement on hardware | `examples/audio_dma_player.h` |
+| Stack | README quotes MP3 ≈ 19 KB, Opus 24–28 KB of stack for the call chain. On a Cortex-M7 with a small audio task stack this is the tightest budget in the subsystem. **Not measured on hardware here** | README, not re-verified |
+| Fixed-capacity decode | FLAC/Vorbis/Opus are **decoded whole at open** (`AUDIO_SLURP_MAX_BYTES` = 10 MB, `FM_OPUS_MAX_FILE_BYTES`), so a long track allocates its full PCM at open. Documented, but it is the dominant RAM risk on a board | code + README |
+---
+## 8. Audio/video boundary
+Checked and correct in this round: `Video_ReadAudioFrame` returns 16-bit PCM for 24-bit, 32-bit, 32-bit float and big-endian PCM, for FLAC-in-MP4, IMA and MS ADPCM, MP3-in-AVI and Vorbis-in-MKV — all eight vectors report `decodable=1` and deliver audio. The audio layer's refusal of 24-bit WAV while the video layer accepts 24-bit AVI/MKV/MP4 PCM is a **deliberate asymmetry** that the README states; it is recorded as `AUD-NEW-05`, not a defect.
+---
+## 9. Limitations and NOT RUN
+Everything in this section is **not evidence**, and no conclusion above depends on it.
+1. **No hardware was used.** No board, no I2S, no real DMA, no SD card, no codec chip, no speaker, no oscilloscope or audio analyser. The `AudioDma` witness is a host model of a double buffer; it proves sample bookkeeping, **not** timing, jitter or underrun behaviour.
+2. **No power-loss testing.** The WAV "recording never closed" path is exercised by constructing the file, not by cutting power.
+3. **No long-duration replay.** No 10-hour play, no track-count stress, no memory-fragmentation run.
+4. **No real SD-card fault model.** `FM_ERR_IO`/short reads are injected synthetically. `M10` shows the short-read guard is unreachable on the host backends.
+5. **No concurrency stress beyond TSan.** TSan reports zero warnings, but no multi-task scheduling pattern resembling an audio ISR plus a decoder task on one core was simulated.
+6. **Stack figures are quoted from the README**, not re-measured.
+7. **No `.m4a`/AAC outside ADTS.** AAC decoding itself is a *plugin*: the framing layer was audited with a synthetic plugin, so **the behaviour of any real AAC decoder is outside this audit**.
+8. **FFmpeg 9.0.2 is the reference decoder**, not an absolute truth. A disagreement with FFmpeg is a prompt to investigate one side or the other — as §0 demonstrates, twice, in the harness's favour.
+---
+## 10. External reference used
+* ID3v2.2 structure (10-byte header, 4-byte synchsafe size; three-byte sizes belong to frames): the ID3v2.2 specification, reproduced at `https://mutagen-specs.readthedocs.io/en/latest/id3/id3v2.2.html` and `https://github.com/taglib/taglib/blob/master/taglib/mpeg/id3v2/id3v2.2.0.txt`. This is the source that caused the §0 retraction.
+---
+## 11. Reproduction
+```sh
+# audited tree (detached, unmodified)
+cd /home/user/audit-audio
+git rev-parse HEAD                     # ddd1b3e0f68376ae912eb565dd85604ba63d5e3a
+# build + suites
+cd Clain_FileManager/FileManager_lib
+make -j8 fm_test && ./fm_test          # 684/684
+sh tools/check_matrix.sh quick         # 8/8 configurations
+sh tools/check_matrix.sh asan          # sanitizers
+# witnesses (host, run from / so the POSIX backend resolves absolute paths)
+/ home/user/audit-audio/harness/aud_invar   <files...>
+/home/user/audit-audio/harness/aud_aac     <adts files...>
+/home/user/audit-audio/harness/aud_convert <files...>
+/home/user/audit-audio/harness/aud_conv2   <src> <dst> [out_channels]
+/home/user/audit-audio/harness/aud_player  /aud_pl
+/home/user/audit-audio/harness/aud_dma                # run inside the fixture dir
+/home/user/audit-audio/harness/aud_fuzz_asan <files...>
+# mutation
+python3 /home/user/audit-audio/harness/mutate.py    # all 15, merges the JSON
+```
+---
+## 12. Executive summary
+The audio subsystem at `ddd1b3e0` is in **good shape on everything that was actually exercised**: 684/684 on the host suite, 685/685 on a 32-bit build, 8/8 feature configurations, clean ASan/UBSan/TSan, exact PCM agreement with FFmpeg for MP3, ADPCM and G.711, correct gapless behaviour under the project's own differential tool, correct ID3 handling for conformant v2.2/v2.3/v2.4/chained/footer tags, correct resync over damaged AAC, and correct sample bookkeeping through `Audio_Convert`, `AudioDma` and the container audio path.
+**No new product defect was proven in this round.** Two previous "candidates" were retracted as harness errors (§0) — the ID3v2.2 story was simply wrong about the header layout. What remains is **three confirmed coverage gaps** (`AUD-NEW-01/02/03`), all in the *test suite* rather than the library, and **two documentation inconsistencies** (`AUD-NEW-04/06`).
+The highest-value action is not a code change: **`tools/test_mp3_gapless.py` exists, is correct, catches two of the three surviving mutations immediately, and nothing ever runs it.** Wiring it into `make test` would close the largest correctness gap in the subsystem's verification for a few lines of Makefile.
+
+
+
+
+
+
+# ممیزی مستقل زیرسیستم ذخیره/ضبط/نوشتن رسانه — دور V52 (SAV)
+
+**مخزن:** `https://github.com/hamid-enf/Clain_Filemanagaer`
+**کامیت ممیزی‌شده:** `ddd1b3e0f68376ae912eb565dd85604ba63d5e3a` («Harden file operations and add V51 audit regressions»، والدین `efd0347` و `745f81c`)
+**روش دسترسی:** `git clone … /tmp/audit-save && git checkout --detach ddd1b3e0… && git rev-parse HEAD` → همان هش؛ هیچ تغییر، commit یا push روی مخزن کاربر یا GitHub انجام نشد.
+**ریشهٔ کتابخانه:** `Clain_FileManager/FileManager_lib/`
+**تاریخ اجرا:** ۲۰۲۶-۱۱-۱۴ (UTC)
+
+> این فایل به‌همراه `SAVE_RECORD_AUDIT_V52_INDEX.tsv` تنها **افزوده** شده‌اند؛ هیچ فایل موجودی در درخت کاربر تغییر نکرده است. همهٔ build، هارنس، mutation و شبیه‌سازی در کپی ایزوله (`/tmp/audit-save`، `/tmp/bplain`، `/tmp/btest`، `/tmp/bmut`، `/tmp/b32`) انجام شد.
+
+---
+
+## ۱) خلاصهٔ مدیریتی و ریسک‌های از دست رفتن / خرابی داده
+
+زنجیرهٔ «فایل ← صدا ← تصویر ← ویدیو ← کش ← ذخیره‌سازی» در حالت **بستن موفق** بسیار سالم است: هر ۲۶ سناریوی تمیز صوتی و هر ۳۳ سناریوی تمیز ویدیویی از نظر ساختار کانتینر بی‌نقص‌اند و در فرمت‌های بدون اتلاف (WAV/FLAC) خروجی **بیت‌به‌بیت** برابر منبع است؛ اوراکل round-trip خود مخزن (`tools/closed_loop.py`) و هر پنج سوئیت sanitizer/32-bit هم پاس می‌شوند.
+
+مشکل اصلی در **مسیر خطا و قطع ناگهانی** است، یعنی دقیقاً همان‌جا که دادهٔ کاربر روی کارت است ولی هدر هنوز کامل نشده. دو ریسک جدی از دست رفتن داده تأیید شد:
+
+| # | ریسک | شدت | وضعیت |
+|---|---|---|---|
+| **SAV-NEW-01** | `VideoFile_Repair` چانکی را که فیلد طولش هنوز `0` است «چانک بریده‌شده» می‌پندارد، فایل را تا همان‌جا **truncate** می‌کند و `FM_OK` با `frames=0` برمی‌گرداند — در حالی که payload روی کارت موجود است. این پنجرهٔ crashِ **طبیعی** خود نویسنده است (`vw_chunk_begin` طول را ۰ می‌نویسد، `vw_chunk_end` بعداً patch می‌کند). | **HIGH** | تأییدشده با شواهد بایتی |
+| **SAV-NEW-02** | بعد از هر خطای نوشتن، `Close` فایل جانبی `.idx` را پاک می‌کند؛ `VideoFile_Repair` بدون آن `FM_ERR_NOT_FOUND` می‌دهد. نتیجه: در **۳۷ از ۳۸** سناریوی خطا، ترمیم اصلاً قابل اجرا نیست — از جمله موردی که خود `.avi` کاملاً معتبر است. | **MEDIUM** | تأییدشده + اثبات بازگردانی |
+| **SAV-NEW-03** | `AudioFileWriter_Close` روی فایلی که **کامل و بیت‌به‌بیت درست** است هم `FM_ERR_IO` برمی‌گرداند (شکست flush/close در آخرین لحظه)، و `WriteFrames` برای فریم‌هایی که هرگز به کارت نرسیده‌اند `FM_OK` می‌دهد. فراخوان هیچ راهی برای تفکیک «کامل ولی sync نشد» از «بریده» ندارد. | **MEDIUM** | تأییدشده |
+| **SAV-NEW-04** | نویسندهٔ IMA-ADPCM آخرین بلوک را با تکرار فریم آخر پر می‌کند و طول واقعی را در `fact` می‌نویسد، ولی **هیچ خواننده‌ای در زنجیره `fact` را نمی‌خواند**؛ کتابخانه و ffmpeg هر دو تا ۴۴۹ فریم (۵۶ ms) بیشتر گزارش می‌کنند. | **LOW/MED** | تأییدشده |
+| **SAV-NEW-05** | WAV رهاشده (بدون Close) تا آخرین checkpoint پخش می‌شود؛ بایت‌های بعد از آن روی کارت **غیرقابل‌دسترس** می‌مانند (۱۳۱۰۷۲ بایت ≈ ۴ ثانیه در یک سناریو) و هیچ `AudioFile_Repair` وجود ندارد. | **LOW** | تأییدشده (محدودیت قرارداد + شکاف) |
+
+**نکتهٔ ساختاری مهم:** دو زیرسیستم صوت و تصویر در مواجهه با **یک** پدیدهٔ یکسان (فیلد طول = ۰ به‌خاطر قطع شدن پیش از patch) دو تصمیم **متضاد** گرفته‌اند. خوانندهٔ صوت صریحاً بازیابی می‌کند — `src/fm_audio.c:1160-1176`: «data length 0 … the sound runs to the end of the file» — در حالی که ترمیم ویدیو همان داده را نابود می‌کند. این ناسازگاری قرارداد بین دو API، ریشهٔ SAV-NEW-01 است و الگوی اصلاح آن را هم نشان می‌دهد.
+
+**ریسک بازمانده از دورهای قبل:** SAV3-04 (نوشتن همزمان کارت داخل refill نیمهٔ DMA) همچنان **باز** است و روی host قابل اندازه‌گیری نیست؛ در مدل من ۵ فراخوانی `File_Write` با ۸۱۹۲۰ بایت **داخل** `refilling[]` ثبت شد، ولی هیچ نمونه‌ای گم نشد. این یک *ظن* باقی می‌ماند، نه یافتهٔ قطعی.
+
+---
+
+## ۲) کامیت، محیط، پیکربندی، ابزارها و نتایج اجرا
+
+### ۲-۱) محیط
+| مورد | مقدار |
+|---|---|
+| کامیت | `ddd1b3e0f68376ae912eb565dd85604ba63d5e3a` (detached، تأیید با `git rev-parse HEAD`) |
+| کامپایلر | gcc 12.2.0 (x86_64-linux-gnu) |
+| make / python | GNU make 4.3 / Python 3.11.2 |
+| numpy | 2.4.6 |
+| ffmpeg | v9.0.2 (باینری `imageio-ffmpeg`؛ دارای libx264، libmp3lame، libvorbis، libopus) |
+| zig | 0.17.1 (برای build ۳۲ بیتی؛ `gcc -m32` بدون multilib و **غیرقابل‌استفاده**) |
+| منابع | ۲ CPU، ~۳.۹ GB RAM → آزمون‌های فایل‌مشترک **سریال** اجرا شدند |
+| clang / cmake | **موجود نیست** → مقایسهٔ کامپایلری و `make cmake` اجرا نشد |
+| نکته | خطوط `Makefile` و منبع‌ها CRLF هستند (در mutationها رعایت شد) |
+
+### ۲-۲) درخت‌های ایزوله
+| درخت | کاربرد |
+|---|---|
+| `/tmp/audit-save` | کلون ممیزی، detached؛ `make test`، `make asan`، `make tsan` |
+| `/tmp/bplain/lib` | build معمولی + `libfilemanager.a` برای لینک همهٔ هارنس‌ها |
+| `/tmp/btest/lib` | سوئیت‌های host مخزن (saveex/audiorec/taps/cache/videohooks/hwjpeg/usbmsc/ports/fatfs) + اسکریپت‌های check |
+| `/tmp/bmut/lib` | mutationها (SAV3-01، SAV2-02، SAV2-03) — پس از هر mutation با `cmp` نسبت به کلون بکر **بازگردانی و تأیید** شد |
+| `/tmp/b32/lib` | `tools/check_32bit.sh` با zig |
+
+### ۲-۳) نتایج اجرا (همه با exit code)
+| ابزار / دستور | نتیجه | exit |
+|---|---|---|
+| `make -j2 test` | **684/684** pass | 0 |
+| `make -j2 asan` (ASan+UBSan+LSan) | **684/684**، «sanitizer active (39 symbols)»، هیچ گزارش sanitizer | 0 |
+| `make -j2 tsan` | **689/689**، «ThreadSanitizer warnings: 0» | 0 |
+| `sh tools/check_32bit.sh` (zig cc 0.17.1, x86-linux-musl) | **685/685** «32-bit plain OK» | 0 |
+| `make -j2 saveexamplestest` | all PASS | 0 |
+| `make -j2 audiorecordtest` (هر دو واریانت: `examples/` و `-DAUD5_TEST_TOP_API=1`) | all PASS | 0 |
+| `make -j2 tapstest` / `cachetest` / `videohooks` / `hwjpegtest` / `usbmsctest` | همه pass | 0 هر کدام |
+| `make -j2 ports` | «OK sync port freertos (44 files)»، «OK sync port cmsis_rtos2 (44 files)» | 0 |
+| `make -j2 fatfs` | «fatfs: all host builds passed»، «ALL PLAYER EXAMPLES DONE OK» | 0 |
+| `python3 tools/closed_loop.py <ffmpeg>` | «Closed-loop checks PASS (3 deterministic inputs)»؛ ویدیو MAE 1.382/1.138 (max 24/36)، `ff_wav/ff_flac/ff_avi/decoded_*` همه **bit-exact**، متن exact | 0 |
+| `sh tools/check_switch_names.sh` / `check_deps.sh` / `check_examples.sh` / `check_board.sh` / `check_cubeide.sh` | به‌ترتیب OK(18)، OK(6)، OK، OK («no CubeMX project at ..»)، OK(«40 non-firmware .c files») | 0 همه |
+| `make -j2 test CFLAGS_EXTRA="-DFM_AUDIO_ENC_SYNC_BYTES=0 -DFM_VIDEO_ENC_SYNC_BYTES=0"` | **684/684** | 0 |
+
+> **خطای روش‌شناسی خودم (ثبت برای شفافیت):** نخستین اجرای `check_32bit.sh` در درختی انجام شد که `test/vectors` از آن حذف شده بود و ۲ FAIL مصنوعی (jpeg nested / png formats، rc=139) داد. پس از بازگردانی fixtureها نتیجهٔ درست ۶۸۵/۶۸۵ است. همچنین نخستین اجرای `check_cubeide.sh` تنها به‌خاطر فایل هارنس خودم (`tools/audit_sav304_measure.c`) FAIL شد؛ پس از حذف آن rc=0. هیچ‌کدام نقص مخزن نیستند.
+
+### ۲-۴) کدهای خطا (از `include/fm_types.h:28-72`)
+`-3 NOT_FOUND`، `-5 NO_SPACE`، `-6 IO`، `-12 CORRUPTED`، `-16 TOO_LARGE`، `-17` (فرمت نامعتبر/خالی).
+
+---
+
+## ۳) ماتریس ورودی × انکودر × کانتینر × بک‌اند × نوع خطا
+
+### ۳-۱) ابعاد ماتریس
+- **انکودر/کانتینر صوتی:** PCM→WAV (هدر ۴۴ بایتی)، IMA-ADPCM→WAV (هدر ۶۰ بایتی با `fmt ` tag 0x11 + `fact`)، FLAC بومی (هدر ۵۸ بایتی: `fLaC` + STREAMINFO(34) + VORBIS_COMMENT)، و `AUTO` (تشخیص از پسوند). MP3/VORBIS/OPUS نیازمند `Audio_RegisterEncoder` → در این build **NOT RUN** (انکودر ثبت‌نشده = `FM_ERR_UNSUPPORTED`).
+- **انکودر/کانتینر ویدیویی:** MJPEG-in-AVI (نویسندهٔ `fm_video_enc.c`) با و بدون صدا؛ مسیر FMRV فقط بازبینی کد.
+- **ورودی:** ۷ الگوی PCM شامل سکوت، دو تُن، موج مربعی تمام‌مقیاس (±32767 و −32768)، نویز سفید؛ نرخ‌های 8000/16000/22050/44100/48000 و نرخ فرد؛ mono/stereo؛ mixdown و up-mix از طریق `out_channels`; اندازه‌های تکه ۱ تا ۴۰۹۶ فریم؛ تعداد فریم فرد (۴۰۹۷).
+- **بک‌اند:** `backends/fm_posix_fs.c` (POSIX؛ `file_flush` = `fsync`) با تزریق خطا در لایهٔ `FM_FS` (جابه‌جایی pointerهای `FM_FS` محلی + `FS_Mount("/", &fs)`). FatFS واقعی و littlefs روی host فقط به‌صورت build/سوئیت (`make fatfs`) — نه به‌عنوان محیط ضبط.
+- **انواع خطا:** شکست نوشتن در n-امین فراخوانی، نوشتن کوتاه، شکست flush، شکست close، شکست seek (patch هدر)، شکست truncate، سقف بایت (`FM_ERR_TOO_LARGE`)، و رهاکردن فرآیند با `_exit(9)` (مدل قطع برق).
+
+### ۳-۲) نتایج — صوت (۷۲ سناریو؛ `/tmp/audit/amatrix.json`)
+هر سناریو با **سه خوانندهٔ مستقل** سنجیده شد: (۱) پارسر بایتیِ spec (RIFF/WAV و FLAC بومی، `aud_oracle.py`)، (۲) `ffmpeg v9.0.2` به `s16le` و مقایسهٔ نمونه‌به‌نمونه با `.src`، (۳) `Audio_Open`/`Audio_Read` خود کتابخانه.
+
+| گروه | n | bit-exact | `close_r==0` | کتابخانه بازش می‌کند | دارای اشکال اوراکل |
+|---|---|---|---|---|---|
+| تمیز + رهاشده (S1–S26, X1–X4) | 30 | 18 | 26 | 28 | 11 |
+| تزریق خطا (F_*) | 42 | 26 | 10 | 39 | 29 |
+
+- **همهٔ حالت‌های تمیز WAV/FLAC بیت‌به‌بیت درست‌اند** (S1–S6, S10–S13, S17–S20, S22–S25؛ `max_abs_diff = 0`)، شامل موج مربعی تمام‌مقیاس (بدون clipping نادرست) و نرخ فرد و تعداد فریم فرد. سه مورد «غیر bit-exact» در گروه تمیز (S14/S15/S16) **عمدی** است: mixdown/up-mix، که اوراکلِ من آن را با منبعِ mix‌نشده مقایسه می‌کند — نقص نیست.
+- **ADPCM ذاتاً اتلافی است** و مطابق مستندات آخرین بلوک را pad می‌کند؛ `dmax` بین ۳۹۸۹ تا ۸۶۷۸ در الگوهای پله‌ای/نویزی (انتظار می‌رفت) و در الگوی تُن ≤ ۸۵۷۶.
+- **پایداری در برابر خطا:** در ۲۶ سناریوی تزریق خطا، بخشِ نوشته‌شده همچنان **بیت‌به‌بیت** درست و قابل پخش است (`F_wav_w2..w5`: `close=-6` ولی `dmax=0`) و در ۳۹ سناریو کتابخانه فایل را باز می‌کند. این دقیقاً همان قراردادی است که در `include/fm_audio.h:255-259` مستند شده.
+- **بازیابی graceful تأییدشده:** `F_wav_seek1`/`F_wav_seek2` — patch طول `data` شکست خورد (`data_size=0` در هدر، ۸۰۰۰۰ بایت PCM بعد از آن)؛ کتابخانه با قاعدهٔ «طول ۰ = تا آخر فایل» **۴۰۰۰۰ فریم بیت‌به‌بیت درست** برگرداند و ffmpeg هم ۵.۰۰ ثانیه پخش کرد.
+- **رهاکردن فرآیند (`_exit(9)`):** `X1`/`X3` (پیش از نخستین checkpoint) → فایل ۰ بایتی، `Audio_Open` = `-17`. `X2` (WAV بزرگ) → ۳۹۳۲۱۶ بایت روی کارت ولی هدر فقط ۲۶۲۱۰۰ بایت را می‌شناسد ⇒ ۱۳۱۰۷۲ بایت غیرقابل‌دسترس (**SAV-NEW-05**). `X4` (FLAC) → **۰ اشکال**، ۸۱۹۲ فریم سالم؛ ffmpeg یک «Decoding error: Invalid data found» در انتها می‌دهد که مطابق مستندات `fm_audio.h:262-264` رفتارِ reader سخت‌گیرانه‌تر است، نه خرابی.
+
+### ۳-۳) نتایج — ویدیو (۳۳×۵ واریانت + ۳۸ سناریوی sweep + probeها)
+واریانت‌ها: `default`، `sync4k` (`FM_VIDEO_ENC_SYNC_BYTES=4096`)، `sync0` (=0)، `out512` (`FM_VIDEO_ENC_OUT_BYTES=512`)، `cap100k` (`FM_VIDEO_ENC_MAX_BYTES=100000`).
+
+- **گروه تمیز (A1–A14, B1–B3, D4–D9, C3):** اوراکل ۰ اشکال. هدر/ایندکس درست: `hdrl = 4+64+124+(audio?100:0)`، ۱۶ ورودی `idx1`، `µs/frame` درست، `flags=272` (HASINDEX|ISINTERLEAVED)، padding فرد رعایت‌شده.
+- **`A14` (۶۰ ثانیه، ۱۵ fps، ۱۶ kHz):** `apf = 16000/15 = 1066` (truncate) ⇒ **۶۰۰- نمونه (−۳۷.۵ ms، ۰.۰۶۲۵٪)** کمبود در کل فایل، در حالی که فایل از نظر spec بی‌نقص است. ریشه: الگوی مستند `SimpleVideo_RecWriteAudio(pcm, rate/fps)` وقتی `fps ∤ rate`.
+- **`B4` (سقف ۱۰۰۰۰۰ بایت):** `first_err = -16 TOO_LARGE` روی فریم ۱، فایل ۳۳۲ بایتی فقط-هدر، اوراکل **تمیز**؛ اما exit code هارنس ۰ بود ⇒ exit code بازتاب خطای داخلی نیست (در گزارش‌نویسی باید JSON خوانده شود).
+- **قطع ناگهانی + checkpoint (`AV_ABANDON=40`، ۳۲۰×۲۴۰×۶۰ + ۱۶ kHz):**
+
+| واریانت | اندازه | اشکال اوراکل | `Video_Open` | ffmpeg |
+|---|---|---|---|---|
+| `sync4k` | 1147414 B | **0** | ۴۰ فریم | ۴۰ |
+| `sync0` | همان | **8** | **−12 CORRUPTED** | ۴۰ |
+| `default` (۱ MiB) | 1118338 B | 5 (`dwTotalFrames=37`) | ۳۷ | ۳۹ |
+
+⇒ **دورهٔ checkpoint تعیین می‌کند که یک ضبطِ رهاشده توسط خوانندهٔ خود کتابخانه قابل پخش هست یا نه**، در حالی که ffmpeg آنچه را `Video_Open` رد می‌کند تحمل می‌کند. این شواهدِ مستقلِ باقی‌ماندنِ ریسک SAV2-02 است.
+- **`C1`/`C2` (رهاشده در فریم ۱۲، `sync0` و `default`):** فایل‌ها بایت‌به‌بایت یکسان؛ `.idx` زنده می‌ماند ⇒ `VideoFile_Repair` → `FM_OK` با ۱۱ فریم، ۳۳۷۲۸ بایت، ۲۲ ورودی `idx1`، ۰ اشکال. **یعنی وقتی `.idx` پاک نشده باشد، ترمیم کامل کار می‌کند** — این همان چیزی است که SAV-NEW-02 از بین می‌برد.
+- **`W3_fail_write`:** فایل `.avi` کاملاً معتبر (۶ pic + 6 aud، ۰ اشکال اوراکل، پلیر کتابخانه ۶ فریم) ولی `Repair` → **−3**.
+- **جدول ترمیم در ۳۸ سناریوی خطا:** **۳۷ مورد → `Repair = -3`**؛ تنها موردِ `FM_OK` یعنی `O512_S1_fail_seek` فایل را از **۱۸۷۵ → ۳۳۲ بایت** truncate کرد با `frames=0`، `pic_ok=0`، `snd_ok=0`.
+- **`D2` (`FI_FAIL_WRITE_NTH=4`):** `close=-6`، ۱۰۱۷۴ بایت، ۷ اشکال (RIFF=0؛ `movi` ۴ بایت در برابر span ۹۸۵۰؛ `idx1` با ۶ ورودی ولی HASINDEX پاک؛ `vids dwLength=0`؛ `dwTotalFrames=0`)، `Repair=-3`، `Video_Open=-12`، ffmpeg ۰ فریم. **اثبات بازگردانی:** ساختن یک `v.avi.idx` **خالی** → `Repair = FM_OK` با ۶ فریم، اوراکل ۰ اشکال، پلیر ۶ فریم، ffmpeg ۶ فریم. ⇒ آنچه نابود شده فقط *ماشهٔ* ترمیم است، نه داده.
+
+### ۳-۴) بک‌اند
+`posix_file_write` شمارش کوتاهِ واقعی را برمی‌گرداند؛ `strip_slash` مسیرها را CWD-نسبی می‌کند؛ `posix_file_flush` = `fsync` → در صورت شکست `FM_ERR_IO`. تزریق خطا در سطح `FM_FS` انجام شد (نه در سطح syscall)، بنابراین نتیجه مستقل از جزئیات POSIX است. محدودیت: **بدون mount همزمان چند بازیگر و بدون FatFS واقعی** (به §۱۰).
+
+---
+
+## ۴) یافته‌ها و ظن‌های دورهای قبل — وضعیت و شواهد مستقل
+
+> قاعده: «ادعای اصلاح» بدون بررسی مستقل = **تأییدنشده**. هر ردیف زیر با اجرای مجدد یا شواهد بایتیِ خودم سنجیده شده.
+
+| ID | منبع | ادعا | **وضعیت مستقل من** | شواهد |
+|---|---|---|---|---|
+| **SAV2-01** | ReportV3 | در همان V3 پس گرفته شد | n/a (پس‌گرفته‌شده) | متن V3؛ موضوعی برای آزمون نماند |
+| **SAV2-02** | ReportV3/V4 | اصلاح‌شده (S4)؛ گاردهای `ASV_SYNC_BYTES`/`VSV_SYNC_BYTES` | **ناقص — ریسک اصلی بدون تغییر** | `make test CFLAGS_EXTRA="-DFM_AUDIO_ENC_SYNC_BYTES=0 -DFM_VIDEO_ENC_SYNC_BYTES=0"` → 684/684، exit 0. گاردها `0` را **مجاز** می‌دانند و مستند می‌کنند («0 = never»: `src/fm_audio_enc.c:56-62`، `src/fm_video_enc.c:55-64`). اما آزمون‌ها *انتظار خود را ضعیف می‌کنند*: `test/audio_save_tests.h:1324-1326` فقط `flushes==0 && raw.data==0 && raw.fact==0` را می‌سنجد و `test/video_save_tests.h:1307-1317` با `(void)v; (void)decoded;` **کل مسیر بازکردن/رمزگشایی را در این پیکربندی کنار می‌گذارد**. شواهد مستقل خطر: `ck_sync0` → ۸ اشکال اوراکل و `Video_Open=-12` در حالی که ffmpeg ۴۰ فریم می‌خواند؛ `ck_sync4k` → ۰ اشکال و پلیر ۴۰. |
+| **SAV2-03** | ReportV3/V4 | اصلاح‌شده (S4)؛ «پین‌شده» توسط `tools/save_examples_host_test.c:958-959` | **اصلاح حاضر است؛ ادعای پین‌شدگی بازتولید نمی‌شود** | `if (snd_at > pic_at)` در هر دو قلو موجود است (`top_api/examples_save_media.h:1044` و `examples/…:1044`). mutation `>` → `>=` در **هر دو** → «Results: all PASS»، exit 0. mutation `* 2u` → `* 3u` در شاخهٔ else → «all PASS»، exit 0. کنترل (`pic += snd_at - pic_at + 2u`) → FAILURES، exit 2، ≥۴ FAIL. instrument (fprintf در شاخهٔ else) → دقیقاً **۲** بار اجرا، هر دو با `snd_at == pic_at` (19200/19200 و 4800/4800) ⇒ `cut_skip = 0`. نتیجه: assertion `c.in_sync==4u && c.silent==2u && snd_frames==43392L` (خط ۱۰۰۶) وجود دارد ولی **تمایز نمی‌دهد**. → SAV-NEW-07 |
+| **SAV3-01** | ReportV4 | اصلاح‌شده (S4)؛ mutation باید ۳ FAIL بدهد | **تأییدشده (خط جابه‌جا شده)** | baseline `sh tools/check_flag_stamp.sh` → «check_flag_stamp: OK»، rc=0. حذف `$(FLAGS_STAMP)` از قاعدهٔ `src/%.o` → **۳ FAIL** (`fm_core.o`، `fm_audio_enc.o`، `fm_video_enc.o`)، rc=1. توجه: این قاعده حالا **`Makefile:309`** است نه ۲۹۹ (فایل رشد کرده)؛ ارجاع V4 کهنه است. |
+| **SAV3-02** | ReportV4 | اصلاح مستنداتی (S4) | **تأییدشده — و متن دقیقاً با رفتار实测 مطابقت دارد** | `include/fm_audio.h:249-267`. سه بند آن با اندازه‌گیری من منطبق است: (۱) «فایل دور ریخته نمی‌شود؛ Close طول‌ها را تا آنچه به کارت رسیده تنظیم می‌کند و همان خطا را برمی‌گرداند» ← `F_wav_w2..w5`، `F_adpcm_w2/cap`؛ (۲) «FLAC آخرین فریمش بریده است؛ این کتابخانه هر فریم کامل را پخش می‌کند و reader سخت‌گیرتر (libav) همان فریم‌ها را پخش و سپس invalid data گزارش می‌کند» ← `X4`/`F_flac_w2..w4` با پیام واقعی ffmpeg؛ (۳) «هدر total samples = 0» ← تأیید بایتی. |
+| **SAV3-03** | ReportV4 | اصلاح‌شده؛ NOTE اضافه شده | **تأییدشده + باقی‌ماندهٔ جزئی** | اجرای `/tmp/btest/lib/fm_saveexamplestest` از `/tmp/audit/probe/outside` → rc=1 با NOTE صریح: «`/test/vectors/avi_mp3.avi` is missing … run it from the top of the library tree … Six checks are skipped; the player was not tested.» باقی‌مانده: مشکل محیطی همچنان به‌صورت `FAIL` و `Results: FAILURES` و rc=1 گزارش می‌شود، پس CI نمی‌تواند «cwd اشتباه» را از «خرابی واقعی» جدا کند. |
+| **SAV3-04** | ReportV4 | **ظن S2، صریحاً اصلاح‌نشده** | **باز — و روی host قابل‌اندازه‌گیری نیست** | هارنس مستقل من (`/tmp/audit/hx/sav304`): در هر دو اجرا **۵ فراخوانی `File_Write` با ۸۱۹۲۰ بایت داخل `refilling[]`** (مسیر `top_api/audio_dma_player.h:267` → `state->save_fn` در `:364` → `simple_audio_rec_tap` در `top_api/simple_audio.h:2127` → `AudioFileWriter_WriteFrames`). در پیکربندی من (stereo، ۲۴۰۰۰ فریم) تزریقِ stall **هیچ نمونه‌ای را از بین نبرد** و `underrun=0` ماند، در حالی که آزمون خود مخزن (mono 48 kHz، ۴۹۱۲۰ فریم) `underrun != 0` می‌گیرد. آزمون مخزن فقط `underrun` را assert می‌کند و **محتوای فایل ضبط‌شده را نمی‌سنجد** ⇒ نمی‌تواند گم‌شدن نمونه را تشخیص دهد. خود آزمون هم صریح می‌گوید «not a measurement of any real SD-card latency» (`tools/audio_record_host_test.c:50-52`). |
+| **SAVE1-F3** | ReportV4 | اصلاح‌شده برای WAV/ADPCM/AVI | **تأییدشده برای فایلِ بسته‌شده** | S1–S26 (۱۸ مورد bit-exact، بقیه ADPCM اتلافی/تبدیل کانال عمدی) + A1–A14/B1–B3/D4–D9 (اوراکل ۰ اشکال) + closed_loop PASS. |
+| **CLOSED_LOOP_HOST.md** | `audit_reports/` | PASS (seeds 0/3/17) | **بازاجرا و تأیید** | `python3 tools/closed_loop.py <imageio-ffmpeg>` → «Closed-loop checks PASS (3 deterministic inputs)»، exit 0؛ `decoded_external_video.rgb` MAE=1.382/max=24، `decoded_library_video.rgb` MAE=1.138/max=36، همهٔ PCMها bit-exact، متن exact. حالت `--asan` این اسکریپت اجرا نشد (به §۱۰). |
+| **FATFS_RECORDER_FOLLOWUP / LOW-01** | `audit_reports/` | `get_fattime()` ضعیف (2020-01-01) زیر `FM_FATFS_PROVIDE_DISKIO=1` | **NOT RUN روی FatFS واقعی** | `make -j2 fatfs` → «all host builds passed» (فقط build/پلیر روی host)؛ اینجا نه مدیای FatFS واقعی هست نه RTC. سؤال «قوی/ضعیف بودن زمان» ماهیتاً board/RTC است. |
+| **V4 tallies** | ReportV4 | ۱۲/۱۲ اصلاح، ۹ حذف‌حساس، mutation ۱۰ گرفته/۲ بازمانده، tsan 663/663، 57/57 ماتریس | **جزئاً بازسنجی شد** | tsan حالا **689/689** با ۰ هشدار؛ `make test` **684/684**؛ وجود «۲ mutation بازمانده» با SAV-NEW-07 هم‌خوان است (من هم در همان ناحیه ۲ بازمانده یافتم). شمار 57/57 ماتریس V4 با ابزار متفاوت بود → قابل مقایسهٔ مستقیم نیست (§۹). |
+
+---
+
+## ۵) یافته‌های جدید
+
+### SAV-NEW-01 — `VideoFile_Repair` دادهٔ قابل‌بازیابی را نابود می‌کند و `FM_OK` می‌دهد
+- **شدت:** HIGH (از دست رفتن قطعی داده + گزارش موفقیت کاذب)
+- **اجزا/مکان:** `src/fm_video_enc.c` — `VideoFile_Repair:986`؛ شرط توقف walk در `:1100-1106` (`len == 0u` → `break; /* the chunk that was cut */`)؛ truncate در `:1131-1133` (`if (pos < size) (void)File_Truncate(&w->file, pos);`)؛ تکمیل هدر در `:1147` (`r = vw_finish(w)`).
+  ریشهٔ دسترسی‌پذیری: `vw_chunk_begin:157-171` (نوشتن fourcc + `vw_wr32(h+4, 0u)`) و `vw_chunk_end:229-247` (`vw_patch32(w, at + 4u, size)`).
+- **پیش‌شرط:** ضبط ویدیو در فاصلهٔ بین `vw_chunk_begin` و `vw_chunk_end` قطع شود (reset، قطع برق، کشیدن کارت) یا یک patch طول به دلیل خطای I/O/seek نرسد. این **پنجرهٔ crash طبیعی خود نویسنده** است، نه خرابی غیرعادی: هر فریم با طول ۰ آغاز و بعداً patch می‌شود.
+- **ساخت ورودی:** دو راه. (الف) دست‌ساز: هدر ۳۳۲ بایتیِ خود نویسنده + یک `00dc` با طول ۰ + N بایت payload + یک `.idx` خالی. (ب) هارنس env-knob: `AV_OUT=/v.avi AV_W=64 AV_H=48 AV_FRAMES=1 AV_OUT_BYTES=512 FI_FAIL_SEEK_NTH=1` (فایل `/tmp/audit/sweep/O512_S1_fail_seek/v.avi`).
+- **بازتولید:**
+  ```
+  ls -l v.avi                # 1875 بایت: هدر + 00dc(len=0) + 1551 بایت payload
+  VideoFile_Repair("v.avi",&n)
+  ```
+- **انتظار در برابر واقعیت:**
+  - انتظار: payloadِ آخرین چانک بازیابی شود (دقیقاً همان قراردادی که خوانندهٔ صوت پیاده کرده: `src/fm_audio.c:1160-1176`) یا دست‌کم `Repair` بگوید داده از دست رفت.
+  - واقعیت: `FM_OK`، `n = 0`، و فایل از **۱۸۷۵ → ۳۳۲ بایت** truncate شد؛ `pic_ok=0`، `snd_ok=0`. dump بایتی در `/tmp/audit/probe/o512s1/v.avi` وجود دارد.
+- **علت:** هم‌ارز پنداشتن «طول = ۰» با «چیزی بعد از این نیست»، و truncate بی‌قیدوشرط تا `pos`.
+- **اصلاح پیشنهادی:**
+  1. در walk، اگر `len == 0u` و `pos + 8 < size`: طول را بازیابی کن — برای **آخرین** چانک تا EOF، یا با پویش برای چهارcc معتبر بعدی (`00dc`/`01wb`)؛ سپس `vw_index_add` با طول بازیابی‌شده و ادامه بده.
+  2. اگر هیچ فریمی بازیابی نشد (`w->frames == 0`) **truncate نکن** و `FM_ERR_CORRUPTED` برگردان.
+  3. هرگز وقتی بایت‌هایی را که نتوانسته‌ای حساب کنی دور می‌ریزی `FM_OK` نده؛ تعداد بایت دورریخته را در `frames`/یک پارامتر خروجی گزارش کن.
+- **آزمون رگرسیون:** در `test/video_save_tests.h`: فایل با `00dc(len=0)` + payload واقعی بساز → `VideoFile_Repair` → assert `r==FM_OK && *frames==1 && size >= pos+8+payload` و اینکه `Video_Open`/`Video_ReadFrame` آن فریم را برمی‌گرداند؛ و سناریوی دوم (هیچ payload) → assert `r==FM_ERR_CORRUPTED` و اندازهٔ فایل بدون تغییر.
+
+### SAV-NEW-02 — `Close` بعد از خطا `.idx` را پاک می‌کند و ترمیم را غیرممکن می‌سازد
+- **شدت:** MEDIUM (از دست رفتن *مسیر* بازگردانی؛ داده در `.avi` باقی است)
+- **اجزا/مکان:** `src/fm_video_enc.c` — `VideoFileWriter_Close:850` → `:1156` (`vw_release(w, FM_FALSE, NULL); /* closes and removes "<path>.idx" */`)؛ `vw_release:355` با `File_Delete(w->index_path)` در `:366-369`؛ مصرف‌کننده: `VideoFile_Repair:986` که بدون `.idx` → `-3`.
+- **پیش‌شرط:** هر خطای نوشتن/flush/seek/close/truncate در طول ضبط، سپس `Close`.
+- **بازتولید و شواهد:** در ۳۸ سناریوی sweep، **۳۷ مورد** `Repair = -3` می‌دهد. دو شاهد گویا:
+  - `W3_fail_write`: خود `.avi` کاملاً معتبر است (۶ pic + 6 aud، **۰ اشکال اوراکل**، پلیر کتابخانه ۶ فریم) ولی `Repair = -3`.
+  - `D2` (`FI_FAIL_WRITE_NTH=4`): `Repair=-3`، `Video_Open=-12`، ffmpeg ۰ فریم. با ساختن یک `v.avi.idx` **خالی** → `Repair=FM_OK/6 فریم`، اوراکل ۰ اشکال، پلیر ۶، ffmpeg ۶ (`/tmp/audit/probe/d2b`).
+  - در مقابل `C1`/`C2` (رهاشده بدون `Close`) که `.idx` زنده است → `Repair=FM_OK/11 فریم`. ⇒ خودِ مکانیزم ترمیم سالم است؛ فقط ماشه‌اش حذف می‌شود.
+- **انتظار در برابر واقعیت:** انتظار — `.idx` یک فایل کاری موقت است ولی تنها نشانهٔ «این ضبط ناتمام است» است؛ یا `Close` آن را نگه دارد یا `Repair` بتواند بدون آن کار کند. واقعیت — `Repair` به `FM_ERR_NOT_FOUND` ختم می‌شود و فراخوان هیچ راهی برای دانستنِ «داده قابل نجات بود» ندارد.
+- **علت:** `vw_release` با `remove_video=FALSE` هم `index_path` را بی‌قیدوشرط پاک می‌کند.
+- **اصلاح پیشنهادی:** (۱) در مسیر خطا `.idx` را نگه دار (یا به `<path>.bad` تغییر نام بده تا قابل شناسایی بماند)؛ یا بهتر (۲) `VideoFile_Repair` را طوری تغییر بده که در نبود `.idx` آن را **بسازد** — خود تابع از قبل هدر را در offsetهای ثابت ۲۲۴/۳۲۴ پارس می‌کند و `movi` را می‌یابد، پس فقط به یک `File_Open` با حالت create برای `.idx` نیاز دارد؛ و (۳) در این حالت `-3` را با `FM_ERR_CORRUPTED` جایگزین کن تا «یافت نشد» از «قابل ترمیم نیست» جدا شود.
+- **آزمون رگرسیون:** تزریق خطای نوشتن → `Close` → `File_Exists("<path>.idx")` باید true بماند؛ سپس `VideoFile_Repair` → `r==FM_OK && frames>0`.
+
+### SAV-NEW-03 — سیگنال ناموفق/موفق نادرست در پایان ضبط صوتی
+- **شدت:** MEDIUM
+- **اجزا/مکان:** `src/fm_audio_enc.c` — `AudioFileWriter_Close:~2100-2170`؛ `pcm_finish` و `adpcm_finish` که طول‌ها را **حتی بعد از خطا** patch می‌کنند و همان خطا را برمی‌گردانند؛ `flac_finish` (patch STREAMINFO در offset ۸)؛ `writer_encode` و `EncOut` (`encout_put` فقط وقتی بافر پر شد می‌نویسد). قرارداد مستند: `include/fm_audio.h:249-267`.
+- **پیش‌شرط:** (الف) شکست `File_Flush`/`File_Close` در آخرین لحظه؛ (ب) هر خطای نوشتن پیش از پر شدن بافر خروجی.
+- **بازتولید و شواهد:**
+  - `F_wav_flush1`، `F_wav_close`، `F_flac_flush1`، `F_flac_close`، `F_flac_w5`: `close = -6` در حالی که اندازه/اوراکل/ffmpeg/کتابخانه **همه** فایل را کامل و بیت‌به‌بیت درست می‌دانند (۴۰۰۰۰ از ۴۰۰۰۰ فریم، `dmax = 0`، ۰ اشکال).
+  - `F_wav_w1`: `WriteFrames` برای **۱۱۷۷۶ فریم** `FM_OK` برگرداند در حالی که فایل **۰ بایت** است (accepted ≠ written).
+  - در سطح API بالاتر: `simple_audio_rec_fail` (`top_api/simple_audio.h:2113-2123`) «saving the music stopped» را log می‌کند و `SimpleAudio_RecStop` (`:2292-2314`) همان خطا را به برنامه می‌دهد ⇒ برنامه‌ای که روی خطا فایل را پاک/بازنام‌گذاری/تلاش مجدد کند، یک ضبط سالم را دور می‌ریزد.
+- **انتظار در برابر واقعیت:** انتظار — فراخوان بتواند «کامل ولی sync نشد» را از «بریده» تفکیک کند. واقعیت — هر دو `FM_ERR_IO`.
+- **علت:** تنها کانال گزارش، `FM_Result` است؛ هیچ خروجیِ «چند بایت/فریم واقعاً روی کارت است» وجود ندارد.
+- **اصلاح پیشنهادی:** افزودن پارامتر خروجی اختیاری به `Close` (مثلاً `uint64_t *frames_on_card`) یا کد خطای متمایز (`FM_ERR_NOT_SYNCED`)؛ و مستندسازی صریح اینکه `WriteFrames` فقط خطاهای سطح انکودر را گزارش می‌کند و ماندگاری در `Close` تعیین می‌شود.
+- **آزمون رگرسیون:** تزریق شکست flush در آخرین فراخوانی → assert فایل باز می‌شود، `total_frames == frames_written` و خروجی جدید «روی کارت» برابر همان است؛ و تزریق شکست نوشتن اول → assert `accepted_frames` گزارش‌شده در برابر `File_Size` **تفکیک‌پذیر** است.
+
+### SAV-NEW-04 — `fact` نوشته می‌شود ولی خوانده نمی‌شود: طول ADPCM بیشتر از واقع
+- **شدت:** LOW/MEDIUM
+- **اجزا/مکان:** نویسنده `src/fm_audio_enc.c:583` (`memcpy(h+40,"fact",4)`) و padding آخرین بلوک (`:855-870`، با کامنت «the exact length is in the "fact" chunk»). خواننده `src/fm_audio.c:284-300` (`wav_adpcm_total_frames` فقط از `data_size`/`block_align`) و `:1229-1234`. بررسی جامع: `grep -rn '"fact"' src/ include/ top_api/` → **فقط** نویسنده.
+- **پیش‌شرط:** هر ضبط IMA-ADPCM که تعداد فریم‌هایش مضرب صحیح `block_frames` نیست (یعنی تقریباً همیشه).
+- **بازتولید:** ۴۰۹۶ فریم mono در ۸ kHz به ADPCM → `fact = 4096`، ولی `Audio_GetInfo().total_frames = 4545` و ffmpeg هم ۴۵۴۵ فریم/۵.۰۵ ثانیه برای ۵.۰۰ ثانیه صدا. stereo: ۴۰۹۶ → ۶۱۲۳. کوتاه: ۱۰۰ فریم → ۵۰۵.
+- **انتظار در برابر واقعیت:** انتظار — طول گزارش‌شده برابر فریم‌های نوشته‌شده (یا دست‌کم `fact` معتبر شمرده شود). واقعیت — تا یک بلوک بیشتر (≈۴۶ ms در ۴۴.۱ kHz، ≈۶۳ ms در ۸ kHz) و دنباله‌ای که تکرار فریم آخر است.
+- **علت:** padding مستندِ نویسنده + بی‌توجهی خواننده به `fact`.
+- **اصلاح پیشنهادی:** خوانندهٔ WAV هنگام `format == 0x11/0x02` ابتدا `fact` را بخواند و اگر معتبر بود (`fact <= (data_size/block_align)*block_frames`) همان را در `total_frames` بگذارد؛ مشتق‌سازی فعلی به‌عنوان fallback بماند.
+- **آزمون رگرسیون:** نوشتن N فریم ADPCM → assert `total_frames == N` و assert `Audio_Read` در مجموع دقیقاً N فریم برمی‌گرداند (نه N+pad).
+
+### SAV-NEW-05 — دنبالهٔ غیرقابل‌دسترس در WAV رهاشده و نبودِ `AudioFile_Repair`
+- **شدت:** LOW (محدودیت قرارداد + شکاف قابلیت)
+- **اجزا/مکان:** `src/fm_audio_enc.c` — `encout_put`/`enc_bytes_on_card`/`enc_patch` و checkpoint هر `FM_AUDIO_ENC_SYNC_BYTES` (پیش‌فرض ۲۶۲۱۴۴ بایت، `:56-62`)؛ خواننده `src/fm_audio.c:1160-1176` (قاعدهٔ طول-۰). نبودِ معادلِ `VideoFile_Repair` برای صوت.
+- **پیش‌شرط:** ضبط صوتی که بدون `Close` رها شود (قطع برق/reset/کشیدن کارت) و از آخرین checkpoint بزرگ‌تر باشد.
+- **بازتولید:** `X2_wav_abandon_big` (`AU_FRAMES` بزرگ + `_exit(9)`): فایل ۳۹۳۲۱۶ بایت؛ هدر `RIFF=262136` و `data=262100` (آخرین checkpoint) در حالی که ۱۳۱۰۷۲ بایت PCM معتبر بعد از آن است؛ اوراکل «131072 byte(s) after the last complete chunk»؛ کتابخانه `total_frames=131050` و همان‌جا می‌ایستد؛ ffmpeg هم ۱۶.۳۸ ثانیه. ⇒ ~۴ ثانیه صدای ضبط‌شده روی کارت است ولی هیچ خواننده‌ای آن را پخش نمی‌کند.
+- **انتظار در برابر واقعیت:** انتظار — معادل صوتیِ `VideoFile_Repair`، یا توسعهٔ قاعدهٔ طول-۰ به حالت «طول < بایت‌های موجود». واقعیت — داده تا checkpoint قابل دسترسی است و بقیه خاموش می‌ماند.
+- **علت:** قاعدهٔ بازیابی فقط برای `chunk_size == 0` فعال می‌شود، نه برای `chunk_size < موجودی`.
+- **اصلاح پیشنهادی:** افزودن `AudioFile_Repair(path, &frames)` که طول `data`/`RIFF` (و `fact` برای ADPCM) را تا بزرگ‌ترین مضرب صحیح frame که واقعاً در فایل هست افزایش دهد؛ یا گسترش همان قاعدهٔ `fm_audio.c:1160-1176` به حالت `data_size < file_size - data_offset`.
+- **آزمون رگرسیون:** نوشتن K بایت، `_exit(9)` در میانه، سپس repair → assert `total_frames` برابر بزرگ‌ترین تعداد فریم کاملِ موجود است و بیت‌به‌بیت با منبع می‌خواند.
+
+### SAV-NEW-06 — قلوهای `top_api/` هیچ‌جا کامپایل/آزمون نمی‌شوند *(نقص تست)*
+- **شدت:** LOW (امروز بی‌اثر، فردا خاموش)
+- **شواهد:** `tools/save_examples_host_test.c:40` → `#include "examples_save_media.h"` که با `-Iexamples` (`Makefile:495`) به `examples/` حل می‌شود؛ `tools/check_examples.sh` فقط `for f in examples/*.h` را پیمایش می‌کند؛ در کل `Makefile` تنها ارجاع به `top_api/` خط **۴۸۲** است (`-DAUD5_TEST_TOP_API=1` برای `audio_record_with_tap.h`).
+- **بازتولید:** تغییر `top_api/examples_save_media.h:1044` از `>` به `>=` → `make -j2 saveexamplestest` → «Results: all PASS»، exit 0.
+- **وضعیت امروز:** ۳۴ هدر در هر دو پوشه وجود دارد؛ پس از نرمال‌سازی مسیرهای include، **همه** یکسان‌اند جز اختلاف **ترتیب include/خط خالی** در `audio_record_with_tap.h` (۶ خط)، `qspi_driver.h` (۲ خط)، `simple_audio.h` (۷ خط). یعنی drift معنایی امروز وجود ندارد — ولی هیچ مکانیزمی آن را کشف نمی‌کند.
+- **اصلاح پیشنهادی:** افزودن `tools/check_twins.sh` که `diff <(sed 's#\.\./top_api/##g' top_api/X) examples/X` را برای همهٔ جفت‌ها انجام دهد و هر اختلاف غیراز مسیر/ترتیب include را FAIL کند؛ و یک build دومِ `saveexamplestest` با include از `top_api/`.
+
+### SAV-NEW-07 — شاخهٔ «cut» در جبرانِ آفست شروع صدا/تصویر پوشش تست ندارد *(نقص تست)*
+- **شدت:** LOW
+- **شواهد:** همان اندازه‌گیری‌های ردیف SAV2-03 در §۴: دو mutation در شاخهٔ else بازماندند (`>` → `>=` و `* 2u` → `* 3u`؛ هر دو «all PASS» exit 0)، کنترل در شاخهٔ then گرفته شد (exit 2، ≥۴ FAIL)، و instrumentation نشان داد شاخهٔ else فقط **۲** بار و هر دو با `snd_at == pic_at` اجرا می‌شود ⇒ `cut_skip` همواره ۰ محاسبه می‌شود و هر مقدار دیگری هم همان نتیجه را می‌داد.
+- **اثر:** کل منطق «صدا زودتر از تصویر شروع می‌شود» (`save_demo_video.cut_skip = (pic_at - snd_at) * 2u`) بدون آزمون است؛ یعنی همان بخشی که SAV2-03 اصلاح کرد.
+- **اصلاح پیشنهادی:** افزودن سناریویی با `sound_ms` کوچک‌تر از زمان تصویرِ منبع، به‌گونه‌ای که `snd_at < pic_at` شود، و assert `cut_skip == (pic_at - snd_at) * 2` به‌همراه تراز نهایی فریم‌ها.
+
+---
+
+## ۶) فرض‌ها و موارد بررسی‌نشده (جدا از یافته‌های قطعی)
+
+**فرض‌های صریح**
+1. build هدف، **۳۲ بیتی** با `size_t`/`uintptr_t` ۳۲ بیتی است؛ من این را با `zig cc -target x86-linux-musl` (ilp32) سنجیدم نه با toolchain واقعی ARM. فرض بر این است که `zig` همان اندازهٔ انواع را می‌دهد.
+2. **هیچ ISR واقعی، DMA واقعی، I2S واقعی یا SD واقعی** در این ممیزی وجود ندارد. `AudioDma_HalfCallback`/`FullCallback` با دست فراخوانی شدند؛ «قطع برق» = `_exit(9)` فرآیند روی POSIX؛ «کارت پر» = تزریق در `FM_FS`. هیچ‌کدام **نتیجهٔ سخت‌افزاری** نیستند.
+3. فرض شد بافرهای DMA هم‌تراز و در دسترسِ DMA هستند و `FM_Cache_CleanForDma` روی برد درست عمل می‌کند (روی host no-op است).
+4. فرض شد `FM_Alloc` هرگز `NULL` برنگرداند جز در مواردی که خودم تزریق کردم؛ کمبود حافظهٔ واقعیِ mid-recording به‌طور سیستماتیک sweep نشد.
+5. پیکربندی پیش‌فرض کامپایل در نظر گرفته شد: `FM_AUDIO_ENC_OUT_BYTES=16384`، `FM_FLAC_ENC_BLOCK=4096`، `FM_AUDIO_ENC_SYNC_BYTES=262144`، `FM_VIDEO_ENC_OUT_BYTES=32768`، `FM_VIDEO_ENC_QUALITY=80`، `FM_VIDEO_ENC_MAX_BYTES=0x7F000000`، `FM_VIDEO_ENC_SYNC_BYTES=1048576`.
+6. اوراکل‌های دست‌ساز من پیش از استفاده **کالیبره** شدند: اوراکل AVI روی `ref_mjpeg.avi` ساختهٔ ffmpeg (۴۶۷۰۲ بایت) → ۰ اشکال، و اوراکل صوت روی `wave`/ffmpeg → بیت‌به‌بیت. دو خطای شناخته‌شدهٔ اوراکل خودم که در نتایج لحاظ شده‌اند: (الف) بررسی «fact ≤ blocks» بیش از حد سخت‌گیرانه است (بلاک آخر pad می‌شود) و (ب) مقایسهٔ bit-exact برای mixdown/up-mix معنا ندارد.
+
+**بررسی‌نشده (کدخوانی شد ولی اجرا نشد)**
+- انکودرهای ثبت‌شوندهٔ MP3/Vorbis/Opus (`Audio_RegisterEncoder`) — در این build فعال نیستند.
+- مسیر **FMRV** در `SimpleVideo_Rec*`: فقط بازبینی کد (Write → `FM_ERR_UNSUPPORTED`، `RecStop` → صف‌کردن `SV_CMD_REC_STOP`)؛ هیچ اجرای end-to-end.
+- glue برد (`board/`، CubeMX/HAL واقعی) و `main.c` — فقط `tools/halstub`.
+- `littlefs` و FatFS واقعی به‌عنوان محیط ضبط (فقط build/سوئیت).
+- چندبازیگری/چندmount همزمان (دو `FM_VideoFileWriter` روی یک مسیر، یا ضبط همزمان صوت+ویدیو با دو mount).
+- تبدیل‌کننده‌ها (`Convert*`) در حضور خطای میانی — فقط مسیر موفق.
+
+**ظن‌ها (نه یافتهٔ قطعی)**
+- **SAV3-04** باز است؛ روی host قابل تصمیم‌گیری نیست (§۴، §۱۰).
+- **`SimpleVideo_RecFrames()`** (`top_api/simple_video.h:3841-3843`) برای یک ضبطِ فعالِ FMRV مقدار ۰ برمی‌گرداند در حالی که `RecActive()` درست است ⇒ ناسازگاری قرارداد API. با اجرای واقعی آزمون نشد (مسیر FMRV).
+- **`vw_parse_header`** فقط layout خود نویسنده را از روی offsetهای ثابت ۲۲۴/۳۲۴ می‌شناسد ⇒ AVI بیگانه قابل ترمیم نیست؛ این یک محدودیت قرارداد است، نه باگ.
+- **`A14` drift** (۰.۰۶۲۵٪) یک محدودیت مستندات است: الگوی `rate/fps` وقتی `fps ∤ rate` نمونه کم می‌کند.
+
+---
+
+## ۷) Mutation، شکاف‌های تست، محدودیت‌های مدل cut
+
+### ۷-۱) نتایج mutation (همه در درخت ایزوله، همه بازگردانی و با `cmp` تأیید شد)
+| # | هدف | mutation | نتیجه | قضاوت |
+|---|---|---|---|---|
+| M1 | SAV3-01 | حذف `$(FLAGS_STAMP)` از `Makefile:309` (`src/%.o`) | ۳ FAIL، rc=1 | **گرفته شد** ✅ |
+| M2 | SAV2-03 | `top_api/examples_save_media.h:1044` `>` → `>=` | all PASS، rc=0 | **بازماند** ❌ (و اساساً کامپایل نمی‌شود → SAV-NEW-06) |
+| M3 | SAV2-03 | `examples/examples_save_media.h:1044` `>` → `>=` | all PASS، rc=0 | **بازماند** ❌ (معادل در مسیرهای آزموده‌شده) |
+| M4 | SAV2-03 | `examples/…:1051` `* 2u` → `* 3u` | all PASS، rc=0 | **بازماند** ❌ → SAV-NEW-07 |
+| M5 | کنترل | `examples/…:1046` `pic += snd_at - pic_at + 2u` | FAILURES، rc=2، ≥۴ FAIL | **گرفته شد** ✅ (حساسیت آزمون ثابت شد) |
+| M6 | SAV2-02 | `-DFM_AUDIO_ENC_SYNC_BYTES=0 -DFM_VIDEO_ENC_SYNC_BYTES=0` | 684/684، rc=0 | طبق طراحی؛ ولی آزمون‌ها *انتظار را ضعیف می‌کنند* نه اینکه recoverability را بسنجند |
+
+### ۷-۲) شکاف‌های تست
+1. **هیچ آزمونی `snd_at < pic_at` را نمی‌سازد** (SAV-NEW-07) ⇒ کل شاخهٔ `cut_skip` بی‌پوشش.
+2. **قلوهای `top_api/` کامپایل نمی‌شوند** جز `audio_record_with_tap.h` (SAV-NEW-06).
+3. **آزمون SAV3-04 فقط `underrun != 0` را assert می‌کند** (`tools/audio_record_host_test.c:1149-1150`) و محتوای فایل ضبط‌شده را نمی‌سنجد ⇒ گم‌شدن نمونه را نمی‌تواند تشخیص دهد.
+4. **`VideoFile_Repair` در حالت `VSV_SYNC_BYTES == 0` اصلاً رمزگشایی نمی‌شود** (`test/video_save_tests.h:1307-1317`: `(void)v; (void)decoded;`) ⇒ بازگشتِ SAV2-02 در این پیکربندی نامرئی است.
+5. **هیچ آزمونی `fact` را به `total_frames` ربط نمی‌دهد** (SAV-NEW-04) و هیچ آزمونی چانک با طول-۰ را به `Repair` نمی‌دهد (SAV-NEW-01).
+6. **exit code هارنس‌ها بازتاب خطای داخلی نیست** (`B4` با `first_err=-16 TOO_LARGE` ولی exit 0) — برای CI باید JSON/خروجی متنی خوانده شود، نه exit code.
+
+### ۷-۳) محدودیت‌های مدل cut (صریح)
+- «قطع برق» = `_exit(9)` فرآیند. روی POSIX، بافرهای stdio و cache صفحه **ممکن است** بعد از `_exit` هم روی دیسک بنشینند؛ بنابراین این مدل نسبت به قطع برق واقعی **خوش‌بینانه‌تر** است. هیچ ادعایی دربارهٔ دوام واقعی SD/FAT انجام نمی‌شود.
+- تزریق خطا در سطح `FM_FS` است، پس «نوشتن کوتاه» و «شکست flush» رفتار درایور FAT/SD را مدل نمی‌کنند (مثلاً write-amplification یا torn page).
+- `File_Flush` در بک‌اند POSIX = `fsync`؛ روی FatFS معادلش `f_sync` است و هزینه/زمان‌بندی‌اش کاملاً متفاوت — نتیجهٔ «چند checkpoint در ثانیه» به برد منتقل نمی‌شود.
+- مدل stall (SAV3-04) فراخوانی بازگشتی `AudioDma_HalfCallback` است؛ خود آزمون مخزن هم می‌گوید این «measurement of any real SD-card latency» نیست.
+
+---
+
+## ۸) شمارش‌ها و روش dedup
+
+**موارد قبلی (۱۰ ردیف بررسی‌شده)**
+| دسته | تعداد | موارد |
+|---|---|---|
+| تأییدشده اصلاح‌شده | **4** | SAV3-01، SAV3-02، SAVE1-F3، CLOSED_LOOP_HOST (بازاجرا) |
+| ناقص / ریسک باقی | **3** | SAV2-02، SAV2-03 (اصلاح هست، پین نیست)، SAV3-03 (NOTE هست، rc همچنان 1) |
+| باز | **1** | SAV3-04 |
+| پس‌گرفته‌شده | **1** | SAV2-01 |
+| NOT RUN | **1** | FATFS_RECORDER_FOLLOWUP / LOW-01 |
+
+**یافته‌های جدید یکتا (۷)**
+| شدت | تعداد | موارد |
+|---|---|---|
+| HIGH | **1** | SAV-NEW-01 |
+| MEDIUM | **2** | SAV-NEW-02، SAV-NEW-03 |
+| LOW/MEDIUM | **1** | SAV-NEW-04 |
+| LOW | **1** | SAV-NEW-05 |
+| نقص تست (جدا از یافتهٔ محصول) | **2** | SAV-NEW-06، SAV-NEW-07 |
+
+**محصول در برابر تست:** ۵ یافتهٔ محصول (SAV-NEW-01..05) + ۲ نقص تست (SAV-NEW-06/07) — طبق خواستهٔ شما این دو دسته جدا شمرده شده‌اند.
+
+**روش dedup**
+1. هر یافته با سه کلید شاخص‌گذاری شد: `path:function` + «کلاس اثر» (از دست رفتن داده / سیگنال نادرست / طول نادرست / پوشش تست) + «لایهٔ زنجیره» (انکودر، کانتینر، بک‌اند، API بالا).
+2. مواردی که چند سناریوی مختلف یک ریشه داشتند ادغام شدند: مثلاً `W1..W6_fail_write`، `*_short_write`، `F*_fail_flush`، `S*_fail_seek`، `C_fail_close`، `T_fail_truncate`، `BIG_*` و `IDX_*` همه یک ریشه دارند (حذف `.idx`) ⇒ **یک** یافته (SAV-NEW-02) با ۳۷ شاهد، نه ۳۷ یافته.
+3. هم‌پوشانی با سایر حوزه‌های ممیزی: SAV-NEW-01/02 در حوزهٔ «video writer/repair» و SAV-NEW-03/04/05 در حوزهٔ «audio writer/reader» قرار می‌گیرند؛ هر دو با حوزهٔ «بازیابی/checkpoint» اشتراک دارند. **مالک احتمالی برای dedup:** نویسنده/ترمیم‌کنندهٔ کانتینر (`fm_video_enc.c` و `fm_audio_enc.c`)، نه لایهٔ `Simple*`.
+4. SAV-NEW-06/07 به حوزهٔ «زیرساخت تست» تعلق دارند و باید با یافته‌های مشابهِ سایر حوزه‌ها (مثلاً پوشش‌نداشتن `top_api/` برای دیگر مثال‌ها) ادغام شوند.
+
+---
+
+## ۹) مقایسهٔ قبل/بعد فقط در شرایط برابر
+
+**مقایسهٔ معتبر (همان ابزار، همان ورودی، همان پیکربندی):**
+| سنجه | قبل (V4) | بعد (این دور، `ddd1b3e0`) | شرایط برابر؟ |
+|---|---|---|---|
+| `make test` | گزارش‌نشد (V4) | 684/684 | — (در V4 سنجیده نشده بود) |
+| `make tsan` | 663/663 | **689/689**، ۰ هشدار | ⚠️ شمار آزمون‌ها رشد کرده (۶۶۳→۶۸۹) ⇒ **مقایسهٔ خام بی‌معناست**؛ هر دو «۰ شکست، ۰ هشدار TSan» هستند و این تنها جملهٔ قابل استناد است |
+| `check_32bit.sh` | (V4: PASS) | 685/685 PASS با zig 0.17.1 | ⚠️ toolchain متفاوت ممکن است؛ فقط «PASS در برابر PASS» |
+| mutation SAV3-01 | ۳ FAIL | ۳ FAIL | ✅ برابر |
+| closed_loop.py | PASS (seeds 0/3/17) | PASS (3 ورودی قطعی) | ✅ برابر؛ اما MAEها را با اعداد V4 مقایسه نکنید مگر با همان seedها |
+
+**مقایسهٔ نامعتبر (صراحتاً رد می‌شود):** شمار «۵۷/۵۷ پیکربندی ماتریس» در V4 با شمار «۳۳×۵ + ۳۸ + ۷۲» در این دور **قابل مقایسه نیست** — ابعاد ماتریس، اوراکل‌ها و معیارهای پذیرش متفاوت‌اند. طبق خواستهٔ شما، اعداد خامِ پوششِ متفاوت هیچ چیز را اثبات نمی‌کنند؛ بنابراین هیچ ادعای «بهبود/افت پوشش» نسبت به V4 نمی‌کنم. آنچه قابل استناد است تنها مواردی است که **همان mutation یا همان سناریو** در دو دور اجرا شده (ردیف‌های ✅ بالا).
+
+---
+
+## ۱۰) موارد NOT RUN و محدودیت host در برابر دستگاه واقعی
+
+### NOT RUN (با دلیل)
+| مورد | دلیل |
+|---|---|
+| `make cmake` و `tools/check_cmake.sh` | **cmake نصب نیست** |
+| مقایسهٔ clang / `-Werror` با clang | **clang نصب نیست** |
+| `gcc -m32` | **بدون multilib** → با zig 0.17.1 جایگزین شد (اجرا شد) |
+| FatFS واقعی به‌عنوان مدیوم ضبط، `get_fattime()` قوی/ضعیف، `FM_FATFS_PROVIDE_DISKIO=1` | هیچ مدیای FatFS/SD واقعی در محیط نیست؛ فقط buildهای host (`make fatfs` PASS) |
+| `closed_loop.py --asan` | نیاز به rebuild با `FM_USE_OPUS_LIB=1` و libopus؛ حالت بدون `--asan` اجرا شد (PASS) |
+| انکودرهای MP3/Vorbis/Opus ثبت‌شده | در این build انکودری ثبت نشده → `FM_ERR_UNSUPPORTED` طبق قرارداد |
+| مسیر FMRV و `SimpleVideo_RecStop` ناهمگام | بدون اجرای end-to-end؛ فقط بازبینی کد |
+| برد واقعی، میکروفون واقعی، DMA/I2S واقعی، قطع برق واقعی | طبق صورت مسئله **ممنوع** است؛ همهٔ شواهد host-only هستند |
+| چند mount / چند بازیگر همزمان | بک‌اند host تک-mount است (`FS_Mount("/", &fs)`) |
+
+### محدودیت‌های host در برابر دستگاه واقعی (صریح)
+1. **زمان‌بندی وجود ندارد.** روی host هیچ deadline واقعی نیست؛ بنابراین SAV3-04 و هر پرسش «آیا نوشتن کارت به نصفهٔ بعدی DMA می‌رسد؟» **اصلاً قابل پاسخ نیست**. آنچه اندازه‌گیری شد فقط *ساختار* است (۵ نوشتن/۸۱۹۲۰ بایت داخل `refilling[]`)، نه latency.
+2. **`_exit(9)` ≠ قطع برق.** cache صفحه و journal فایل‌سیستم ممکن است داده را نگه دارند؛ مدل من خوش‌بینانه‌تر از واقعیت است. هیچ ادعایی دربارهٔ دوام SD انجام نمی‌شود.
+3. **`File_Flush` = `fsync`** روی POSIX؛ روی FatFS = `f_sync` با هزینهٔ کاملاً متفاوت ⇒ «دورهٔ checkpoint بهینه» از این نتایج **قابل استخراج نیست**.
+4. **bypass شدن cache/DMA.** `FM_Cache_CleanForDma` روی host no-op است؛ کلاس خطاهای هم‌ترازی/کش که فقط روی Cortex-M7 دیده می‌شود اینجا دیده نمی‌شود.
+5. **اندازهٔ انواع.** build ۳۲ بیتی با zig/musl انجام شد، نه با toolchain واقعی ARM؛ رفتار `size_t` ۳۲ بیتی تأیید شد ولی ABI/alignment خاص ARM نه.
+6. **هیچ ادعای «صفر باگ» نمی‌شود.** نبودِ یافته در یک پیکربندی به معنای نبودِ نقص در پیکربندی‌های آزموده‌نشده نیست.
+
+---
+
+## پیوست A — ابزارهای ساخته‌شده در این دور (همه در کپی ایزوله)
+| فایل | نقش |
+|---|---|
+| `/tmp/audit/hx/avi_gen.c` + ۵ باینری واریانت | سازندهٔ AVI با knobهای محیطی + تزریق خطا در `FM_FS` + `_exit(9)`؛ یک خط JSON قصد چاپ می‌کند |
+| `/tmp/audit/hx/aud_gen.c` + باینری | معادل صوتی (WAV/ADPCM/FLAC/AUTO)؛ `AU_OPEN_ONLY=1` فایل را با `Audio_Open` خود کتابخانه می‌خواند؛ `.src` خام برای مقایسه |
+| `/tmp/audit/hx/avi_oracle.py` | اعتبارسنج مستقل RIFF/AVI، کالیبره روی خروجی ffmpeg؛ chunk با طول صفر را اشکال می‌گیرد |
+| `/tmp/audit/hx/aud_oracle.py` | پارسر مستقل WAV و FLAC بومی + مقایسه با decode ffmpeg |
+| `/tmp/audit/hx/matrix.py` / `sweep.py` / `amatrix.py` | راننده‌های ماتریس → `matrix.json` (۳۳×۵)، `sweep.json` (۳۸)، `amatrix.json` (۷۲) |
+| `/tmp/audit/hx/sav304` (`tools/audit_sav304_measure.c`) | هارنس SAV3-04: شمارش نوشتن‌های داخل refill + مقایسهٔ نمونه‌به‌نمونهٔ capture با منبع |
+| `/tmp/audit/log_*.txt` | لاگ کامل هر اجرا (asan, tsan, 32bit, saveex, audiorec, taps, cache, videohooks, hwjpeg, usbmsc, ports, fatfs, closed_loop, mutationها، check_*ها) |
+
+**نقص شناخته‌شدهٔ ابزار خودم:** ستون `ffmpeg_frames` در `sweep.json` برای همهٔ ۳۸ سناریو `None` است، چون `-v error` خط `frame=` را پنهان می‌کند؛ شمار فریم‌های ffmpeg در probeهای موردی (که بدون `-v error` اجرا شدند) معتبر است و در §۳-۳ از همان‌ها استفاده شد. همچنین knob `FI_TARGET_IDX` تأیید نشد (موارد `IDX_*` اعدادی یکسان با موارد بدون target دادند) ⇒ به‌عنوان شاهد **استناد نشد**.
+
