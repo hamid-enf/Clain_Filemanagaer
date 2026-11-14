@@ -53,7 +53,7 @@ File_Move("/config/backup.txt", "/backup.txt", NULL, NULL);
 | Typed binary I/O with explicit endianness | ✅ |
 | Buffer-based JSON parser/writer with dotted paths and arrays | ✅ |
 | CSV, Binary and JSONL data logger | ✅ |
-| Atomic replace and flush-backed safe append | ✅ |
+| Temporary-file replace and flush-backed append (backend-dependent guarantees) | ✅ |
 | Cooperative asynchronous copy, move, scan and delete | ✅ |
 | CRC16, CRC32 and checksums | ✅ |
 | File/memory stream abstraction | ✅ |
@@ -798,13 +798,15 @@ it was, mind it when the object lives on a small stack.
 
 `File_Move`, `File_SafeReplace`/`File_AtomicWrite`, `Json_SaveFile`,
 `Text_Replace`, `File_Insert`/`File_DeleteRange`/`File_ReplaceRange` and
-the crash-safe logger all rely on **rename-over** semantics: renaming
+the logger all rely on **rename-over** semantics: renaming
 onto an existing file replaces it.  This is provided uniformly by every
 adapter — POSIX (native), FMFS, LittleFS and FatFS; a non-empty
 directory destination is refused with `FM_ERR_NOT_EMPTY`.  The FatFS
-adapter moves a destination file aside (`~fmrn.tmp` in the same folder),
-renames, and only then deletes it, so a rename that fails loses nothing;
-and because FAT names ignore case, `a.txt` -> `A.TXT` (or a long name ->
+adapter moves a destination file aside using a free `~fmXX.tmp` name in
+the same folder, renames, and then removes the aside. Existing names are
+never deleted to make room. The sequence is not atomic: power loss or a
+failed rollback can leave the old file under the aside name; filesystem
+and device flush semantics also determine durability. Because FAT names ignore case, `a.txt` -> `A.TXT` (or a long name ->
 its 8.3 alias) is recognised as the same entry and simply gets the new
 name.  A same-path rename is a no-op, and adapters that
 do not implement rename at all are handled safely: `File_Move` /

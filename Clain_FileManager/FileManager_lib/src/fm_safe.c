@@ -1,8 +1,10 @@
 /*
  * FileManager - Unified Embedded File & Storage Framework
- * fm_safe.c - Crash-safe / power-loss safe operations
+ * fm_safe.c - Replacement and flush-backed operations
  *
- * Atomic replace: write "<path>.fm_tmp", flush, rename over target.
+ * Replace: write "<path>.fm_tmp", flush, rename over target. Crash
+ * atomicity and durability depend on the filesystem and storage backend;
+ * FatFS rename-over, for example, requires multiple operations.
  * Recovery: File_Recover removes stale temp files.
  */
 
@@ -141,9 +143,8 @@ FM_Result File_AtomicWrite(const char *path, const void *data, size_t size)
 
 FM_Result File_SafeAppend(const char *path, const void *data, size_t size)
 {
-    /* Crash-safe append without read-modify-write: append directly but
-     * flush immediately so a power loss cannot silently lose the record
-     * beyond the filesystem's own journaling guarantees. */
+    /* Append directly and flush. A partial record or lost metadata remains
+     * possible on power loss; guarantees depend on the filesystem/device. */
     FM_File *f;
     FM_Result r;
 

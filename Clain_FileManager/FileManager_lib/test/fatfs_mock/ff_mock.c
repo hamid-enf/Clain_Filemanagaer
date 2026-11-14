@@ -32,6 +32,8 @@ static FATFS *g_vol[FF_VOLUMES];
 static int g_locks;     /* objects open now: the _FS_LOCK table */
 static MockFile g_files[MOCK_MAX_FILES];
 static int g_fail_mounts;
+static int g_fail_rename_temps;
+void ff_mock_fail_rename_temps(int on) { g_fail_rename_temps = on; }
 
 void ff_mock_fail_mounts(int on)
 {
@@ -43,6 +45,7 @@ void ff_mock_reset(void)
     memset(g_files, 0, sizeof(g_files));
     memset(g_vol, 0, sizeof(g_vol));
     g_locks = 0;
+    g_fail_rename_temps = 0;
 }
 
 /* One more object open.  Real FatFS shares one entry between several
@@ -363,6 +366,7 @@ FRESULT f_rename(const TCHAR *path_old, const TCHAR *path_new)
     if (fr != FR_OK) return fr;
     src = find_file(path_old);
     if (src == NULL) return FR_NO_FILE;
+    if (g_fail_rename_temps && strstr(path_new, "~fm") != NULL) return FR_EXIST;
     dst = find_file(path_new);
 #ifdef MOCK_FATFS_MODERN
     /* from R0.13: the new name may be the object itself (a change of

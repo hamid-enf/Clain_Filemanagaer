@@ -314,7 +314,7 @@ Directory_Copy("/qspi/project", "/backup/project", NULL, NULL);
 | `Json_ReadString(&doc, key, out, size)` | مقدار متنی یک کلید | `doc` | `out` |
 | `JsonWriter_...` | JSON می‌سازد | مقدارها | بافر متن |
 | `Logger_Init / Start / Write / Stop` | لاگر CSV با چرخش فایل | آرایهٔ `float` | فایل‌های پوشهٔ لاگ |
-| `File_SafeReplace(path, data, size)` | جایگزینی امن: با قطع برق، یا فایل قدیم می‌ماند یا جدید | بافر | فایل |
+| `File_SafeReplace(path, data, size)` | جایگزینی با فایل موقت؛ اتمی‌بودن و دوام به فایل‌سیستم وابسته است، در FatFS تضمین قطع برق ندارد | بافر | فایل |
 | `File_Recover(path)` | بعد از قطع برق، فایل موقتِ جامانده را پاک می‌کند | – | – |
 
 - `Text_Replace` / `Text_InsertLine` / `Text_DeleteLine` از فایل موقت

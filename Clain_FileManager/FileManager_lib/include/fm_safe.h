@@ -1,11 +1,11 @@
 /*
  * FileManager - Unified Embedded File & Storage Framework
- * fm_safe.h - Crash-safe / power-loss safe operations (optional)
+ * fm_safe.h - Temporary-file replacement and flush-backed operations (optional)
  *
  * Atomic write pattern: write to a temp file, flush, then rename over
- * the target.  On filesystems that support atomic rename-over (POSIX,
- * FatFS with FA_CREATE_NEW semantics handled by the adapter) the
- * target is never observed in a partially written state.
+ * the target. Atomic visibility and crash durability depend on the
+ * filesystem and device. The FatFS adapter emulates rename-over with
+ * multiple operations; it is not atomic against reset or observers.
  */
 
 #ifndef FM_SAFE_H
@@ -15,7 +15,7 @@
 
 FM_BEGIN_DECLS
 
-/* Atomically replace path with data. */
+/* Replace via a flushed temporary file; see backend limits above. */
 FM_Result File_SafeReplace(const char *path, const void *data, size_t size);
 FM_Result File_SafeWriteText(const char *path, const char *text);
 FM_Result File_AtomicWrite(const char *path, const void *data, size_t size);

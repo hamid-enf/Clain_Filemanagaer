@@ -717,6 +717,63 @@ int main(void)
                        "wrong content, source still there, or a temp file left");
         }
 
+        TEST("FILE7: rename preserves unrelated files named like temporary files");
+        {
+            FM_Result q = File_WriteText("/sd/~fmrn.tmp", "old sentinel");
+            if (q == FM_OK) q = File_WriteText("/sd/~fm00.tmp", "new sentinel 0");
+            if (q == FM_OK) q = File_WriteText("/sd/~fm01.tmp", "new sentinel 1");
+            if (q == FM_OK) q = File_WriteText("/sd/newsrc.txt", "source");
+            if (q == FM_OK) q = File_WriteText("/sd/newdst.txt", "target");
+            if (q == FM_OK) q = File_Rename("/sd/newsrc.txt", "/sd/newdst.txt");
+            memset(buf, 0, sizeof(buf));
+            if (q == FM_OK) q = File_ReadText("/sd/newdst.txt", buf, sizeof(buf), NULL);
+            if (q == FM_OK && strcmp(buf, "source") != 0) q = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = File_ReadText("/sd/~fmrn.tmp", buf, sizeof(buf), NULL);
+            if (q == FM_OK && strcmp(buf, "old sentinel") != 0) q = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = File_ReadText("/sd/~fm00.tmp", buf, sizeof(buf), NULL);
+            if (q == FM_OK && strcmp(buf, "new sentinel 0") != 0) q = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = File_ReadText("/sd/~fm01.tmp", buf, sizeof(buf), NULL);
+            CHECK_TRUE(q == FM_OK && strcmp(buf, "new sentinel 1") == 0,
+                       "rename deleted or modified another file");
+            (void)File_Delete("/sd/~fmrn.tmp");
+            (void)File_Delete("/sd/~fm00.tmp");
+            (void)File_Delete("/sd/~fm01.tmp");
+            (void)File_Delete("/sd/newdst.txt");
+        }
+
+        TEST("FILE7: source named like legacy temp replaces an existing file");
+        {
+            FM_Result q = File_WriteText("/sd/~fmrn.tmp", "source data");
+            if (q == FM_OK) q = File_WriteText("/sd/newdst.txt", "old target");
+            if (q == FM_OK) q = File_Rename("/sd/~fmrn.tmp", "/sd/newdst.txt");
+            memset(buf, 0, sizeof(buf));
+            if (q == FM_OK) q = File_ReadText("/sd/newdst.txt", buf, sizeof(buf), NULL);
+            CHECK_TRUE(q == FM_OK && strcmp(buf, "source data") == 0,
+                       "source data lost");
+            (void)File_Delete("/sd/~fmrn.tmp");
+            (void)File_Delete("/sd/newdst.txt");
+        }
+
+        TEST("FILE7: exhausted rename temp names preserve both files");
+        {
+            FM_Result q = File_WriteText("/sd/newsrc.txt", "source");
+            FM_Result rr = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = File_WriteText("/sd/newdst.txt", "target");
+            if (q == FM_OK)
+            {
+                ff_mock_fail_rename_temps(1);
+                rr = File_Rename("/sd/newsrc.txt", "/sd/newdst.txt");
+                ff_mock_fail_rename_temps(0);
+            }
+            if (q == FM_OK) q = File_ReadText("/sd/newsrc.txt", buf, sizeof(buf), NULL);
+            if (q == FM_OK && strcmp(buf, "source") != 0) q = FM_ERR_INTERNAL;
+            if (q == FM_OK) q = File_ReadText("/sd/newdst.txt", buf, sizeof(buf), NULL);
+            CHECK_TRUE(q == FM_OK && rr == FM_ERR_EXISTS && strcmp(buf, "target") == 0,
+                       "collision exhaustion changed source or target");
+            (void)File_Delete("/sd/newsrc.txt");
+            (void)File_Delete("/sd/newdst.txt");
+        }
+
         TEST("MED-08: copying a file onto itself in another case is refused");
         r = File_WriteText("/sd/self.txt", "self");
         if (r == FM_OK)

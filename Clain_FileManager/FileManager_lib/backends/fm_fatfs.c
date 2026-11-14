@@ -716,16 +716,28 @@ static FM_Result fatfs_rename(FM_FS *fs, const char *old_path, const char *new_p
         char aside[FM_PATH_MAX];
         FILINFO fi;
         size_t cut = strlen(fnew);
+        unsigned slot;
+        static const char hex[] = "0123456789abcdef";
 
         while (cut > 0u && fnew[cut - 1u] != '/') cut--;
-        if (cut + sizeof("~fmrn.tmp") > sizeof(aside))
+        if (cut + sizeof("~fm00.tmp") > sizeof(aside))
         {
             return FM_ERR_TOO_LARGE;
         }
         memcpy(aside, fnew, cut);
-        memcpy(aside + cut, "~fmrn.tmp", sizeof("~fmrn.tmp"));
-        (void)f_unlink(aside);          /* left from a reset, if at all */
-        fr = f_rename(fnew, aside);
+        memcpy(aside + cut, "~fm00.tmp", sizeof("~fm00.tmp"));
+        /* Never unlink an existing name: it can be a user's file, the
+         * source itself, or a backup left by a failed earlier rename.
+         * FAT rename refuses an occupied destination, so try bounded 8.3
+         * names and reserve one by the rename itself, avoiding a separate
+         * existence-check race.  Exhaustion returns FR_EXIST unchanged. */
+        for (slot = 0u; slot < 256u; ++slot)
+        {
+            aside[cut + 3u] = hex[slot >> 4];
+            aside[cut + 4u] = hex[slot & 15u];
+            fr = f_rename(fnew, aside);
+            if (fr != FR_EXIST) break;
+        }
         if (fr == FR_OK && f_stat(fold, &fi) == FR_OK &&
             f_stat(aside, &fi) == FR_OK && (fi.fattrib & AM_DIR) != 0)
         {

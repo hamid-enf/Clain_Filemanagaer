@@ -166,6 +166,7 @@ FSIZE_t f_tell (FIL* fp);
 void ff_mock_reset(void);
 int  ff_mock_file_count(void);
 int  ff_mock_file_count_on(int vol);    /* files + directories on a drive */
+void ff_mock_fail_rename_temps(int on); /* f_rename to temp -> FR_EXIST */
 void ff_mock_fail_mounts(int on);       /* f_mount(fs != NULL) -> FR_DISK_ERR */
 
 #endif /* FF_MOCK_H */
