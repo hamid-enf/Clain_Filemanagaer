@@ -13,3 +13,5 @@ The adapter now attempts 256 distinct 8.3-compatible `~fmXX.tmp` names and reser
 ## Further leads for the independent audits
 
 The deterministic `<path>.fm_tmp` and backup names used by safe replacement/recovery and other helpers require a separate ownership, collision, concurrent-use and crash-recovery review; no claim is made here that every such path is safe. Path aliasing, VFS mount concurrency, other backends, real storage failure sweeps, portable ABI/alignment and the scope of any future non-ARM port remain independent audit topics. The prompts ask the auditors to test rather than infer these properties. No claim of defect-free or exhaustive coverage is possible from one host pass.
+
+`make check` subsequently passed 658/658 core tests and the FatFS host checks; in that invocation CMake and 32-bit were skipped because the tools were not installed. `make tsan` passed 663/663 with zero warnings. These whole-project checks do not substitute for the requested focused file audits.
