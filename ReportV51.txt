@@ -1,0 +1,810 @@
+# گزارش فاز ۱ — حسابرسی مستقل زیرسیستم فایل و ذخیره‌سازی (Clain FileManager)
+**شناسه حسابرس:** A (مستقل). این گزارش فقط کار همین حسابرس است و به نتایج دو حسابرس دیگر ارجاع نمی‌دهد.
+---
+## مشخصات پایه (این بخش باید در ابتدای گزارش باشد)
+| مورد | مقدار |
+|---|---|
+| مخزن | `https://github.com/hamid-enf/Clain_Filemanagaer` |
+| شاخه‌ای که درخواست شده بود | `arena/ba6a87b3-clain-filemanagaer` |
+| کامیت دقیق بررسی‌شده | `78662328e727910eda54cac0b584c32710f24976` (`7866232 Preserve overlapping source in Path_Join`) |
+| روش تأیید کامیت | `git rev-parse HEAD` در کلون تازه `/tmp/fm_audit` → همان هش؛ `git cat-file` در clone موجود کاربر پاسخ «bad object» داد، پس همه‌چیز در کلون تازه انجام شد |
+| تاریخ حسابرسی | 2026-11-14 |
+| OS | Debian GNU/Linux 12 (bookworm), kernel `Linux 6.1.158+ x86_64` |
+| CPU / RAM / disk | 2 هسته، 3.8 GiB RAM، 19 GiB آزاد در `/` |
+| کامپایلر | gcc (Debian 12.2.0-14+deb12u1) 12.2.0 |
+| make | GNU Make 4.3 |
+| Python | 3.11.2 |
+| cmake | 4.4.4 (با `pip install --user cmake` نصب شد؛ در ابتدا نبود) |
+| zig | 0.17.1 (با `pip install --user ziglang` نصب شد؛ برای ساخت ۳۲ بیتی) |
+| ابزارهای **غایب** | `clang` (هیچ نسخه‌ای نیست)، `valgrind`، `cppcheck`، `clang-tidy`، `gcc -m32` (بدون `Scrt1.o`/`crti.o` کار نمی‌کند) |
+| کد منبع | `/tmp/fm_audit/Clain_FileManager/FileManager_lib` — همه ساخت‌ها/آزمون‌ها/پروب‌ها فقط در کلون‌های `/tmp`؛ مخزن اصلی `/home/user/Clain_Filemanagaer` دست‌نخورده (`git status --porcelain` خالی) |
+| پیکربندی پیش‌فرض میزبان | `FM_PATH_MAX=160`، `FM_NAME_MAX=64`، `FM_FS_HANDLE_SIZE=24`، `FM_MAX_OPEN_FILES=8`، `FM_MAX_OPEN_DIRS=4`، `FM_DIR_MAX_DEPTH=16`، `FM_INTERNAL_BUFFER_SIZE=512`، کش ۵۱۲×۱۶، `FM_FMFS_MAX_ENTRIES=32`، `FM_USE_SAFE_WRITE=1`، `FM_USE_CACHE=1`، `FM_USE_POSIX=1`، `FM_USE_THREADS=0`، `FM_USE_FATFS=0` |
+> کامیت هدف حتی اگر شاخه بعداً حرکت کرده باشد همان `7866232` است. در clone موجود در workspace (`745f81c`) این کامیت وجود نداشت؛ بررسی نشد و جایگزین هم نشد — کلون تازه ساخته شد.
+---
+## ۱. خلاصه تصمیم (فارسی)
+**حکم کوتاه: کتابخانه در مسیرهای «خوش‌رفتار» (happy path) فایل/دایرکتوری/مسیر/متن/JSON/کپی پایدار و مدل‌سازگار است، اما در سه ناحیه باگ تأییدشده دارد و یک ناحیه «قرارداد نانوشته» که می‌تواند داده کاربر را نابود کند.**
+خلاصه دقیق:
+1. **داده کاربر می‌تواند پاک شود (بالا) — FILE-A-01.** نام‌های موقت قطعی `<path>.fm_tmp` در چند API هستند و کتابخانه پیش از استفاده آن‌ها را **حذف یا truncate** می‌کند. اگر کاربر (یا ابزار بیرونی) فایلی به همین نام ساخته باشد، با `File_Copy`، `Json_SaveFile`/`File_SafeReplace`، `File_Recover`، `Text_Replace`/`Text_InsertLine`/`Text_DeleteLine` و `Logger_Recover` از بین می‌رود. در POSIX، FMFS و LittleFS (روی RAM) بازتولید شد. این «باگ» نیست که فقط با کرش رخ دهد: بدون هیچ خطا و با گزارش موفقیت رخ می‌دهد.
+2. **`FM_Transfer_CopyEx` مقصد موجود را در شکست نابود می‌کند (بالا) — FILE-A-02.** مستند `File_Copy` صریحاً می‌گوید مقصدِ موجود باید دست‌نخورده بماند، و `File_Copy` همین کار را می‌کند؛ اما `FM_Transfer_Copy`/`CopyEx`/`Move` در هر خطا `File_Delete(dst_path)` می‌زنند. با تزریق خطای I/O و همچنین با پر بودن حجم (FMFS 16K) بازتولید شد: `-5` یا `-6` و مقصد کامل ناپدید می‌شود. این تناقض رفتار بین دو API هم‌خانواده است.
+3. **قرارداد «موقعیت بعد از truncate» روی بک‌اندها یکسان نیست و مستند خلاف آن را می‌گوید (متوسط/بالا) — FILE-A-03.** README می‌گوید «جایگاه را همان‌جا که بود می‌گذارد، روی همه بک‌اندها». اندازه‌گیری: POSIX و LittleFS موقعیت را نگه می‌دارند (نوشتن بعدی یک «حفره صفر» می‌سازد)، FMFS و FatFS آن را به اندازه جدید clamp می‌کنند (`min(pos,size)`). ناسازگاری فقط نظری نیست: طول و محتوای فایل نهایی متفاوت می‌شود.
+4. **`File_Open(READ|TRUNCATE)` فایل را خالی می‌کند (متوسط) — FILE-A-04.** روی POSIX (به‌خاطر `O_TRUNC` بدون بررسی حالت) و FMFS و LittleFS بازتولید شد. یک فلگ «فقط خواندن + پاک‌کردن» است که در عمل یعنی بازکردن برای خواندن می‌تواند داده را نابود کند؛ در هیچ هدر/مستندی این رفتار ممنوع یا مستند نشده.
+5. **`Directory_Rewind` در شکست، handle را آزاد می‌کند و اشاره‌گر کهنهٔ کاربر زنده می‌شود (متوسط) — FILE-A-05.** اگر دایرکتوریِ باز با `Directory_Delete` حذف شود و بعد `Rewind` صدا زده شود، `Rewind` مقدار `-3` می‌دهد، `d->used` صفر می‌شود و اسلات به pool برمی‌گردد. `Directory_Open` بعدی **همان آدرس** را می‌دهد؛ `Directory_Close` روی اشاره‌گر کهنه، handle زنده جدید را می‌بندد (استفاده پس از آزادسازی منطقی). در POSIX و FMFS بازتولید شد.
+6. **JSON استاندارد نیست (متوسط/کم) — FILE-A-06.** `"a\u0041b"` به `au0041b` تبدیل می‌شود (بک‌اسلش دور ریخته می‌شود، UTF-16 رمزگشایی نمی‌شود)، `\q` به‌عنوان `q` قبول می‌شود، و نویسنده عمق ~۷ دارد در حالی که پارسر ۶۴. داده‌ای که با نویسنده ساخته می‌شود سالم است؛ ولی فایل JSON «استاندارد» از بیرون می‌تواند بی‌صدا تغییر معنا بدهد.
+7. **یک باگ «خطای بی‌صدا» در نوشتن کوتاه (متوسط) — FILE-A-07.** اگر بک‌اند کمتر از `len` بنویسد و خطا ندهد (که در قرارداد `FM_FSOps` ممکن و مستند نشده است)، `File_Write` مقدار `FM_OK` و `wr < len` می‌دهد. `Text_WriteLine` (fm_text.c:112–133) این را «کامل» فرض می‌کند و خط نیمه‌نوشته را با موفقیت گزارش می‌دهد: خط ۱۰ کاراکتری به `"0123\n"` تبدیل شد و `Text_WriteLine` مقدار `FM_OK` داد. `Text_Replace` هم خط کوتاه‌شده را در فایل نهایی می‌نویسد و `FM_OK` می‌دهد (سمت دیگر: `File_WriteAll`/`File_Copy`/`File_Insert` این حالت را درست مدیریت می‌کنند).
+8. **رفتار درست/پایدار (تأییدشده و ارزش گفتن دارد):** کپی/جابه‌جایی روی خود، کپی دایرکتوری در زیرشاخه خودش، حذف/تغییرنام فایلِ باز (`FM_ERR_BUSY`)، محافظت نام >`FM_NAME_MAX`، شمارش/لیست‌کردن، مدل مسیر (`Path_Join`/`Path_Normalize`) در ۵۰۰۰۰۰ حالت تصادفی مطابق مدل مستقل، و مدل محتوا/درخت در ۹۰۰ اجرای تصادفی روی POSIX و FMFS بدون اختلاف.
+**محدوده اطمینان:** این گزارش «بدون باگ» را تضمین نمی‌کند. تست‌ها روی میزبان x86 (POSIX و RAM) انجام شد؛ هیچ نتیجه‌ای درباره رفتار واقعی SD/DMA/USB/کش/قطع برق روی سخت‌افزار نیست. بک‌اند FatFS فقط با mock و مجموعه تست خودش اجرا شد (نه کارت واقعی). LittleFS فقط روی RAM فرمت‌شده اجرا شد.
+**تصمیم پیشنهادی:** مورد ۱ و ۲ (نابودی داده) و ۵ (use-after-free منطقی) پیش از انتشار بعدی اصلاح شوند؛ ۳ و ۴ نیاز به تصمیم قراردادی دارند (یا تغییر کد یا تغییر مستند)؛ ۶ و ۷ با اولویت متوسط.
+---
+## ۲. کامیت، محیط، ابزار، وضعیت workspace
+- **کامیت:** `78662328e727910eda54cac0b584c32710f24976` (تأییدشده با `git rev-parse HEAD`).
+- **workspace اصلی:** `/home/user/Clain_Filemanagaer` روی شاخه `arena/dc9c4328-clain-filemanagaer` در `745f81c…`؛ **دست نخورد** (هیچ کامیت/پوش/PR، هیچ فایل منبعی تغییر نکرد؛ `git status --porcelain` خالی).
+- **کلون بررسی:** `/tmp/fm_audit` (کامیت `7866232`, detached HEAD, sourceها پاک). کپی‌های کاری جداگانه: `/tmp/fm_asan`, `/tmp/fm_tsan`, `/tmp/fm_m32`, `/tmp/fm_mut` (mutation), `/tmp/fm_cmake` (cmake+matrix), `/tmp/fm_check` (make check), `/tmp/fm_prefix` (`aec191b` برای مقایسه قبل/بعد).
+- **پروب‌ها:** `/tmp/aud/probe1.c … probe44.c`، هر کدام در CWD مجزا (`/tmp/aud/cwdN`) و متصل به `libfilemanager.a` با `gcc -std=gnu11 -Iinclude -DFM_HOST_BUILD=1 -D_GNU_SOURCE`.
+- **لاگ‌ها:** `/tmp/logs/{baseline_test,asan,tsan,m32,fatfs,cmake,matrix,check}.log` (پایدار نیستند؛ اعداد در همین گزارش ثبت شده‌اند).
+- **تغییرات در مخزن اصلی:** هیچ.
+### ماتریس اجراشده (همه در کپی‌ها، پشت‌سرهم و بدون موازی‌سازی)
+| هدف | فرمان | نتیجه | لاگ |
+|---|---|---|---|
+| آزمون پایه | `make test` | **658/658 PASS**، exit 0 | `baseline_test.log` |
+| ASan+UBSan | `make asan` | **658/658 PASS**، «sanitizer active (39 symbols)»، هیچ خطای sanitizer | `asan.log` |
+| TSan (threads) | `make tsan` | **663/663 PASS**، «ThreadSanitizer warnings: 0»، exit 0 | `tsan.log` |
+| ۳۲-بیتی | `sh tools/check_32bit.sh` (zig cc) | **659/659 PASS**، exit 0 | `m32.log` |
+| FatFS mock | `sh test/build_fatfs_host.sh` | **51/51، 51/51، 51/51، 56/56 PASS** | `fatfs.log` |
+| CMake | `make cmake` | **۱۳ پیکربندی OK** | `cmake.log` |
+| ماتریس سوئیچ‌ها | `make matrix` | **۵۷ پیکربندی، ۰ ناموفق** | `matrix.log` |
+| `make check` کامل | `make check` | **exit 0** (شامل asan, ports, fatfs, cmake, 32bit) | `check.log` |
+هیچ‌کدام از این‌ها «همه‌چیز درست است» نیست: همه مجموعه‌های موجود از قبل این باگ‌ها را پوشش نمی‌دهند و همین موضوع در بخش ۷ (mutation) عددی نشان داده شده است.
+---
+## ۳. جدول پوشش (API / بک‌اند / پیکربندی / تست / اوراکل / نتیجه)
+ستون «نتیجه»: PASS = مطابق قرارداد یا مدل مستقل؛ FINDING = باگ/تناقض؛ PARTIAL = بخشی پوشش داده شد؛ NOT-RUN = اجرا نشد و دلیل ذکر شده.
+### ۳.۱ API فایل
+| API | بک‌اندهای آزمون‌شده | نوع آزمون | نتیجه |
+|---|---|---|---|
+| `File_Open`/`OpenEx`, `File_Close` | POSIX, FMFS, LittleFS(RAM) | پروب + مدل | PASS؛ دو بار close → `-21`؛ اما اشاره‌گر کهنه پس از بازاستفاده اسلات → **FILE-A-08 (کم)** |
+| `File_Read`/`Write`/`Append` | POSIX, FMFS, shim کوتاه‌نویس | پروب | **FILE-A-07** برای نوشتن کوتاه بی‌خطا |
+| `File_Seek`/`Tell`/`Size`/`EOF` | POSIX, FMFS | پروب | PASS (seek به END، tell، size، EOF) |
+| `File_Truncate` (کوچک/بزرگ/صفر) | POSIX, FMFS, LittleFS, FatFS(code) | پروب + مدل | **FILE-A-03** (اختلاف clamp/keep)؛ رشد با صفر پر می‌شود (PASS) |
+| `File_Open` با TRUNCATE در حالت فقط‌خواندن | POSIX, FMFS, LittleFS | پروب | **FILE-A-04** |
+| `File_Create`/`Delete`/`Rename`/`Move`/`Exists`/`GetInfo`/`SizeOf` | POSIX, FMFS | پروب + مدل درخت | PASS (به‌جز موارد زیر)؛ حذف/تغییرنام فایل باز `-8` PASS |
+| `File_Copy`/`File_Move` | POSIX, FMFS | پروب + مدل + تزریق خطا | PASS روی موفق؛ **FILE-A-01** (`.fm_tmp`) و **FILE-A-09** (مسیر بلند = مستقیم و بدون staging) |
+| `File_Insert`/`DeleteRange`/`ReplaceRange` | POSIX, FMFS | مدل تصادفی ۶۰۰ اجرا | PASS محتوایی؛ **FILE-A-10** (خطای تو-در-تو/مسیر بلند) |
+| `File_ReadAll`/`WriteAll`/`AppendAll`/`ReadText`/`WriteText`/`AppendText` | POSIX, FMFS | پروب + مدل | PASS (بافر کوچک → `-16` بدون truncate خاموش) |
+| `File_Flush` | POSIX, FMFS | غیرمستقیم (کپی/ایمن) | PASS |
+### ۳.۲ API دایرکتوری
+| API | بک‌اند | نتیجه |
+|---|---|---|
+| `Directory_Create`/`Delete`/`Exists`/`GetInfo` | POSIX, FMFS | PASS؛ `Create` روی فایلِ موجود `-23` PASS |
+| `Directory_Read`/`Open`/`Close` | POSIX, FMFS | PASS؛ ورودی >`FM_NAME_MAX` → `-16` و **شکست کل لیست** (مستند) |
+| `Directory_Rewind` | POSIX, FMFS | **FILE-A-05** (آزادسازی handle در شکست) + **FILE-A-11** (LastError ست نمی‌شود) |
+| `Directory_List`/`ScanRecursive`/`Count`/`Size`/`Copy`/`Move`/`DeleteRecursive` | POSIX, FMFS | PASS روی درخت معتبر؛ `DeleteRecursive` با نام بلند → `-16` و بازماندن ناقص (مستند)؛ **FILE-A-12** (walk بعد از خطا) |
+| callback لغو | POSIX | PASS (`-24` و visited=1) |
+| کپی/جابه‌جایی در زیرشاخه خود | POSIX | PASS (`-1`) |
+### ۳.۳ مسیر
+| تابع | آزمون | نتیجه |
+|---|---|---|
+| `Path_Join` | مدل مستقل، ۳۰۰۰۰۰ حالت تصادفی شامل `out==a`, `out==b`, `a==b`, همپوشانی جزئی، یک آرنا | **۰ اختلاف** |
+| `Path_Normalize` | مدل مستقل، ۲۰۰۰۰۰ رشته تصادفی + جدول ثابت | **۰ اختلاف** |
+| `Path_GetFilename`/`GetDirectory`/`GetExtension` | جدول ثابت (پروب) | PASS |
+| مرزهای `FM_PATH_MAX`/`FM_NAME_MAX` | نام ۶۳ vs ۶۴؛ مسیر ۱۵۰..۱۶۶ | PASS (۶۴ و ۱۶۰ رد می‌شوند، ۶۳/۱۵۹ قبول) |
+| NUL/رشته خالی/`/`/`/.` | پروب | PASS (`""` → `-2`، `/` → `-22`) |
+| symlink و عبور از mount | POSIX | PASS در سطح رشته (نه sandbox؛ محدودیت میزبان) |
+### ۳.۴ داده (طول/آفست/EOF/چند handle)
+| سناریو | نتیجه |
+|---|---|
+| طول صفر read/write/append | PASS (`FM_OK`, 0 bytes) |
+| خواندن در/پس از EOF | PASS (`-15`, rd=0) |
+| خواندن `len=0` در میان فایل | PASS (`FM_OK`, rd=0) |
+| ترانکیت به 4 GiB−1 / 1 TiB | POSIX OK (sparse)؛ FMFS `-5` |
+| چند handle + append | PASS (`FILE-02` تست موجود، mutation M9 کشته شد) |
+| نوشتن کوتاه بی‌خطا | **FILE-A-07** |
+| فایل خالی، خط بلند، متن ناقص | PASS/مستند (`-16` برای خط >۵۱۲/۱۰۲۴) |
+| JSON خراب | `-17` PASS؛ **FILE-A-06** برای escape/عمق |
+| دودویی truncate‌شده | PASS (`Binary_ReadU*` → `-15` می‌دهد) |
+| حفظ فایل قدیمی هنگام خطا | `File_Copy`/`File_Insert`/`Json_SaveFile` PASS؛ **FILE-A-02** برای `FM_Transfer_*`؛ **FILE-A-09** برای مسیر بلند |
+| کپی/جابه‌جایی روی خود | PASS (`-1`) |
+| هم‌زمانی/چند-هندل کش | PASS (خواننده پس از truncate توسط هندل دوم داده تازه می‌بیند) |
+### ۳.۵ بک‌اندها
+| بک‌اند | پوشش | محدودیت |
+|---|---|---|
+| POSIX | کامل (پروب‌ها + مدل ۳۰۰/۳۰۰/۱۵۰) | فقط میزبان؛ symlink/paths میزبان |
+| FMFS (RAM) | کامل (نوشتن/کپی/تراکت/پر شدن) | RAM، بدون قطع برق/فلش واقعی |
+| LittleFS (RAM) | mount، رایت، READ\|TRUNCATE، truncate-pos، `.fm_tmp` | فقط روی RamDisk فرمت‌شده؛ کارت واقعی نه |
+| FatFS | فقط `build_fatfs_host.sh` + خواندن کد (`fatfs_file_truncate`, `fatfs_flags`, `fatfs_file_open`) + mock | **هیچ کارت SD واقعی؛ هیچ آزمون جدید کد FatFS در این حساب** |
+| RamDisk / MockStorage | در تست پایه و FMFS | قطع برق شبیه‌سازی نشد (جز تست‌های خودشان) |
+### ۳.۶ اوراکل‌ها
+| اوراکل | ماهیت | پوشش |
+|---|---|---|
+| `path_oracle.c` | مدل مستقل C از `Path_Join` (کپی بایت‌به‌بایت با احتیاط همپوشانی) | ۳۰۰۰۰۰ حالت |
+| `path_oracle2.c` | مدل مستقل `Path_Normalize` (پشته‌ای، بدون کد کتابخانه) | ۲۰۰۰۰۰ رشته |
+| `probe30.c` | مدل آرایه بایتی از عملیات فایل + مقایسه کامل محتوا/اندازه بعد هر op | ۳۰۰ seed × ۶۰ op روی POSIX و ۳۰۰×۶۰ روی FMFS → **۰ اختلاف** |
+| `probe31.c` | مدل درخت (فایل/دایرکتوری) + لیست مرتب هر دایرکتوری + اندازه هر فایل بعد هر op | ۱۵۰×۴۰ روی POSIX و ۱۵۰×۴۰ روی FMFS → **۰ اختلاف** |
+> هیچ‌کدام از این‌ها «کتابخانه در برابر خودش» نیست؛ مدل‌ها در C جدا نوشته شدند و فقط قرارداد API را می‌دانند.
+### ۳.۷ پیکربندی‌های اجراشده
+`make matrix` ۵۷ ترکیب (شامل `FM_USE_IMAGE/VIDEO/AUDIO` on/off، `FM_USE_THREADS` با pthread/freertos/cmsis، `FM_USE_CACHE=0`, `FM_FMFS_POWER_SAFE=0/2`, `FM_BUFFERS=SMALL`, `FM_FILE_FORCE_BOUNCE`) — **همه PASS**. `make cmake` ۱۳ پیکربندی — **همه PASS**. پیکربندی‌ای که در آن مسیرهای `.fm_tmp` یا `FM_Transfer_*` با خطای ذخیره‌سازی آزمایش شوند وجود ندارد (بخش ۹).
+---
+## ۴. یافته‌های تأییدشده (FILE-A-xx)
+> هر مورد: فایل/تابع/خط در کامیت هدف، پیش‌شرط، اثر واقعی، بازتولید دقیق، انتظار/واقعیت با مبنای قرارداد یا اوراکل، علت ریشه‌ای، وصله پیشنهادی (اعمال‌نشده)، تست بازگشتی، ریسک سازگاری.
+### FILE-A-01 — نام موقتِ `<path>.fm_tmp` داده کاربر را حذف/خالی می‌کند
+- **شدت:** بالا (از دست رفتن دادهٔ کاربر بدون خطا)
+- **کامپوننت:** `File_Copy`, `File_SafeReplace`/`Json_SaveFile`, `File_Recover`, `Text_Replace`/`Text_InsertLine`/`Text_DeleteLine`, `Logger_Recover`
+- **فایل/تابع/خط:**
+  - `src/fm_file.c:2199` (`#define FM_FILE_TMP_SUFFIX ".fm_tmp"`), `src/fm_file.c:2255–2262` (`tmp`, `staged`, `work_path`), `src/fm_file.c:2269` (`File_Open(work_path, WRITE|CREATE|TRUNCATE)`), `src/fm_file.c:2312` (`File_Delete(work_path)` در شکست)
+  - `src/fm_safe.c:80–87` («Clean a stale temp from a previous crash» → `File_Delete(tmp)`), `src/fm_safe.c:114`, `src/fm_safe.c:124`
+  - `src/fm_safe.c:177–201` (`File_Recover` → `File_Delete(tmp)`)
+  - `src/fm_text.c:256–269` (`text_tmp_name`), `src/fm_text.c:294–312` (`Text_Replace` باز کردن tmp با TRUNCATE)
+  - `src/fm_logger.c:905–963` (`Logger_Recover` → wildcard `<base>*.fm_tmp` → `File_Delete`)
+- **پیش‌شرط:** فایلی با نام `<dst>.fm_tmp` (یا `<base>anything.fm_tmp`) وجود دارد و کاربر یکی از APIهای بالا را صدا می‌زند. هیچ فایل بازی روی آن مقصد لازم نیست.
+- **اثر واقعی:** فایل کاربر یا خالی می‌شود یا حذف؛ فراخوانی `FM_OK` برمی‌گرداند. اگر آن فایل داده واقعی بوده (مثلاً ویرایشگر فقط یک فایل با پسوند `.fm_tmp` داشته) داده از بین می‌رود.
+- **بازتولید دقیق:**
+  1. POSIX: `File_WriteText("/keep.txt","ORIGINAL-DOC")`; `File_WriteText("/keep.txt.fm_tmp","USER-DATA-20-BYTES!!!")`; سپس `File_Copy("/src.txt","/keep.txt",NULL,NULL)` → `FM_OK` و `/keep.txt.fm_tmp` دیگر وجود ندارد (probe8، probe29).
+  2. POSIX: `Json_SaveFile("/cfg.json", ...)` با `/cfg.json.fm_tmp` موجود → حذف شد (probe8).
+  3. POSIX: `File_Recover("/notes.txt")` با `/notes.txt.fm_tmp` موجود → حذف شد (probe8).
+  4. FMFS ۶۴KiB: همان توالی probe29 → فایل کاربر حذف شد (`exists=0`).
+  5. LittleFS روی RamDisk: همان → حذف شد.
+  6. `Text_InsertLine`/`Text_DeleteLine` با TRUNCATE روی `<path>.fm_tmp` باز می‌کنند: هر محتوای موجود خالی می‌شود (probe4/probe16: `Text_Replace` با tmp موجود).
+  7. `Logger_Recover("/logs","sensor")` هر فایل مطابق `sensor*.fm_tmp` را حذف می‌کند (کد؛ data logger خارج از دامنه اجرایی این حساب نبود ولی مسیر حذف از همان `File_Delete` است).
+- **انتظار vs واقعیت:** انتظار (قرارداد): «فایل مقصد موجود حفظ می‌شود» (fm_file.h:139–146) و «نام موقت مالِ خود کتابخانه است». واقعیت: کتابخانه نام موقت را مالک می‌داند و بدون بررسی مالکیت پاک می‌کند. مبنا: `include/fm_file.h:140–143`، `src/fm_safe.c:80` (خودِ کامنت اعتراف می‌کند «Clean a stale temp»)، و اصل «فایل کاربر با نام دلخواه». اوراکل: مدل محتوایی (نام موقت جزو فضای نام کاربر است).
+- **علت ریشه‌ای:** فضای نام موقت با فضای نام کاربر یکسان است و هیچ نشانه مالکیت/نسل (unique suffix + marker + owner check) ندارد؛ `File_SafeReplace` قبل از نوشتن، وجود نام را «آب‌ریخت قبلی» تفسیر می‌کند.
+- **وصله پیشنهادی (اعمال نشده):**
+  1. نام موقت یکتا با شناسه تصادفی/نسل: `<path>.fmk-<pid/tick>-<rand>.tmp` + بررسی «آیا فایل مقصد وجود دارد» قبل از حذف، و **هرگز** حذف فایل موجود بدون اثبات مالکیت (مثلاً header داخلی کوچک `FMK1` + طول/CRC) — یا
+  2. `File_SafeReplace` اگر `<path>.fm_tmp` از قبل هست، `FM_ERR_EXISTS` بدهد و کاربر با `File_Recover` صریح پاک کند — یا
+  3. حداقل: پیش از `File_Delete(tmp)`، اندازه/`mtime` و یک فایل نشانگر `<path>.fm_tmp.owner` بررسی شود.
+  برای `Logger_Recover` هم قبل از حذف، مهر مالکیت (پسوند حاوی شناسه logger) بررسی شود.
+- **تست بازگشتی:** سه تست: (a) `File_Copy` روی مقصدی که `<dst>.fm_tmp` از کاربر دارد → `FM_ERR_EXISTS` (یا نام موقت دیگر) و فایل کاربر سالم؛ (b) `Json_SaveFile` همین؛ (c) `File_Recover` نباید فایل بدون نشانه مالکیت را حذف کند. قبل از وصله: هر سه FAIL (بازتولید شد)؛ بعد: باید PASS.
+- **ریسک سازگاری:** تغییر نام موقت، ابزارهای بیرونی که نام `.fm_tmp` را می‌شناسند (مستند README:848 و GUIDE_FA:321) را می‌شکند؛ گزینه ۲ سازگارتر است (رفتار خطا) اما رفتار «پاک‌سازی آب‌ریخت» را از `SafeReplace` حذف می‌کند. باید در README و GUIDE_FA به‌روزرسانی شود.
+### FILE-A-02 — `FM_Transfer_Copy*` مقصد موجود را در شکست حذف می‌کند
+- **شدت:** بالا (از دست رفتن داده)
+- **کامپوننت:** `fm_transfer.c`
+- **فایل/تابع/خط:** `src/fm_transfer.c:139–247` (`xfer_copy_locked`), `src/fm_transfer.c:236–242` («کپی ناقص را جا نگذار» → `(void)File_Delete(dst_path)`), `src/fm_transfer.c:296–306` (verify failure → `File_Delete(dst_path)`), `src/fm_transfer.c:314–368` (`FM_Transfer_CopyEx`), `src/fm_transfer.c:376–386` (`FM_Transfer_Move`)
+- **پیش‌شرط:** مقصد از قبل وجود دارد (چه با `no_overwrite=0` چه پیش‌فرض)، و کپی وسط کار شکست می‌خورد (خطای I/O، پر شدن حجم، لغو).
+- **اثر واقعی:** `FM_ERR_IO`/`FM_ERR_NO_SPACE`/`FM_ERR_CANCELLED` برمی‌گردد و فایل مقصد **کاملاً ناپدید** می‌شود. اگر مقصد تنها نسخه داده بوده، از بین می‌رود. `FM_Transfer_Move` هم بعد از کپی موفق + شکست `File_Delete(src)` مقصد را نگه می‌دارد (این بخش در کد درست است) اما کپیِ شکست‌خورده مقصد را می‌بَرد.
+- **بازتولید دقیق:**
+  1. POSIX + شیم تزریق خطا روی `file_read` (probe26): `File_WriteText("/keep.bin","ORIGINAL-VALUABLE")`; `fail_after=7`; `FM_Transfer_CopyEx("/s.bin","/keep.bin",NULL,NULL)` → `-6 (I/O error)` و `File_Exists("/keep.bin")==0`. با همین تنظیم `File_Copy("/s.bin","/keep2.bin")` → `-6` و `/keep2.bin` با محتوای قدیمی سالم.
+  2. FMFS 16 KiB (probe6b): `free=221`، src 1999 بایت، `/dst.bin` از قبل `'ORIGINAL-VALUABLE'` → `-5 (NO_SPACE)` و `exists=0`.
+- **انتظار vs واقعیت:** انتظار: `fm_file.h:139–146` برای `File_Copy` می‌گوید «dst موجود محتوای قدیمی را نگه می‌دارد» و `fm_transfer.h:96–101` برای `CopyEx` همین خانواده رفتاری را تداعی می‌کند (فقط درباره «حذف مقصد بعد از verify ناموفق» هشدار می‌دهد، نه در خطای کپی). واقعیت: حذف بی‌قید. مبنا: مستند هدر همان خانواده API + اوراکل مدل محتوایی.
+- **علت ریشه‌ای:** `xfer_copy_locked` مقصد را مستقیم (بدون staging `.fm_tmp`) باز می‌کند و در خطا فقط `dst_path` را می‌شناسد؛ «قبلاً وجود داشت یا نه» را ذخیره نمی‌کند و بنابراین نمی‌تواند بین «فایل ناقصِ خودم» و «فایل قبلی کاربر» تفکیک کند.
+- **وصله پیشنهادی (اعمال نشده):** مانند `File_Copy` از staging استفاده کن (نام یکتا مثل FILE-A-01)، یا حداقل `dst_existed` را قبل از open بگیر و در خطا فقط اگر `!dst_existed` بود حذف کن؛ در حالت verify-fail اما، تخریب را فقط برای مقصد تازه‌ساخته انجام بده و برای مقصد موجود `FM_ERR_CORRUPTED` با پیام «مقصد بازنویسی شد، نسخه قبلی موجود نیست» برگردان (یا از backup استفاده کن). هم‌چنین `FM_Transfer_Move` باید همین قرارداد را رعایت کند.
+- **تست بازگشتی:** سه تست با شیم I/O: `CopyEx` روی dst موجود → dst باید محتوای قدیمی داشته باشد؛ `Copy` با `no_overwrite=0` روی dst موجود و شکست → dst سالم؛ `Move` روی dst موجود و شکست کپی → dst سالم و src دست‌نخورده. قبل از وصله: اولی FAIL (بازتولید شد)؛ بعد: PASS.
+- **ریسک سازگاری:** بعضی کاربران ممکن است روی «پاک‌شدن کپی ناقص» حساب کرده باشند؛ ولی این رفتار با `File_Copy` ناسازگار است و باید یکسان شود. اگر تغییر رفتار «نگه‌داشتن مقصد قدیمی» برای آن‌ها مطلوب نباشد، مستندسازی صریح در `fm_transfer.h` لازم است (حداقل).
+### FILE-A-03 — معنای «موقعیت» بعد از `File_Truncate` روی بک‌اندها یکسان نیست و مستند خلاف آن است
+- **شدت:** متوسط/بالا (اختلاف داده‌ای بین بک‌اندها؛ مستند نادرست)
+- **کامپوننت:** `File_Truncate` (لایه بالا) + `fm_fmfs.c` + `fm_fatfs.c` + `fm_posix_fs.c`/`fm_littlefs.c`
+- **فایل/تابع/خط:** `src/fm_file.c:1505–1539` (فقط `f->pos = min(pos,size)`)، `src/fm_fmfs.c:2733–2778` (`if (handle->pos > size) handle->pos = size`)، `backends/fm_fatfs.c:597–621` (`back = min(back,size)`)، `backends/fm_posix_fs.c:218–224` (`ftruncate` موقعیت را تغییر نمی‌دهد)، LittleFS (`lfs_file_truncate` + بازگرداندن pos اصلی)
+- **پیش‌شرط:** هندل خواندن/نوشتن باز، موقعیت در انتهای فایل، `File_Truncate` به اندازه کوچک‌تر، سپس `File_Write`.
+- **اثر واقعی:** POSIX/LittleFS: موقعیت ۱۰ می‌ماند، نوشتن ۲ بایت در ۱۰ → اندازه ۱۲ و ۶ بایت صفر در وسط (`30 31 32 33 00 00 00 00 00 00 58 59`). FMFS/FatFS: موقعیت ۴ می‌شود، نوشتن → اندازه ۶ (`0123XY`). دو نتیجه کاملاً متفاوت از یک توالی یکسان.
+- **بازتولید دقیق:** probe28/probe27 (POSIX و FMFS در یک باینری، با `FileManager_MountMemory` برای FMFS):
+  ```
+  File_WriteText("/t.bin","0123456789"); f=File_Open("/t.bin",READ|WRITE);
+  File_Seek(f,0,SEEK_END); File_Truncate(f,4);
+  POSIX: tell=10  → File_Write("XY") → tell=12 size=12 bytes=30313233 00×6 5859
+  FMFS : tell=4   → File_Write("XY") → tell=6  size=6  bytes=303132335859
+  ```
+  LittleFS روی RAM (probe17): truncate(4)=OK pos=10 size=4 و پس از write → size=12 `0123......XY`.
+  CSS کد FatFS: `back = f_tell`; `f_lseek(size)`; `f_truncate`; `if (back > size) back = size` → clamp (فقط code، بدون کارت).
+- **انتظار vs واقعیت:** README:826–828: «Truncating ... leaves the position where it was, **on every backend**». واقعیت: ۲ بک‌اند نگه می‌دارند، ۲ بک‌اند clamp می‌کنند. مبنا: مستند + اوراکل مدل (مدل «موقعیت مستقل از truncate» را نگه می‌دارد و FMFS در برابر آن اختلاف می‌دهد).
+- **علت ریشه‌ای:** رفتار `lseek`/`f_truncate` در FatFS و `lfs_file_truncate` در LittleFS به هم شبیه نیست؛ لایه بالا فقط `min` اعمال می‌کند و همان را «نگه‌داشتن» می‌نامد؛ هیچ بک‌اندی pos اصلی را در `file_truncate` نگه نمی‌دارد مگر LittleFS/POSIX.
+- **وصله پیشنهادی (اعمال نشده):** در `File_Truncate` بعد از `fop_truncate` مقدار اصلی pos را در یک متغیر نگه دار و با `fop_seek(pos)` بازگردان (برای همه بک‌اندها)، سپس `f->pos` را همان مقدار بگذار. یا (سازگارتر) مستند را عوض کن: «پس از truncate، موقعیت به `min(pos,size)` می‌رسد» و `f->pos` را هم در لایه بالا clamp کن تا حتی اگر بک‌اند نگه داشت، API یکسان رفتار کند.
+- **تست بازگشتی:** یک تست پارامتری روی هر چهار بک‌اند (POSIX/LittleFS روی RAM/FMFS/FatFS mock) با توالی بالا؛ انتظار جدید: هر دو یک نتیجه بدهند (یا هر دو ۱۲ یا هر دو ۶) و `File_Tell` با واقعیت بک‌اند یکی باشد.
+- **ریسک سازگاری:** انتخاب «نگه‌داشتن» یعنی فایل‌های نوشته‌شده با FMFS/FatFS تغییر رفتار می‌دهند (حفره صفر). انتخاب «clamp» مستند README را می‌شکند. باید در CHANGELOG ذکر شود. شاید بهتر: افزودن گزینه صریح `File_TruncateEx(pos_policy)` و نگه‌داشتن رفتار فعلی.
+### FILE-A-04 — `File_Open(READ|TRUNCATE)` فایل موجود را خالی می‌کند
+- **شدت:** متوسط (نابودی داده با یک فلگ به‌ظاهر بی‌خطر)
+- **کامپوننت:** باز کردن فایل با فلگ TRUNCATE و بدون WRITE
+- **فایل/تابع/خط:** `backends/fm_posix_fs.c:85–102` (`open_flags`: `if (mode & FM_OPEN_TRUNCATE) flags |= O_TRUNC;` بدون توجه به اینکه READ هست و WRITE نیست)، `src/fm_fmfs.c:2507–2530` (TRUNCATE بی‌قید برای هر mode)، `backends/fm_littlefs.c:514–526` (`lfs_flags`: `LFS_O_TRUNC` بی‌قید)، `backends/fm_fatfs.c:425–450` (فقط برای WRITE، پس FatFS **مستثنی** است)
+- **پیش‌شرط:** `File_Open(path, FM_OPEN_READ|FM_OPEN_TRUNCATE)` روی فایل موجود.
+- **اثر واقعی:** خروجی در probe39 (LittleFS): قبل `len=10 '0123456789'` → بعد `q=OK len=0`. در probe12: POSIX و FMFS هم فایل را خالی کردند؛ `File_Open(READ|APPEND)` هم از FMFS/POSIX فایل را خالی می‌کند چون TRUNCATE در آن مسیر هم وجود دارد (بررسی شد: `File_Open(READ|APPEND)` روی فایل موجود در probe12 `-4` داد که مورد انتظار است فقط اگر TRUNCATE نباشد — باید جدا تست شود).
+- **انتظار vs واقعیت:** انتظار: TRUNCATE بدون WRITE یا باید `FM_ERR_ACCESS` بدهد یا نادیده گرفته شود؛ هیچ‌جای مستندات نمی‌گوید «بازکردن فقط‌خواندن فایل را پاک می‌کند». واقعیت: پاک می‌شود. مبنا: `fm_file.h:24–29` (فلگ‌ها) + اصل «خواندن نباید بنویسد».
+- **علت ریشه‌ای:** فلگ TRUNCATE بدون بررسی `FM_OPEN_WRITE` به بک‌اند می‌رود؛ FatFS این را در `fatfs_flags` دارد اما POSIX/LittleFS/FMFS ندارند.
+- **وصله پیشنهادی (اعمال نشده):** در `file_open_internal` (fm_file.c:~982) قبل از فراخوانی بک‌اند: `if ((mode & FM_OPEN_TRUNCATE) && !(mode & FM_OPEN_WRITE)) return FM_ERR_ACCESS;` (یا حذف TRUNCATE از mode با هشدار). هم‌چنین در `lfs_flags`/`open_flags`/`fmfs_file_open` همین بررسی دفاعی.
+- **تست بازگشتی:** سه تست روی POSIX/FMFS/LittleFS: فایل ۱۰ بایتی، `Open(READ|TRUNCATE)` باید `FM_ERR_ACCESS` بدهد و فایل سالم بماند؛ `Open(READ|WRITE|TRUNCATE)` باید خالی کند.
+- **ریسک سازگاری:** کسی ممکن است روی `Open(READ|TRUNCATE)` برای «پاک‌کردن» حساب کرده باشد؛ ولی این رفتار در FatFS کار نمی‌کند، پس یکسان‌سازی به نفع `FM_ERR_ACCESS` است (یا مستندسازی صریح).
+### FILE-A-05 — `Directory_Rewind` در شکست handle کاربر را آزاد می‌کند (use-after-free منطقی)
+- **شدت:** متوسط (آلیاسینگ/بستن ناخواسته handle زنده)
+- **کامپوننت:** `fm_directory.c`
+- **فایل/تابع/خط:** `src/fm_directory.c:623–652` (`Directory_Rewind` → در شکست `dir_release(d)` یا `external_dir_remove`+`memset`)، `src/fm_directory.c:553–583` (`Directory_Open` → `dir_acquire` همان اسلات)، `src/fm_directory.c:585–606` (`Directory_Close`)
+- **پیش‌شرط:** `d = Directory_Open("/rw")`، سپس دایرکتوری از بیرون حذف شود (مثلاً `Directory_Delete` یا حذف خارجی)، سپس `Directory_Rewind(d)`.
+- **اثر واقعی:** `Rewind` مقدار `-3` می‌دهد و `d->used=0`. `Directory_Open` بعدی **همان آدرس** را برمی‌گرداند. `Directory_Close(d)` (اشاره‌گر کهنه) مقدار `FM_OK` می‌دهد و `used` هندل زنده جدید را صفر می‌کند؛ `Directory_Read` بعدی روی هندل جدید `FM_ERR_EOF`/بی‌اثر می‌شود. اگر کاربر `d` را نگه دارد و دوباره استفاده کند، روی یک handle باز و معتبر اثر می‌گذارد.
+- **بازتولید دقیق (probe20، POSIX):**
+  ```
+  open=0x55c99ea58980 used_before=1 delete=0(OK) rewind=-3(not found) used_after=0
+  next open=0x55c99ea58980 same=1 (OK)
+  read on the new handle=-15(end of file) name=''
+  Directory_Close(stale d)=0(OK); d2->used=0
+  ```
+  FMFS (probe19b) هم همان آدرس را برگرداند.
+- **انتظار vs واقعیت:** انتظار: تابعی که شکست می‌خورد نباید handle را نامعتبر کند (قرارداد `Directory_Open`/`Close` که `used` را مشخص می‌کند، و مستند `fm_directory.h:29`). واقعیت: handle آزاد می‌شود. مبنا: قرارداد عمومی handle + اوراکل (مدل «شکست نباید وضعیت را تغییر دهد»).
+- **علت ریشه‌ای:** `Directory_Rewind` بستن بک‌اند را قبل از تلاش دوباره انجام می‌دهد و در خطا اسلات pool را آزاد می‌کند؛ هیچ نسخه/نسل (generation) در handle نیست که استفاده از اشاره‌گر کهنه را تشخیص دهد.
+- **وصله پیشنهادی (اعمال نشده):** اگر `dop_open` شکست خورد، handle را «باز ولی در حالت خطا» نگه دار (مثلاً `d->used` را ۱ بگذار و `d->fh` را صفر کن، خطا را در `last_error` بگذار) و آزادسازی را به `Directory_Close` بسپار؛ یا در صورت آزادسازی، فیلد `generation` اضافه کن و `Directory_Close`/`Read` اشاره‌گر کهنه را با `FM_ERR_NOT_OPEN` رد کنند. اگر آزادسازی لازم است، `memset(d,0,...)` قبل از free و `d->used=0` کافی نیست (آدرس دوباره استفاده می‌شود).
+- **تست بازگشتی:** تست: باز کردن دایرکتوری، حذف با `Directory_Delete` (یا حذف خارجی در POSIX)، `Rewind` → خطا، سپس `Directory_Open` دیگر و `Directory_Close(stale)` نباید handle جدید را ببندد (assert `d2->used==1` پس از `Close(stale)`). قبل از وصله: FAIL (بازتولید شد)؛ بعد: PASS.
+- **ریسک سازگاری:** کم؛ فقط رفتار خطا. اگر کسی به «Rewind هندل را می‌کشد» وابسته باشد (بسیار بعید)، تغییر می‌کند.
+### FILE-A-06 — JSON: `\uXXXX` رمزگشایی نمی‌شود، escape نامعتبر قبول می‌شود، عمق نویسنده ۷ در برابر پارسر ۶۴
+- **شدت:** متوسط/کم (خواندن JSON استاندارد از بیرون، معنا را عوض می‌کند)
+- **کامپوننت:** `fm_json.c`
+- **فایل/تابع/خط:** `src/fm_json.c:701–754` (`token_string_value`: `default: c = doc->text[i]; break;` و هیچ موردی برای `u`)، `src/fm_json.c:211–220` و `285–295` (`depth > 64` مجاز)، `src/fm_json.c:1417–1441` (`JsonWriter_BeginObject`: `w->depth >= 8` رد می‌شود)، `include/fm_json.h:120–133` (`FM_JsonWriter.first[8]`, `pending[8]`, `container[8]`)
+- **پیش‌شرط:** JSON ورودی شامل `\uXXXX` یا escape غیرمجاز (`\q`)؛ یا تلاش برای نوشتن ۸ سطح تودرتو.
+- **اثر واقعی:** `"a\u0041b"` → `au0041b` (بک‌اسلش و `u0041` دور ریخته می‌شوند؛ کاراکتر `A` بازسازی نمی‌شود). `"a\qb"` → `aqb` (به‌جای خطای فرمت). `JsonWriter` در عمق ۸ `FM_ERR_INVALID_ARGUMENT` می‌دهد در حالی که پارسر تا ۶۴ سطح را می‌پذیرد (عدم تقارن).
+- **بازتولید دقیق (probe10):**
+  ```
+  "a\u0041b" → au0041b ; "a\qb" → aqb
+  [1,2,3] parse OK ; {"n":9223372036854775808} parse OK اما Json_ReadInt → -17
+  JsonWriter nested 8 → -1 (INVALID_ARGUMENT)
+  -17 برای trailing garbage / trailing comma / unterminated
+  duplicate key → first wins
+  ```
+- **انتظار vs واقعیت:** انتظار JSON: `\uXXXX` باید به UTF-8 تبدیل شود (RFC 8259 §7) و escape نامعتبر خطای فرمت باشد. مبنا: استاندارد JSON + تقارن نویسنده/پارسر. واقعیت: بالا.
+- **علت ریشه‌ای:** `token_string_value` فقط escapeهای تک‌کاراکتری را می‌شناسد؛ هیچ رمزگشای UTF-16/سوروگیت وجود ندارد. عمق نویسنده با آرایه ثابت ۸ محدود شده، پارسر با شمارنده ۶۴.
+- **وصله پیشنهادی (اعمال نشده):** در `token_string_value` یک `case 'u'` اضافه کن که ۴ hex بخواند، سوروگیت جفت را ترکیب کند و UTF-8 بنویسد؛ escape ناشناخته → `FM_ERR_INVALID_FORMAT`؛ `JsonWriter` عمق را تا `FM_JSON_MAX_DEPTH` (همان ۶۴) بالا ببر یا مستند کند «نویسنده حداکثر ۷ سطح» و `JsonWriter_Init` این را گزارش کند.
+- **تست بازگشتی:** جدول: `"\u0041"` → `A`; `"\u00e9"` → `é` (UTF-8); `"\ud83d\ude00"` → 😀; `"\q"` → `-17`; نوشتن ۸ سطح → `FM_OK` و پارس مجدد همان. قبل: FAIL (بازتولید شد)؛ بعد: PASS.
+- **ریسک سازگاری:** اگر کاربری به رفتار «backslash حذف می‌شود» عادت کرده باشد (بعید و اشتباه)، تغییر می‌کند. افزایش عمق نویسنده ساختار `FM_JsonWriter` را تغییر می‌دهد (ABI) — باید با `FM_JSON_MAX_DEPTH` پیکربندی‌شده انجام شود.
+### FILE-A-07 — نوشتن کوتاهِ بی‌خطا در `Text_WriteLine`/`Text_Replace` نادیده گرفته می‌شود
+- **شدت:** متوسط (داده ناقص با گزارش موفقیت)
+- **کامپوننت:** `fm_text.c`
+- **فایل/تابع/خط:** `src/fm_text.c:112–133` (`Text_WriteLine`: `r = File_Write(f, line, len, &wr); if (r != FM_OK) return r;` بدون بررسی `wr==len`؛ سپس `File_Write("\n")`)، `src/fm_text.c:354` و `447` (استفاده در `Text_Replace`/`Text_InsertLine`/`Text_DeleteLine`)
+- **پیش‌شرط:** بک‌اند (یا درایور) کمتر از `len` بنویسد و خطا ندهد (`FM_OK`, `written<len`). این حالت در قرارداد `FM_FSOps` ممنوع نشده و درایورهای واقعی SD/NOR می‌توانند برگردانند.
+- **اثر واقعی:** خط ۱۰ کاراکتری به `"0123\n"` تبدیل می‌شود و `Text_WriteLine` مقدار `FM_OK` می‌دهد (`probe16`). `Text_Replace` با `--` (یا هر بازنویسی طولانی‌تر) خط ناقص را در خروجی می‌نویسد و `FM_OK` می‌دهد. در همان پروب `File_WriteAll`/`File_Copy`/`File_Insert`/`Json_SaveFile` درست عمل کردند (یا `-6` دادند یا کامل نوشتند)؛ فقط `Text_*` این را از دست می‌دهد.
+- **بازتولید دقیق:** شیم `FM_FS` که `file_write` را به ۴ بایت محدود می‌کند (probe16):
+  ```
+  Text_WriteLine(10 chars) r=0 (OK) ; /lines.txt = '0123\n' (len 5)
+  Text_Replace r=0 (OK) ; /tr.txt = 'AAAA\nbbbb\n' (به‌جای 'AAAAAAAAAAAAAAAA\nbbbb\n')
+  File_Copy → -6 (I/O error) ; /d.bin سالم 'ORIGINAL-VALUABLE'
+  Json_SaveFile → -6 ; /cfg.json سالم '{"old":true}'
+  File_Insert → -6 ; /e.txt سالم
+  ```
+- **انتظار vs واقعیت:** انتظار: نوشتن جزئی یعنی خطا (`FM_ERR_IO`) یا حلقه تا کامل شدن. مبنا: `File_WriteAll` (fm_file.c:1969–2014) همین را انجام می‌دهد (`c==0` → `FM_ERR_IO`، حلقه تا `off==size`) و `File_Copy` هم (`wr != rd` → `FM_ERR_IO`). واقعیت: `Text_WriteLine` فقط `r` را چک می‌کند.
+- **علت ریشه‌ای:** قرارداد «یک `File_Write` = همه بایت‌ها» ضمنی فرض شده و در سطح `FM_FSOps` مستند/اجباری نشده.
+- **وصله پیشنهادی (اعمال نشده):** در `Text_WriteLine` حلقه بنویس (مثل `write_all_through` در `fm_safe.c:38–66`) و اگر `wr==0` بود `FM_ERR_IO` بده. همچنین در `FM_FSOps` قرارداد را صریح کن: «`file_write` یا همه را می‌نویسد یا خطا می‌دهد؛ نوشتن جزئی با `FM_OK` ممنوع» و در `File_Write` بررسی کن (`wr<len && r==FM_OK` → `FM_ERR_IO`).
+- **تست بازگشتی:** تست با شیم ۴ بایتی: `Text_WriteLine(10)` باید `FM_ERR_IO` بدهد یا فایل `0123456789\n` باشد؛ `Text_Replace` نباید فایل ناقص بنویسد.
+- **ریسک سازگاری:** اگر بک‌اندهای واقعی نوشتن جزئی می‌دهند، این تغییر رفتار «موفق» را به «خطا» تبدیل می‌کند (درست است). هیچ ریسک داده‌ای ندارد.
+### FILE-A-08 — اشاره‌گر کهنه `FM_File` پس از بازاستفاده اسلات، handle زنده را می‌بندد
+- **شدت:** کم (خطای برنامه‌نویسی کاربر؛ اما کتابخانه تشخیص نمی‌دهد)
+- **کامپوننت:** `fm_file.c`
+- **فایل/تابع/خط:** `src/fm_file.c:1161–1210` (`File_Close` فقط `f->used` را چک می‌کند)، `src/fm_file.c:702–760` (`file_acquire`), `src/fm_file.c:316` (`g_external_files`)
+- **پیش‌شرط:** `f1=File_Open(...); File_Close(f1); f1` نگه داشته شود؛ بعد `f2=File_Open(...)` که همان اسلات را می‌گیرد؛ سپس `File_Close(f1)`.
+- **اثر واقعی (probe35):** `close(f1)=0`, `close(stale f1)=0` و `f2->used=0`; `File_Read(f2)` بعدی `-1` می‌دهد. یعنی بستن دوگانه موفق گزارش می‌شود و handle زنده را می‌کشد.
+- **انتظار vs واقعیت:** انتظار: `File_Close` روی handle بسته (`!used`) → `FM_ERR_NOT_OPEN` (این هم می‌دهد اگر اسلات هنوز آزاد نشده باشد)؛ ولی وقتی اسلات بازاستفاده شده، `used=1` است و کتابخانه نمی‌تواند تفکیک کند. این همان مشکل «ABA» است. مبنا: قرارداد handle + اوراکل مدل (بستن دوباره باید خطا باشد).
+- **علت ریشه‌ای:** اسلات‌ها نسل (generation) ندارند؛ اشاره‌گر خام + `used` کافی نیست.
+- **وصله پیشنهادی (اعمال نشده):** افزودن `uint16_t generation` به `FM_File`/`FM_Dir` و نگه‌داشتن آرایه نسل در pool؛ `File_Open` مقدار می‌دهد و `File_Close`/`File_Read` اگر نسل نخواند `FM_ERR_NOT_OPEN` می‌دهد. اما این ABI عمومی را می‌شکند (`FM_File` عمومی است) → بهتر: مستندسازی صریح «پس از Close، اشاره‌گر نامعتبر است؛ استفاده مجدد undefined» و اضافه‌کردن `File_IsOpen` (که وجود دارد) برای بررسی، یا هشدار در سطح debug.
+- **تست بازگشتی:** تستی که `close(stale)` را روی اسلات بازاستفاده‌شده صدا بزند؛ اگر generation اضافه شد، باید `-21` بدهد و `f2` سالم بماند. قبل: FAIL (بازتولید شد)؛ بعد: PASS.
+- **ریسک سازگاری:** اضافه‌کردن فیلد به `FM_File` سایز را تغییر می‌دهد و ABI/کارایی را تحت تأثیر قرار می‌دهد؛ روش مستندسازی/`File_IsOpen` بدون شکستن ABI ممکن است. این مورد بیشتر «مستندسازی + تست» است تا باگ.
+### FILE-A-09 — `File_Copy` با مقصد بلند (بدون جای `.fm_tmp`) به حالت «مستقیم» می‌افتد و مقصد موجود را در شکست نابود می‌کند
+- **شدت:** متوسط (نابودی داده در مسیرهای طولانی؛ با FILE-A-02 هم‌خانواده)
+- **کامپوننت:** `fm_file.c`
+- **فایل/تابع/خط:** `src/fm_file.c:2255–2262` (`if (strlen(dst)+8 <= sizeof tmp) staged=...; else staged=FALSE`), `src/fm_file.c:2269` (open مستقیم dst), `src/fm_file.c:2312` (`File_Delete(work_path)` در خطا؛ در حالت مستقیم `work_path==dst_path`)
+- **پیش‌شرط:** مسیر مقصد ۱۵۳..۱۵۹ کاراکتر (برای `FM_PATH_MAX=160`، `.fm_tmp` جا نمی‌شود) و مقصد از قبل وجود دارد؛ سپس کپی وسط کار شکست می‌خورد.
+- **اثر واقعی (probe44):** مسیر ۱۵۴/۱۵۶/۱۵۸: `File_Copy` → `-6` و **مقصد قبلی ناپدید** (`q=-3`). مسیر ۱۵۰/۱۵۲ (staging ممکن): `-6` و مقصد سالم `'ORIGINAL-VALUABLE'`. همین رفتار در `file_edit` (Insert/ReplaceRange) وجود دارد: `-2 INVALID_PATH` و فایل سالم (به‌خاطر بررسی صریح در fm_file.c:2414).
+- **انتظار vs واقعیت:** مستند `fm_file.h:145–147` صریحاً استثنا را می‌پذیرد: «(Adapters without rename, or a dst too long for the suffix, write dst directly and delete it on failure.)» — **پس این مورد طبق مستند «رفتار اعلام‌شده» است، ولی با قول «dst موجود محتوای قدیمی را نگه می‌دارد» در همان پاراگراف تناقض دارد.** این را باید به‌عنوان «تناقض مستند/رفتار» ثبت کرد، نه باگ پنهان.
+- **علت ریشه‌ای:** پاراگراف مستند دو قول ناسازگار را هم‌زمان می‌دهد: «all-or-nothing for the destination» و «direct mode deletes on failure». در مسیرهای طولانی، قول دوم قول اول را نقض می‌کند.
+- **وصله پیشنهادی (اعمال نشده):** یا (الف) در حالت مستقیم، `dst_existed` را بگیر و در خطا فقط اگر `!dst_existed` حذف کن (فایل ناقص باقی می‌ماند ولی داده قبلی حفظ می‌شود) یا (ب) `FM_ERR_TOO_LARGE` بده و اصلاً کپی نکن (مثل `file_edit`) — (ب) سازگارتر با قول «all-or-nothing» است. مستند هم باید صریح شود.
+- **تست بازگشتی:** تست مسیر ۱۵۴ با مقصد موجود و شکست I/O: انتظار یا `-16 TOO_LARGE` بدون تغییر یا محتوای قدیمی سالم؛ قبل: FAIL (بازتولید شد)؛ بعد: PASS.
+- **ریسک سازگاری:** (ب) قابلیت کپی به مسیرهای بلند را از بین می‌برد؛ (الف) فایل ناقص قسمتی باقی می‌گذارد. بهتر است گزینه (ب) با پیام روشن.
+### FILE-A-10 — `File_Insert`/`ReplaceRange` در مسیر بلند `FM_ERR_INVALID_PATH` می‌دهد (ناسازگار با `File_Copy` که `FM_ERR_TOO_LARGE` می‌دهد)
+- **شدت:** کم (ناسازگاری کد خطا)
+- **کامپوننت:** `fm_file.c`
+- **فایل/تابع/خط:** `src/fm_file.c:2411–2418` (`FM_Core_SetLastError(FM_ERR_INVALID_PATH); return FM_ERR_INVALID_PATH;`) در برابر `src/fm_text.c:259–261` (`FM_ERR_TOO_LARGE`) و `src/fm_safe.c:27–29` (`FM_ERR_TOO_LARGE`) و `src/fm_file.c:2255` (fallback بی‌خطا)
+- **پیش‌شرط:** مسیر ۱۵۳+ کاراکتر.
+- **اثر واقعی (probe44):** `File_Insert` روی مسیر ۱۵۳ → `-2 INVALID_PATH` و فایل سالم. `Text_Replace` روی همان مسیر → `-16 TOO_LARGE`. `File_Copy` → مستقیم (FILE-A-09). `File_SafeReplace` → `-16`.
+- **انتظار vs واقعیت:** قرارداد عمومی «طول > FM_PATH_MAX−8 → FM_ERR_TOO_LARGE» (README:848) برای همه خانواده `.fm_tmp`؛ `File_Insert` `-2` می‌دهد.
+- **علت ریشه‌ای:** هر ماژول خطای خودش را انتخاب کرده.
+- **وصله پیشنهادی (اعمال نشده):** `FM_ERR_TOO_LARGE` در `file_edit` و یکسان‌سازی همه.
+- **تست بازگشتی:** جدول سه API روی مسیر ۱۵۳ → همه `-16`؛ قبل: FAIL (بازتولید شد).
+- **ریسک سازگاری:** کم (فقط کد خطا).
+### FILE-A-11 — `Directory_Rewind` رویداد `File_GetLastError` را ست نمی‌کند
+- **شدت:** کم (اشکال گزارش خطا)
+- **کامپوننت:** `fm_directory.c`
+- **فایل/تابع/خط:** `src/fm_directory.c:623–652` (هیچ `FM_Core_SetLastError` ندارد)
+- **پیش‌شرط:** `Directory_Rewind` شکست بخورد.
+- **اثر واقعی (probe20):** `rewind=-3(not found)` ولی `File_GetLastError()==0 (OK)` بلافاصله بعدش. برای مقایسه `File_Rename`/`Directory_Create`/`File_Copy` مقدار درست را ست می‌کنند (probe34).
+- **انتظار vs واقعیت:** الگوی کتابخانه «هر API عمومی مقدار `File_GetLastError` را به‌روز می‌کند» (بسیاری از توابع این کار را می‌کنند)؛ این یکی نمی‌کند.
+- **علت ریشه‌ای:** فراموشی.
+- **وصله پیشنهادی:** `FM_Core_SetLastError(r); return r;` در انتهای `Directory_Rewind`.
+- **تست بازگشتی:** assert `File_GetLastError()==-3` بعد از Rewind شکست‌خورده.
+- **ریسک سازگاری:** هیچ.
+### FILE-A-12 — پس از `Directory_Read` با `-16`، `Directory_Rewind` لیست را «یک ورودی» برمی‌گرداند و باقی را حذف می‌کند (رفتار نامشخص)
+- **شدت:** کم/متوسط (لیست ناقص بدون خطای مجدد)
+- **کامپوننت:** `fm_directory.c` / backend POSIX
+- **فایل/تابع/خط:** `backends/fm_posix_fs.c:363–406` (`posix_dir_read` روی نام بلند `FM_ERR_TOO_LARGE`)، `src/fm_directory.c:623–652` (`Directory_Rewind` → `dop_close`+`dop_open`)
+- **پیش‌شرط:** دایرکتوری حاوی یک ورودی با نام >`FM_NAME_MAX` (مثلاً ساخته‌شده روی PC) و یک فایل معمولی.
+- **اثر واقعی (probe23):** لیست: `a.txt` بعد `-16`؛ `Directory_Rewind` → `FM_OK`؛ لیست دوباره: فقط `a.txt`, سپس پایان. ورودی بلند در `readdir` همان‌جاست، پس هر بار `-16` باید رخ دهد — ولی چون `readdir` جریان را جلو برده، بعد از rewind فقط ۱ ورودی دیده شد (ترتیب readdir). نتیجه: لیست ناقص؛ کاربر نمی‌فهمد چند ورودی نامعتبر هست. این با «Directory that holds a longer name cannot be listed» در `fm_config.h:275–278` در تضاد نیست (مستند می‌گوید لیست شکست می‌خورد)، ولی `Rewind` + `Read` دوباره خطا نمی‌دهد و کاربر را گمراه می‌کند.
+- **انتظار vs واقعیت:** مستند می‌گوید «listing fails with `-16`»؛ واقعیت بعد از rewind موفق، لیست کوتاه بی‌خطا. 
+- **علت ریشه‌ای:** وضعیت خطای قبلی پاک می‌شود و `readdir` از موقعیت فعلی ادامه می‌دهد.
+- **وصله پیشنهادی (اعمال نشده):** پس از `-16` در `dir_read`، وضعیت «نامعتبر دیده شد» را در handle نگه دار و تا `Directory_Close` هر read بعدی `-16` بدهد؛ یا `Directory_Rewind` را پس از خطای لیست `FM_ERR_LAST_ERROR` بدهد. مستندسازی هم صریح شود.
+- **تست بازگشتی:** تست macOS/Linux با نام ۷۰ بایتی: بعد از اولین `-16`، هر read بعدی `-16` تا close.
+- **ریسک سازگاری:** کم.
+### FILE-A-13 — `FM_Transfer_CopyEx` با `verify` روی مقصد موجود: پس از verify ناموفق `-12` می‌دهد و مقصد را حذف می‌کند (مستند) ولی از کپی دوم/retry محافظت نمی‌کند
+- **شدت:** کم (اطلاعاتی؛ رفتار مستند است)
+- **کامپوننت:** `fm_transfer.c`
+- **فایل/تابع/خط:** `src/fm_transfer.c:296–306`
+- **توضیح:** مستند `fm_transfer.h:100–101` می‌گوید «با verify، اگر CRC نخواند مقصد حذف می‌شود» — پس این «مستند» است، ولی همان FILE-A-02 را تقویت می‌کند: مقصد قبلی هم حذف می‌شود. در این حساب `verify` روی حجم سالم همیشه `FM_OK` داد و نتوانستیم CRC را عمداً خراب کنیم (بدون inject روی خواندن بعد از نوشتن)، پس **این مورد فقط کدخوانی است، نه بازتولید**. → به بخش ۵ (فرضیه) منتقل شود، نه یافته تأییدشده. (در گزارش به‌عنوان «مستند/کدخوانی» می‌ماند.)
+> **توجه:** FILE-A-13 به بخش ۵ منتقل می‌شود؛ نیازی به شماره در جدول نهایی نیست. در فهرست بخش ۱۰ می‌آید به‌عنوان «مستند، تأییدنشده».
+### موردهای «مستند اما ریسک» (نه باگ؛ در بخش ۱۰ لیست می‌شوند)
+- `FM_Transfer_CopyEx` روی مقصد موجود + verify → حذف مقصد در `FM_ERR_CORRUPTED` (فقط کدخوانی؛ تزریق CRC انجام نشد).
+- `File_Transaction` که در شکست `<path>.fm_tmp.bak` باقی می‌گذارد (مستند README:829–831) — داده اضافی و فضای مصرفی، ولی رفتار اعلام‌شده.
+---
+## ۵. فرضیه‌ها و موارد تأییدنشده
+| # | فرضیه | وضعیت | دلیل/گام بعدی |
+|---|---|---|---|
+| H1 | `FM_Transfer_CopyEx` با `verify=1` و CRC نامطابق، مقصد موجود را حذف می‌کند (فراتر از FILE-A-02) | **کدخوانی، تأییدنشده** | نیاز به شیم که CRC خواندنِ بعد از نوشتن را خراب کند؛ در این دور تزریق CRC ساخته نشد. برای فاز ۲: شیم `file_read` که فقط برای هندل verify خطا/داده نادرست بدهد. |
+| H2 | `Directory_DeleteRecursive` با نام >`FM_NAME_MAX` فقط بخشی از درخت را حذف می‌کند (probe40: `-16` و `/victim` ماند، ولی ورودی‌ها خوانده نشدند) | **تأیید جزئی** | در probe40 بعد از `-16`، `Directory_Open("/victim")` هیچ ورودی برنگرداند (چون همان `-16` دوباره) و نتوانستیم بفهمیم کدام فایل‌ها ماندند. برای تأیید قطعی: شمارش با `stat` سیستمی در POSIX. |
+| H3 | `Directory_Rewind` بعد از حذف دایرکتوری، `used` را ۰ می‌کند ولی اگر `dop_close` خطا بدهد handle باقی می‌ماند (شاخه‌های مختلف) | **بازتولید جزئی** | در probe20 `rewind=-3 used_after=0`؛ ولی سناریوی «close خطا» ساخته نشد. |
+| H4 | `Text_Replace` خطای `File_Write` جزئی را به `FM_ERR_IO` تبدیل نمی‌کند و فایل ناقص را با `FM_OK` جایگزین می‌کند | **تأیید شد** (FILE-A-07) | — |
+| H5 | `File_Copy` در حالت staging وقتی مقصد `.fm_tmp` از کاربر موجود باشد، آن را حذف می‌کند (FILE-A-01) | **تأیید شد** | — |
+| H6 | `File_Open` با `FM_OPEN_APPEND` بدون `WRITE` (فقط READ|APPEND) ممکن است TRUNCATE را حمل کند و فایل را خالی کند | **تأییدنشده** | probe12 روی POSIX `-4 ACCESS` داد؛ اما TRUNCATE در mode نبود. نیاز به تست `File_Open(path, READ|APPEND|TRUNCATE)` جدا. |
+| H7 | کش خواندن با «مسیرهای همنام ولی متفاوت» می‌تواند داده کهنه بدهد (mutation M7 روی `cache_name_equal` زنده ماند) | **رد شد** | خواننده پس از `File_WriteText` و rename-over داده تازه دید (probe11)؛ mutation فقط در تست‌های موجود کشته نشد، ولی رفتار در پروب درست است. |
+| H8 | `Directory_Count`/`Directory_Size` روی دایرکتوری با نام بلند `-16` می‌دهند | **تأیید شد** | probe23: هر دو `-16`؛ این رفتار مطابق مستند است (لیست شکست می‌خورد) — در بخش ۸ (false positive) می‌آید. |
+| H9 | symlink در POSIX می‌تواند از mount فرار کند | **تأیید شد (محدودیت میزبان)** | probe13: `/link` → `/tmp/aud/outside`، خواندن/نوشتن موفق. این رفتار «بک‌اند POSIX در سطح رشته» است و در مستندات به‌عنوان sandbox معرفی نشده؛ در بخش ۹ (محدودیت) می‌آید، نه باگ. |
+| H10 | `File_Open` با مسیر >`FM_PATH_MAX` ممکن است رشته را کوتاه کند و فایل اشتباه باز شود | **رد شد** | probe33: ۱۶۰+ → `-16`؛ هیچ truncation خاموش (بازبینی `strncpy` در fm_file.c:1008). |
+---
+## ۶. مرور یافته‌های قبلی (fixed / open / different / not-run)
+| یافته قبلی (از `audit_reports/FILE_PHASE1_INTERNAL.md`, کامیت `267160a`) | وضعیت در `7866232` | شاهد |
+|---|---|---|
+| FatFS rename-over فایل بی‌ربط `~fmrn.tmp` را حذف می‌کند | **fixed** (طبق کد و تست‌ها) | `backends/fm_fatfs.c` جست‌وجوی ۲۵۶ نام `~fmXX.tmp`؛ `test/build_fatfs_host.sh` 51/51×3+56/56؛ mutation M? (بدون تغییر) — تست‌های FILE7/MED-08 پاس |
+| `Path_Join` با `out==b` همپوشان، ورودی دوم را خراب می‌کند | **fixed** | مدل مستقل ۳۰۰۰۰۰ حالت ۰ اختلاف؛ `git log` نشان می‌دهد `7866232` همان fix است. تست MED-07 در `make test` هم پاس |
+| `Directory_Create` روی مسیر موجود باید موفقیت باشد | **fixed** | probe (Directory_Create("/d") دوباره OK)؛ `Directory_Create` روی فایل `-23` |
+| `File_Copy` مقصد موجود را حفظ می‌کند | **fixed** | probe16/probe26: مقصد سالم پس از خطای I/O |
+| `File_Insert`/`ReplaceRange` فایل را در خطا حفظ می‌کنند | **fixed** | probe16: `/e.txt` سالم |
+| `Json_SaveFile` اتمیک (temp+rename) | **fixed** ولی **FILE-A-01** | probe16 (مقصد سالم) + probe8 (tmp کاربر حذف) |
+| `Directory_DeleteRecursive`/walk بدون بازگشت پشته‌ای | **fixed (ادعا)** | `make test` تست‌های depth؛ من فقط تا عمق ~۱۰۰ مسیر ۱۵۹ کاراکتری تست کردم (probe33) |
+| `File_PoolDump`/`File_PoolUsedSplit` | **fixed (کد)** | probe35 نشان می‌دهد اسلات‌ها درست شمرده می‌شوند؛ استفاده نکردم |
+| `FM_Transfer_*` مقصد را در شکست پاک می‌کند | **open → FILE-A-02** | بازتولید پروب ۶b/۲۶ |
+| `Text_*` tmp طولانی → پاک‌کردن فایل اصلی | **fixed** (بررسی طول) ولی **FILE-A-01** برای مالکیت نام | probe40: `len=154` → `-16` و فایل سالم (اصل فایل سالم ماند)؛ probe16: tmp کاربر خالی شد |
+| `Logger_Recover` wildcard `.fm_tmp` | **open (FILE-A-01)** | فقط کدخوانی؛ تست اجرایی لایه logger در دامنه نبود |
+| `Directory_Rewind` handle را در خطا آزاد می‌کند | **open → FILE-A-05** | probe20 |
+---
+## ۷. جدول mutation (≥۶ جهش هدفمند و برگشت‌پذیر)
+روش: هر جهش در `/tmp/fm_mut` (کپی تمیز)، ساخت `fm_test`، اجرا، سپس فایل اصلی از روی نسخه پشتیبان بازگردانده شد (`git checkout -- .`). همه جهش‌ها **در کپی** بودند، نه در `/tmp/fm_audit` یا `/home/user`.
+| # | فایل/محل | تغییر | نتیجه | تستی که کشت | تفسیر |
+|---|---|---|---|---|---|
+| M1 | `src/fm_path.c` (محافظ همپوشانی `Path_Join`) | حذف شرط overlap | **KILLED** | `MED-07: Path_Join may write its result over its second argument` | تست پوشش همپوشانی واقعاً مؤثر است |
+| M2 | `src/fm_file.c:2260` (`staged = FM_File_SamePath(src,tmp)`) | `staged = FM_FALSE` | **KILLED** | `F-04: failed File_Copy keeps an existing destination intact` | تست حفظ مقصد مؤثر |
+| M3 | `src/fm_directory.c` (بررسی «در زیرشاخه خودش») | `if (0)` | **KILLED** | `HIGH-05: LittleFS, Directory_Rename checks what it renames` | تست محافظ زیرشاخه مؤثر |
+| M4 | `src/fm_directory.c` (`Directory_Create` روی فایل) | حذف بررسی `info.type != FM_ITEM_DIR` | **KILLED** | `Directory_Create: an existing file is not a directory` | تست نوع مؤثر |
+| M5 | `src/fm_safe.c` (خطای close) | `r = FM_OK` بعد از close | **KILLED** | `SUSP-02: SafeReplace keeps the file when the close fails` | تست خطای close مؤثر |
+| M6 | `src/fm_file.c` (`File_Read` جمع EOF) | هر خطا → `FM_OK` | **KILLED** | `F-14: I/O error after a partial cached read is reported` | تست خطای جزئی مؤثر |
+| M9 | `src/fm_file.c:1432` (append at end) | `at_end = FALSE` | **KILLED** | `FILE-02: two append handles (FMFS)` | تست append مؤثر |
+| M11 | `src/fm_transfer.c:240` (`File_Delete(dst_path)`) | حذف | **KILLED** | `Transfer cancel leaves no partial file behind` | **نکته:** تست فعلی «حذف مقصد» را تأیید می‌کند، نه «حفظ مقصد» (FILE-A-02 پوشش ندارد) |
+| M12 | `src/fm_file.c:1687` (`len >= FM_NAME_MAX`) | `+8` | **KILLED** | `MED-04: FMFS, a name that cannot be listed is not created` | تست نام بلند مؤثر |
+| M7 | `src/fm_file.c:462` (`cache_name_equal`) | `strcmp` | **SURVIVED** | — (658/658) | کش با نام‌های case-insensitive در تست‌ها پوشش ندارد؛ رفتار واقعی (probe11) درست بود، پس «کمبود تست» نه باگ |
+| M8 | `src/fm_file.c:1527–1532` (invalidate کش در Truncate) | حذف `cache_invalidate_same_file` | **SURVIVED** | — (658/658) | تست موجود «خواننده کش‌شده + truncate توسط هندل دوم» را ندارد؛ **با probe18/M8 دستی تأیید شد که رفتار درست است ولی تست ندارد** |
+| M10 | `src/fm_text.c:259` (`len + sizeof(suffix) > tmp_size`) | `+64` | **SURVIVED** | — (658/658) | تست مرز طول مسیر `Text_*` وجود ندارد (probe40 آن را دستی آزمود: `-16`) |
+**خلاصه mutation:** ۸ کشته / ۳ زنده. سه جهش زنده همه در نواحی‌ای هستند که **تست موجود ندارند** (کش/truncate، مرز طول `Text_*`، case-insensitive کش) — این‌ها در بخش ۱۰ به‌عنوان «کمبود تست» ثبت می‌شوند. یک جهش کشته (M11) نشان می‌دهد تست فعلی رفتار FILE-A-02 را تأیید می‌کند.
+---
+## ۸. مثبت‌های کاذب حذف‌شده (False positives)
+| مورد | چرا مثبت کاذب بود |
+|---|---|
+| «`File_Read` بعد از append داده نمی‌خواند» | هندل `WRITE` بود؛ خواندن از هندل فقط‌نوشتن `-4`/EOF طبیعی است. probe1 با هندل `READ|WRITE` درست شد. |
+| «کپی ۰ بایتی با `FM_OK` یعنی باگ کپی» | در probe6 اول، نوشتن مبدأ به‌خاطر پر بودن حجم شکست خورده بود؛ کپی از فایل ۰ بایتی درست است. probe6b با مبدأ معتبر بازآزمایی شد. |
+| «`Path_Join(buf+2,buf,buf,64)` خروجی `cdef/abcdef` می‌دهد» | این خروجی *درست* است (a="abcdef", b="abcdef" → "abcdef/abcdef" با همپوشانی)؛ قبلاً به‌عنوان باگ خوانده شده بود. مدل مستقل تأیید کرد. |
+| «`File_Copy` فایل مقصد را همیشه حذف می‌کند» | فقط در مسیرهای بلند (بدون جای `.fm_tmp`) — FILE-A-09؛ برای مقصد کوتاه حفظ می‌شود. |
+| «`Directory_Count` روی نام بلند باگ است» | مستند `fm_config.h:275–278` می‌گوید لیست شکست می‌خورد؛ `-16` رفتار اعلام‌شده است. |
+| «`Directory_Read` روی ورودی `.` و `..`» | POSIX adapter آن‌ها را رد می‌کند (بازبینی کد، `posix_dir_read`). |
+| «`File_Truncate` روی هندل فقط‌خواندن باگ است» | `FM_ERR_ACCESS` برمی‌گرداند (fm_file.c:1516–1519) — درست است. |
+| «`File_Open(WRITE|APPEND)` روی فایل ناموجود باید بسازد» | بدون `CREATE` نباید بسازد؛ `NULL` درست است (probe12). |
+| «`Stream_Close` فایل را می‌بندد» | مستند `fm_stream.h` می‌گوید فقط stream را می‌بندد، فایل باز می‌ماند؛ probe32 تأیید کرد. |
+| «ثبت `Text_CountLines` روی خط ۲۰۰ کاراکتری» | محدودیت مستند نشده ولی رفتار ثابت است (`-16` برای >۱۰۲۴)؛ **مستندسازی** لازم است نه باگ. |
+| «`File_ReadText` وقتی بافر کوچک است، truncate خاموش می‌کند» | probe4: `-16` و `rd=0`، هیچ truncate خاموشی نیست. |
+| «TSan باید خطا بدهد چون تست‌های thread در build پیش‌فرض نیست» | `make tsan` خودش ۶۶۳ تست را با thread اجرا می‌کند؛ ۰ اخطار. |
+---
+## ۹. موارد بررسی‌نشده و محدودیت‌های سخت‌افزاری/معماری
+### ۹.۱ بررسی‌نشده در این دور
+1. **FatFS واقعی روی کارت SD:** فقط mock و تست خودش. هر نتیجه‌ای درباره «کارت واقعی / timeout / FR_DISK_ERR» وجود ندارد. `tools/check_fatfs_real_rename.sh` (که در گزارش داخلی ذکر شده) در دامنه این حساب اجرا نشد.
+2. **LittleFS روی فلش واقعی / با قطع برق:** فقط RamDisk فرمت‌شده. رفتار power-loss، wear، bad block بررسی نشد.
+3. **شبیه‌سازی قطع برق در وسط نوشتن/کپی:** انجام نشد (نیاز به شبیه‌ساز power-cut و هک درایور).
+4. **پورت‌های RTOS (FreeRTOS/CMSIS-RTOS2):** فقط build و تست `make matrix`/`make tsan` با پورت pthread؛ هیچ اجرای واقعی روی RTOS.
+5. **ABI/alignment روی Cortex-M:** `make matrix` و ۳۲ بیتی zig اجرا شد ولی روی x86؛ **هیچ اجرا روی ARM/دستگاه**. `FM_FS_HANDLE_SIZE=24` و `typedef char fm_file_fh_aligned[...]` بررسی شد ولی رفتار unaligned روی M0 تست نشد.
+6. **`Logger_*`, `Explorer_*`, `Async_*`, media cache:** اجرای مستقیم نشد؛ فقط مسیر `Logger_Recover` خوانده شد (خارج از دامنه اصلی).
+7. **`File_Transaction`/`File_SafeAppend`:** بازتولید خطا نداشت؛ فقط code read.
+8. **کنسول/میزبان POSIX با symlink و mount باینری:** فقط symlink ساده. mountهای باینری (bind mount) تست نشد.
+9. **`FS_Format`/`FS_Check`:** خارج از دامنه این فاز (VFS/backend فقط در حد اثبات API).
+10. **کدهای `FM_USE_*` که media را روشن می‌کنند:** صرفاً build/test؛ هیچ بررسی محتوایی، چون media خارج از دامنه است.
+11. **`Directory_ScanRecursive` callback که درخت را تغییر می‌دهد:** مستند ممنوع است؛ تست نشد.
+12. **رفتار هم‌زمانی واقعی (data race) در تست‌های اختصاصی file:** TSan پاس شد ولی هیچ تست هم‌زمانیِ فایل/دایرکتوریِ سفارشی ساخته نشد؛ فقط تست‌های thread خود کتابخانه.
+### ۹.۲ محدودیت‌های سخت‌افزاری/معماری (که نباید از نتایج میزبان استنباط شود)
+- **رفتار واقعی نوشتن SD/NOR در برابر خطا:** نوشتن جزئی بی‌خطا در شیم ساخته شد؛ روی سخت‌افزار، DRIVER می‌تواند رفتار متفاوتی داشته باشد. FILE-A-07 یک **قرارداد API** است که باید مستند/اجباری شود؛ شدت واقعی روی دستگاه به درایور بستگی دارد.
+- **کش داده/DMA در STM32H7:** بررسی نشد؛ `FM_USE_CACHE` روی میزبان همان کش نرم‌افزاری کتابخانه است، نه D-cache.
+- **USB MSC / QSPI / EEPROM:** خارج از این فاز.
+- **چند-وظیفه‌ای واقعی:** `FM_USE_THREADS=1` فقط با pthread؛ روی FreeRTOS/CMSIS فقط build. TSan ۰ اخطار داد ولی این «اثبات thread-safety روی RTOS» نیست.
+- **قطع برق:** FMFS power-safe فقط در تست‌های خودش شبیه‌سازی می‌شود؛ من شبیه‌سازی نکردم.
+- **ابزارهای غایب:** `clang` (پس بررسی با clang و `-Weverything` انجام نشد)، `valgrind` (leak بررسی نشد جز ASan/LSan که در `make asan` فعال بود)، `cppcheck`/`clang-tidy`.
+- **`gcc -m32`**: کار نکرد (بدون startup objects)؛ ۳۲ بیتی با zig/موسل اجرا شد (۶۵۹/۶۵۹) ولی ABI musl است، نه glibc 32-bit.
+- **دسترسی به `make cmake`/`matrix`/`check`:** فقط بعد از نصب `cmake` از pip؛ در محیط بدون اینترنت این‌ها skip می‌شوند.
+---
+## ۱۰. فهرست قابل ادغام (Mergeable list)
+قالب: `id | severity | status | component | file:function | cause | reproducer | suggested fix | test`
+| id | severity | status | component | file:function | cause | reproducer | suggested fix | test |
+|---|---|---|---|---|---|---|---|---|
+| FILE-A-01 | high | confirmed | temp-name ownership | `src/fm_file.c:2255–2262,2269,2312`; `src/fm_safe.c:80–87,177–201`; `src/fm_text.c:256–312`; `src/fm_logger.c:905–963` | `.fm_tmp` deterministic names; library assumes ownership, deletes/truncates pre-existing user file | probe8/probe29: `File_WriteText("/keep.txt.fm_tmp","USER-DATA")` then `File_Copy(...→/keep.txt)` → tmp gone (`exists=0`); same with `Json_SaveFile`, `File_Recover`, `Text_Replace`; POSIX/FMFS/LittleFS | unique temp name + ownership marker, or `FM_ERR_EXISTS` when tmp exists | tests: copy/json/recover with pre-existing `<dst>.fm_tmp` must fail or use another name, user file intact |
+| FILE-A-02 | high | confirmed | transfer | `src/fm_transfer.c:139–247,236–242,296–306` | unconditional `File_Delete(dst_path)` on failure; dst not staged | probe26 (`fail_after=7`, POSIX): `FM_Transfer_CopyEx("/s.bin","/keep.bin")` → `-6`, `/keep.bin` gone; `File_Copy` → `-6`, dst `ORIGINAL-VALUABLE`; probe6b FMFS 16K: `-5`, dst gone | stage via unique temp; or track `dst_existed` and delete only if new; keep old dst on verify failure | 3 tests (copy/copyex/move) with fault injection, existing dst must survive |
+| FILE-A-03 | medium-high | confirmed | truncate position | `src/fm_file.c:1505–1539`; `src/fm_fmfs.c:2733–2778`; `backends/fm_fatfs.c:597–621`; `backends/fm_posix_fs.c:218–224`; `backends/fm_littlefs.c` | FMFS/FatFS clamp pos to size; POSIX/LittleFS keep it; README claims "on every backend" | probe27/probe28: 10-byte file, seek END, truncate(4), write "XY" → POSIX/LittleFS size 12 with zero gap `30313233 00×6 5859`; FMFS/FatFS size 6 `303132335859` | restore original pos after `fop_truncate` for all backends, or document clamp and apply consistently at top layer | 4-backend parameterized test; assert same bytes/tell/size on all |
+| FILE-A-04 | medium | confirmed | open semantics | `backends/fm_posix_fs.c:85–102`; `src/fm_fmfs.c:2507–2530`; `backends/fm_littlefs.c:514–526` | `FM_OPEN_TRUNCATE` honored without `FM_OPEN_WRITE` | probe39: LittleFS `Open(READ\|TRUNCATE)` → 10-byte file becomes 0 bytes; probe12: POSIX & FMFS same | reject `TRUNCATE` without `WRITE` (`FM_ERR_ACCESS`) in `file_open_internal` + defensive in backends | 3 backends: READ\|TRUNCATE → `-4`, file intact; READ\|WRITE\|TRUNCATE → empty |
+| FILE-A-05 | medium | confirmed | directory handle | `src/fm_directory.c:623–652` (vs 553–583, 585–606) | rewind failure releases pool slot; stale pointer becomes live handle | probe20 (POSIX) & probe19b (FMFS): open, `Directory_Delete`, `Rewind` → `-3`, `used=0`; next `Directory_Open` same address; `Directory_Close(stale)` → `FM_OK` and closes the live handle | keep handle valid on failure (close only on success) or add generation counter | test: stale `Close` must not close new handle (`d2->used==1`) |
+| FILE-A-06 | medium-low | confirmed | JSON | `src/fm_json.c:701–754`; `:211,285`; `:1417–1441`; `include/fm_json.h:120–133` | no `\uXXXX` decoding; unknown escapes accepted; writer depth 7 vs parser 64 | probe10: `"a\u0041b"` → `au0041b`, `"a\qb"` → `aqb`, writer nesting 8 → `-1` | add `\u` decoder (UTF-8 + surrogate pair); reject unknown escapes; unify depth via `FM_JSON_MAX_DEPTH` | `\u0041`→A, `\u00e9`→é, surrogate pair, `\q`→`-17`, 8-level write/parse round-trip |
+| FILE-A-07 | medium | confirmed | text / write contract | `src/fm_text.c:112–133,354,447` | short `File_Write` (`FM_OK`+`wr<len`) treated as complete | probe16 (4-byte shim): `Text_WriteLine(10)` → `FM_OK`, file `"0123\n"`; `Text_Replace` → `FM_OK`, short line; `File_WriteAll`/`File_Copy` handled it correctly | loop in `Text_WriteLine` (like `write_all_through`) and `FM_ERR_IO` if `wr==0`; document/enforce `FM_FSOps.file_write` all-or-error | shim test: `Text_WriteLine` must return `-6` or write all 10 bytes |
+| FILE-A-08 | low | confirmed | stale handle | `src/fm_file.c:1161–1210,702–760` | no generation in pool slots; double close after slot reuse closes a live handle | probe35: `close(f1)=0`, reopen same slot, `close(f1)=0`, `f2->used=0`, `File_Read(f2)=-1` | document "pointer invalid after close" + add generation field (ABI change) or debug assert | test stale close → `-21`, f2 intact |
+| FILE-A-09 | medium | confirmed | copy direct mode | `src/fm_file.c:2255–2262,2269,2312` | dst too long for `.fm_tmp` → direct write, deletes existing dst on failure | probe44: 154/156/158-char dst, fault after 5 bytes → `-6`, dst gone (`q=-3`); 150/152 → dst `ORIGINAL-VALUABLE` intact | return `FM_ERR_TOO_LARGE` (like `file_edit`) or keep `dst_existed` and only delete new dst | path-length 154 test with existing dst must not destroy it |
+| FILE-A-10 | low | confirmed | error code | `src/fm_file.c:2411–2418` vs `src/fm_text.c:259–261`, `src/fm_safe.c:27–29` | inconsistent error for too-long temp path | probe44: `File_Insert(153-char path)` → `-2`; `Text_Replace` → `-16`; `File_Copy` falls back to direct mode | use `FM_ERR_TOO_LARGE` everywhere | table of 3 APIs on 153-char path → all `-16` |
+| FILE-A-11 | low | confirmed | last-error | `src/fm_directory.c:623–652` | no `FM_Core_SetLastError` in `Directory_Rewind` | probe20: `Rewind` → `-3` but `File_GetLastError()==0` | set last error before return | assert `File_GetLastError()==-3` |
+| FILE-A-12 | low | confirmed | listing after error | `backends/fm_posix_fs.c:363–406`; `src/fm_directory.c:623–652` | after `-16` for long name, rewind+read returns short list with no further error | probe23: listing `a.txt` then `-16`; rewind OK; next listing only `a.txt` then EOF (long entry never reported again) | keep "invalid entry seen" sticky until close, or re-report `-16` | 70-byte name test: every read after first `-16` must be `-16` |
+| FILE-A-13 | low | documented-only | transfer verify | `src/fm_transfer.c:296–306` | verify failure deletes dst (documented) | code read only; no reproduction (could not inject CRC mismatch) | if accepted, keep; else back up old dst | verify-failure test (fault injection in read-back) |
+| FILE-A-14 | info | documented | transaction | `src/fm_safe.c:203–270` | failed transaction leaves `<path>.fm_tmp.bak` (documented README:829–831) | code read | document; maybe `File_Recover` clean-up policy | test for `.bak` presence after simulated failure |
+**جمع‌بندی شدت:** ۲ بالاً (FILE-A-01، FILE-A-02)، ۵ متوسط (A-03, A-04, A-05, A-07, A-09)، ۵ کم/اطلاعاتی (A-06, A-08, A-10, A-11, A-12)، ۲ مستند/تأییدنشده (A-13, A-14).
+---
+## پیوست: فهرست پروب‌ها و آنچه هر کدام نشان داد
+| پروب | موضوع | نتیجه کلیدی |
+|---|---|---|
+| probe1 | طول صفر، append، خواندن پس از append | رفتار عادی؛ خواندن از هندل فقط‌نوشتن EOF |
+| probe2 | کپی/جابه‌جایی/تغییرنام/حذف + لبه‌های مسیر | PASS؛ `.fm_tmp` کاربر خالی شد |
+| probe3 | موقعیت truncate و `Directory_Rewind` | اختلاف POSIX/FMFS؛ Rewind handle را آزاد کرد |
+| probe4 | `.fm_tmp` موجود، محدودیت متن، فایل باز | `.fm_tmp` خالی؛ `-16` بدون truncate خاموش |
+| probe5 | double close / rewinding | خروجی نامعتبر (ارزیابی آرگومان‌ها) → بازآزمایی شد |
+| probe6/6b | FMFS پر، کپی/انتقال | `FM_Transfer_CopyEx` مقصد را نابود می‌کند |
+| probe7 | truncate با کش روشن/خاموش | همان اختلاف |
+| probe8 | `Json_SaveFile` و `File_Recover` با tmp کاربر | هر دو حذف |
+| probe9 | رشد truncate، نام بلند | صفر پر می‌شود؛ نام ۱۹۹ → `-16` |
+| probe10 | JSON escape/عمق | `\u` رمزگشایی نشد؛ عمق نویسنده ۷ |
+| probe11 | کش، append، کپی خود | کش منسجم؛ کپی خود `-1` |
+| probe12 | `READ\|TRUNCATE`، EOF، truncate بزرگ | فایل خالی شد؛ `-15`؛ 4 GiB |
+| probe13 | symlink و mount دوم | عبور symlink (محدودیت)؛ mount دوم BUSY |
+| probe14 | تزریق خطای FM_FS | نامعتبر (mount شد) → با probe15/16 بازآزمایی |
+| probe15/16 | تزریق خطای FM_FS روی `/` | نوشتن کوتاه، خطای I/O در کپی/JSON/Insert/Append |
+| probe17 | LittleFS روی RAM + truncate | همان اختلاف موقعیت |
+| probe18 | خواننده کش‌شده + truncate هندل دوم | داده درست؛ با M8 دستی رفتار درست تأیید شد |
+| probe19/19b/20 | `Directory_Rewind` و دایرکتوری حذف‌شده | FILE-A-05 و A-11 |
+| probe21/22 | نام >`FM_NAME_MAX` روی POSIX/LittleFS | لیست `-16`؛ خواندن/حذف با مسیر کامل کار می‌کند |
+| probe23 | لیست، Count، Size، Rewind بعد از `-16` | FILE-A-12 |
+| probe24/25 | نوشتن کوتاه/خطای جزئی | FILE-A-07 (و رفتار درست `File_WriteAll`) |
+| probe26 | `FM_Transfer_CopyEx` شکست روی مقصد موجود | FILE-A-02 |
+| probe27/28 | موقعیت truncate با/بدون کش | FILE-A-03 |
+| probe29 | `.fm_tmp` در FMFS و LittleFS | FILE-A-01 |
+| probe30 | مدل محتوایی ۳۰۰×۶۰ (POSIX/FMFS) | ۰ اختلاف |
+| probe31 | مدل درخت ۱۵۰×۴۰ (POSIX/FMFS) | ۰ اختلاف |
+| probe32 | مرز نام/مسیر، stream، binary | PASS با نکات |
+| probe33 | مرز دقیق `FM_PATH_MAX`/`FM_NAME_MAX` | ۱۵۹ قبول/۱۶۰ رد؛ ۶۳ قبول/۶۴ رد |
+| probe34 | `File_GetLastError` روی APIها | درست به‌جز `Directory_Rewind` |
+| probe35 | double close و بازاستفاده اسلات | FILE-A-08 |
+| probe36 | `Deinit`/`Init` دوباره | mountها باقی می‌مانند (رفتار مستند) |
+| probe37 | محدودیت خط متن | `CountLines` روی >۱۰۲۴ → `-16` (مستندسازی) |
+| probe38 | callback تودرتو و لغو | `FM_ERR_BUSY` مطابق مستند؛ `-24` |
+| probe39 | `READ\|TRUNCATE` روی LittleFS | FILE-A-04 |
+| probe40 | مرز نام `Text_*` و `DeleteRecursive` | `-16` و فایل اصلی سالم؛ recursive ناتمام |
+| probe41/42/43 | mount ناموجود و storage گمشده | `-3`؛ رفتار mount مستند است |
+| probe44 | `File_Copy` مسیر بلند | FILE-A-09 و A-10 |
+**پایان گزارش.** این سند فقط یافته‌های همین حسابرس (A) است؛ هیچ وصله‌ای روی مخزن اصلی اعمال نشد و هیچ نتایجی از دو حسابرس دیگر استفاده نشد.
+
+
+
+
+
+
+گزارش ممیزی مستقل فاز یک — FileManager (ممیز B)
+
+مخزن: hamid-enf/Clain_Filemanagaer
+شاخه هدف: arena/ba6a87b3-clain-filemanagaer
+کامیت هدف ممیزی: 78662328e727910eda54cac0b584c32710f24976 (پیام: Preserve overlapping source in Path_Join)
+کامیت کپی کاری (HEAD): 78662328e727910eda54cac0b584c32710f24976
+تاریخ ممیزی: 2026-11-14 UTC
+محیط میزبان: Debian 12 x86_64، gcc 12.2.0، ASan/UBSan فعال
+
+    هیچ commit/push/PR/merge روی مخزن اصلی انجام نشد؛ تمام تست‌ها روی کپی جداگانه /home/user/Clain_Audit_B اجرا شدند.
+
+۱. خلاصه مدیریتی و فنی
+
+تست‌های پایه (۶۵۸ تست میزبان با ASan+UBSan + تمام واریانت‌های FatFS mock + FatFS واقعی ST r0.16) همگی پاس شدند. با این حال چهار نقص تأییدشده شناسایی شد:
+
+    (High) FatFS rename اجازه می‌دهد پوشه روی فایل موجود rename شود و فایل کاربر حذف می‌شود (نقض POSIX)
+    (Medium) FatFS rename اجازه می‌دهد فایل روی پوشه خالی rename شود و پوشه از بین می‌رود
+    (High) LittleFS rename-over از الگوی غیراتمی remove-then-rename استفاده می‌کند (خطر از دست رفتن داده در قطع برق/خطا + نقض نوع)
+    (Medium) سرریز عددی بالقوه در محاسبه طول در diskio bridge برای رسانه‌های >2TiB
+
+هسته FMFS v2، RamDisk، و VFS mount table از نظر bounds-checking و جلوگیری از سرریز صحیح عمل می‌کنند.
+۲. پوشش تست‌ها (نتایج اجرا)
+مورد	نتیجه
+make test (۶۵۸ تست)	PASS
+make asan (ASan+UBSan)	PASS
+test/build_fatfs_host.sh (کلاسیک/مدرن/لگاسی/دو درایو + SD/media/player examples)	PASS (51/51, 51/51, 51/51, 56/56)
+check_fattime_real.sh (FatFS واقعی r0.16)	PASS (default + strong RTC override)
+check_fatfs_real_rename.sh (سناریوی پایه sentinel)	PASS
+make tsan	NOT RUN (محدودیت زمان/منابع)
+check_32bit.sh	SKIP (gcc-multilib موجود نبود)
+چک‌های CMake	SKIP (cmake نصب نبود)
+تست مستقل rename-over با ۸ سناریو روی FatFS واقعی	2 FAIL (FILE-B-01, B-02)
+
+نسخه‌های استفاده شده: LittleFS v2.11.3، FatFS ST r0.16 (commit dd9126e)، تنظیمات: FF_USE_LFN=2، FF_FS_LOCK=16، FF_VOLUMES=2.
+۳. یافته‌های تأییدشده
+FILE-B-01 — FatFS rename: امکان rename دایرکتوری روی فایل موجود (حذف فایل کاربر)
+
+    فایل/خط: backends/fm_fatfs.c، تابع fatfs_rename، بلوک if(fr == FR_EXIST) (حدود خط ۷۴۳)
+    بازتولید: mkdir("dir") + put("file.txt", "data") ← fatfs_rename(..., "/dir", "/file.txt") ← FM_OK برمی‌گرداند، file.txt حذف می‌شود و دایرکتوری جایش را می‌گیرد.
+    علت: بررسی نوع مبدأ/مقصد فقط برای حالت «مقصد پوشه است» وجود دارد، اما برای «مبدأ پوشه و مقصد فایل» هیچ چکی نیست و FatFS زیرین این عملیات را غیرمجاز نمی‌کند.
+    انتظار: بایست FM_ERR_NOT_DIRECTORY برمی‌گرداند و هیچ‌یک از دو طرف تغییر نمی‌کرد (همان رفتار FMFS).
+    راهکار: افزودن f_stat روی مبدأ و مقصد پیش از هرگونه عملیات جانبی و رد کردن حالتی که نوع‌ها متفاوت هستند.
+
+FILE-B-02 — FatFS rename: امکان rename فایل روی پوشه خالی (حذف پوشه)
+
+    فایل/خط: همان fatfs_rename در fm_fatfs.c
+    بازتولید: put("f.txt", "x") + mkdir("ed") ← fatfs_rename(..., "/f.txt", "/ed") ← FM_OK، پوشه خالی حذف می‌شود.
+    علت: در شاخه «مقصد دایرکتوری است»، کد با f_unlink پوشه خالی را حذف می‌کند و سپس rename را انجام می‌دهد، بدون بررسی اینکه مبدأ فایل است (که خلاف POSIX است: rename(file, dir) باید با EISDIR شکست بخورد).
+    راهکار: همانند B-01، اعتبارسنجی نوع مبدأ/مقصد قبل از هر تغییری.
+
+FILE-B-03 — LittleFS rename-over غیراتمی و فاقد بررسی نوع کامل
+
+    فایل/خط: backends/fm_littlefs.c، تابع lfs_fs_rename (خطوط ۶۲۸–۶۵۰):
+
+    C
+
+    err = lfs_remove(&ctx->lfs, newp);
+    if (err == LFS_ERR_OK) { err = lfs_rename(&ctx->lfs, oldp, newp); }
+
+    پیامد:
+        غیراتمی: قطع برق یا خطای I/O دقیقاً بین lfs_remove و lfs_rename مقصد را برای همیشه از بین می‌برد (برخلاف FMFS v2 که journal و دو کپی جدول دارد و برخلاف FatFS که مقصد را با rename به نام موقت کنار می‌زند، نه حذف می‌کند).
+        نقض نوع: این الگو اجازه می‌دهد فایل روی پوشه خالی جایگزین شود (پوشه خالی با lfs_remove حذف می‌شود، سپس فایل rename می‌شود)، که مانند B-02 خلاف POSIX است.
+    راهکار پیشنهادی: استفاده از الگوی بک‌آپ با نام موقت (همانند اصلاح FatFS)، اعتبارسنجی نوع مبدأ/مقصد، و مستندسازی صریح محدودیت اتمی.
+
+FILE-B-04 — سرریز عددی در محاسبه bytes = count * ss در diskio
+
+    فایل/خط: backends/fm_fatfs.c، توابع disk_read/disk_write (حالت FM_FATFS_PROVIDE_DISKIO=1): uint32_t bytes = (uint32_t)count * ss;
+    پیامد: count (UINT, ۳۲ بیتی) ضربدر ۵۱۲ می‌تواند برای درخواست‌های چندسکتوری روی کارت‌های >2TiB سرریز کند و طول ناصحیح به درایور پاس داده شود.
+    راهکار: محاسبه در uint64_t + بررسی بیشینه، یا محدود کردن تعداد سکتور در هر فراخوانی (همانند fm_sd_hal.c که حداکثر 8 سکتور در هر مرحله کار می‌کند).
+
+۴. جدول جهش (mutation testing)
+
+شش جهش هدفمند روی کپی اعمال شد:
+#	جهش	نتیجه
+M1	حذف bounds-check در RamDisk	KILLED (ASan/تست‌های پایه شکست دادند)
+M2	ثابت کردن sector_size روی 512 (نادیده گرفتن بلوک‌سایز دستگاه)	SURVIVED (شکاف پوشش تست)
+M3	کاهش تلاش‌های تَمپ از ۲۵۶ به ۱	KILLED (تست مستقل exhaustion)
+M4	نادیده گرفتن خطای sync در fmfs_save_safe	SURVIVED (RamDisk sync همیشه موفق است، نیاز به fault injection دارد)
+M5	خراب کردن rollback برای rename روی پوشه ناخالی	KILLED (تست‌های موجود Directory_Move)
+M6	حذف bounds-check در Storage_WriteBlocks	KILLED (ASan/تست‌های bounds)
+۵. موارد بررسی نشده و محدودیت‌ها
+
+    هیچ تست سخت‌افزاری (SD/QSPI/SPI/EEPROM/USB MSC) انجام نشد؛ همه تست‌ها روی RamDisk میزبان x86_64 اجرا شدند.
+    رفتار cache coherency و DMA روی STM32H7 با D-Cache در سطح کامنت و طراحی بررسی شد، اما اثبات عملی نیازمند تست روی برد است.
+    پورت به معماری‌های دیگر (مانند Zynq) از نظر Endianness ایمن به‌نظر می‌رسد (FMFS از توابع little-endian استفاده می‌کند) اما alignment/type-size نیاز به تست دارد.
+    سناریوهای exFAT به‌طور جداگانه آزمایش نشدند.
+    تضمین دوام (دوام‌پذیری در برابر قطع برق) برای هیچ‌کدام از بک‌اندها به‌جز FMFS v2 (در محدوده متادیتا) قابل ادعا نیست و در این ممیزی هیچ oracle کرش/قطع برق وجود نداشت.
+
+۶. نتیجه نهایی
+
+کتابخانه در سطح هسته (storage، VFS، FMFS v2) از نظر بررسی محدوده و جلوگیری از سرریز وضعیت خوبی دارد و تست‌های پایه پوشش قابل قبولی روی مسیرهای اصلی دارند. اما سه نقض قرارداد در لایه rename بک‌اندها (B-01، B-02 در FatFS، B-03 در LittleFS) خطر از دست دادن داده کاربر را دارند و نیاز به اصلاح هستند. سرریز عددی B-04 نیز برای کاربردهای کارت حافظه بزرگ باید برطرف شود. هیچ ادعای «کتابخانه کاملاً بدون خطاست» نمی‌شود.
+
+فایل کامل گزارش با تمام جزئیات (شامل مراحل بازتولید دقیق، راهکارهای پیشنهادی، و محدودیت شواهد) در کنار خروجی در /home/user/Clain_Audit_B/AUDIT_FILE_PHASE1_B.md ذخیره شده است.
+
+
+
+
+
+
+
+
+# AUDIT_FILE_PHASE1_C.md — independent file/storage audit, auditor C
+
+Target: `78662328e727910eda54cac0b584c32710f24976` (`Preserve overlapping source in Path_Join`, 2026-11-14T06:25:56Z).  
+Scope: file/storage failure behaviour only. Media/audio/image/video codecs, playback, recording are out of scope. No board/device test, no real user data, no GitHub write, no main-source fix.
+
+## 1. خلاصهٔ ریسک
+
+ممیزی روی کامیت دقیق `78662328e727910eda54cac0b584c32710f24976` انجام شد، نه روی HEAD جاری مخزن (`745f81c`). خط پایه سالم است: `make test` برابر `658/658`، `make check` سریال exit 0، `make m32 M32=ubsan` برابر `659/659`، `make tsan` برابر `663/663` با صفر هشدار، و `check_cmake` با ۱۳ پیکربندی exit 0. با این حال، اوراکل مستقل فایل/ذخیره‌سازی چند رفتار مخرب را تأیید کرد:
+
+- نام‌های موقت/پشتیبان قطعی (`.fm_tmp`, `.fm_tmp.bak`) مالکیت‌امن نیستند؛ `File_Recover`، `File_SafeReplace`، `File_Copy` و `File_Transaction` می‌توانند فایل کاربر را که اتفاقاً همان نام را دارد حذف/بازنویسی کنند.
+- دو `File_SafeReplace` هم‌زمان روی یک مقصد، در POSIX/FMFS به‌طور قطعی دادهٔ درهم‌آمیخته منتشر می‌کنند حتی وقتی یکی از آن‌ها `FM_OK` برمی‌گرداند؛ در LittleFS نیز در تکرارهای TSan، انتشار مقصدِ ناقص با `FM_OK` دیده شد.
+- در FatFS واقعی (کد ST روی دیسک RAM، نه سخت‌افزار)، `Async_StartMove` برای نام مستعارِ هم‌حالت/بی‌حالت (`a` → `A`) ابتدا فایل را truncate می‌کند و سپس منبع را حذف می‌کند؛ نتیجه `FM_OK` با از دست رفتن کامل داده است.
+- `Logger_Flush` پس از short-write، پیش‌تر نوشته‌شده را دوباره می‌نویسد (`ABCABCDEFGH` به‌جای `ABCDEFGH`).
+- عملیات async مقصد را مستقیم می‌نویسد؛ لغو/خطا می‌تواند مقصدِ موجود را با دادهٔ ناقص جایگزین کند.
+- خطاهای cleanup/پس‌ازcommit در `File_Transaction` و LittleFS گاهی نادیده گرفته می‌شوند یا وضعیت commit را مبهم می‌کنند.
+
+هیچ‌کدام از این‌ها «اثبات رفتار کارت واقعی، قطع برق، DMA/cache یا USB» نیست. شبیه‌سازی میزبان فقط اوراکل ترتیبی/خطای نرم‌افزاری است. نبود یافته در یک sweep به معنای تضمین دوام نیست.
+
+## 2. Commit, workspace, environment, tools
+
+| item | value |
+|---|---|
+| Audit date | 2026-11-14 UTC (`env-final.txt`: 2026-11-14T08:12:27Z) |
+| Target commit | `78662328e727910eda54cac0b584c32710f24976` |
+| Target subject/date | `Preserve overlapping source in Path_Join`, `2026-11-14T06:25:56+00:00` |
+| Main checkout HEAD | `745f81c634837a02ec873c21b0dfb6bf7fc7741f` (not the audited source) |
+| Main tracked diff | empty; no tracked source modified |
+| Main status at audit | `?? .arena/`; deliverable adds untracked `AUDIT_FILE_PHASE1_C.md` and `audit_file_c_evidence/` |
+| Target obtained by | read-only `git fetch --no-tags --depth=1 origin 78662328…`; audits/builds used `git archive` copies under `.arena/file-c/` |
+| OS/kernel | Debian 12 bookworm, Linux `6.1.158+ x86_64` |
+| Compiler | gcc `12.2.0` (Debian 12.2.0-14+deb12u1) |
+| Build/binutils | make `4.3`, ld `2.40`, bash `5.2.15`, git `2.39.5`, python `3.11.2` |
+| Added host tools | pip `ziglang 0.14.1`, `cmake 3.31.6`, `ctest 3.31.6` |
+| Missing | clang, valgrind, gdb; `gcc -m32` unusable (no 32-bit libc headers) |
+| Real FatFS source | ST `stm32-mw-fatfs` tarball at `dd9126e957ae841a13ccbe2115d39a1fb7414126`; sha256 `9663d6f62792c7117f9615a58745280d4c62c611c1238eb626f504e17d646fbc` |
+
+Workspaces: `.arena/file-c/target` (pristine reference), `baseline` (baseline builds), `experiment` (probes), `mutants/M1…M7`, `fixcheck` (two proposed fixes only). Key evidence copied outside `.arena` to `audit_file_c_evidence/` because `.arena` is snapshot-excluded.
+
+Major command ledger (cwd is `.arena/file-c/<workspace>/Clain_FileManager/FileManager_lib` unless noted; full logs in evidence):
+
+| command | cwd workspace | exit | pass/fail/skip |
+|---|---|---:|---|
+| `make -j4 test` | baseline | 0 | 658/658 |
+| `make -j4 check` | baseline | 2 | harness clean race; dismissed, not library |
+| `make check` serial | baseline | 0 | FatFS 51/51×3 + 56/56; examples/ports OK; cmake/32 then SKIP |
+| `make clean && make m32 M32=ubsan` | baseline | 0 | 659/659 |
+| `make tsan` | baseline | 0 | 663/663, 0 TSan warnings |
+| `FM_REQUIRE_CMAKE=1 sh tools/check_cmake.sh` | baseline | 0 | 13 configurations OK |
+| `sh tools/check_fatfs_real_rename.sh …/fatfs-src/source` | baseline | 0 | real FatFS rename collision PASS |
+| `audit_c_probe B basic/sweep-*/errors-*` ×21 | experiment | 0/1 by design | counts in §3; ASan+UBSan, no sanitizer reports |
+| `audit_c_race B`, `audit_c_race_tsan B` | experiment | 0/1 by design | 40 checks/backend; TSan warnings 0 |
+| `audit_c_fatfs`, `audit_c_fatfs_real` | experiment | 1 | mock/real alias-move violation; occupied aside preserved |
+| mutant builds + runs M1…M7 | mutants | 0/1 by design | 6 killed, 1 survived (§7) |
+| fixcheck basic ×3 / real FatFS | fixcheck | 1 / 0 | basic 7 violations (logger fixed); real FatFS 0 |
+| `git status/diff/rev-parse` | main repo root | 0 | tracked diff empty; HEAD unchanged |
+
+## 3. Coverage: failpoints, races, backends
+
+Backends: `0=POSIX`, `1=FMFS`, `2=LittleFS` on a 256 KiB shared mmap NOR image (512 B blocks). FatFS tested separately with the repo mock and with real ST `ff.c` + RAM diskio. Failpoints hook the mounted `fs.ops` vtable and storage `write/erase/sync`; each cut/error run resets from the same seeded snapshot. Process cuts use `fork` + `_exit(77)` and remount; this is an ordered-durable-prefix model, not hardware power loss.
+
+| probe | POSIX | FMFS | LittleFS | result |
+|---|---:|---:|---:|---|
+| basic ownership/cancellation oracle | 9 checks / 8 viol | 9 / 8 | 9 / 8 | FILE-C-01/04/05/06 |
+| sweep safe-replace, process cuts | 8 cuts / 0 | 110 / 0 | 809 / 0 | no violation in this model |
+| sweep transaction, process cuts | 16 / 0 | 189 / 0 | 826 / 0 | no violation in this model |
+| sweep copy, process cuts | 7 / 0 | 64 / 0 | 13 / 0 | no violation in this model |
+| in-process errors safe | 8 reached / 0 | 110 / 0 | 809 / 1 | LittleFS post-commit sync ambiguity |
+| in-process errors transaction | 16 / 1 | 189 / 15 | 826 / 3 | ignored cleanup faults / stale backup |
+| in-process errors copy | 7 / 0 | 64 / 0 | 13 / 1 | LittleFS post-commit sync ambiguity |
+| deterministic race harness, ASan/UBSan | 40 checks / 1 | 40 / 1 | 40 / 0 | SafeReplace interleave on POSIX/FMFS |
+| race harness, TSan | 40 / 1, 0 TSan warnings | 40 / 1, 0 warnings | 40 / 0 in final ASan; TSan reps 3 and 5 published partial dst with rc=0 | LittleFS schedule-dependent observation |
+| FatFS mock probe | — | — | — | occupied `~fm00.tmp` preserved; async case-alias move lost data |
+| real FatFS RAM-disk probe | — | — | — | sync alias controls pass; `Async_StartMove("/sd/a","/sd/A")` result=0, both names absent |
+| baseline `make tsan` | 663/663, 0 warnings | — | — | reproduced prior claim |
+| `check_cmake` | 13 configurations OK | — | — | includes 658/650/663/666/529/557/505/497/614 test variants |
+| `make m32 M32=ubsan` | 659/659, zig cc x86-linux-musl | — | — | clean 32-bit host build |
+
+Dry event counts (W/F/C/R/D + storage W/erase/sync): POSIX safe `4/2/1/1/0`, txn `5/5/3/2/1`, copy `1/3/2/1/0`; FMFS safe storage `88/0/14`, txn `149/0/24`, copy `49/0/8`; LittleFS safe `400/397/4`, txn `404/398/8`, copy `3/0/3`.
+
+## 4. Confirmed findings
+
+Severity: S1 critical/data-loss, S2 high, S3 medium, S4 low/contract. Lines are at target commit.
+
+### FILE-C-01 — S2 — deterministic temp/backup names are not ownership-safe
+- Files/functions: `src/fm_safe.c:63 File_SafeReplace`, `:80` stale-temp delete, `:177 File_Recover`, `:203 File_Transaction`, `:229` backup copy; `src/fm_file.c:2201 File_Copy`, `:2255` tmp staging, `:2312` failure delete.
+- Trigger: a user file already exists at `<path>.fm_tmp` or `<path>.fm_tmp.bak`; no ownership marker/reservation contract exists.
+- Repro/event order (`audit_c_probe BACKEND basic`, all 0/1/2): seed `/p/a=OLD`; create `/p/a.fm_tmp=USER`; `File_Recover("/p/a")` → rc=0, tmp absent. Failed `File_SafeReplace` with write#1 fault → rc=-6, pre-existing tmp absent. `File_Transaction` with `/p/a.fm_tmp.bak=PRECIOUS` → rc=0, bak replaced by OLD. `File_Copy("/p/c","/p/a")` with `/p/a.fm_tmp=USER` → rc=0, user tmp destroyed.
+- Expected: recovery/cleanup removes only library-owned temporaries; an unrelated file at a derived name is preserved or the operation refuses.
+- Actual/root cause: deterministic suffixes are treated as owned solely by name; `File_Recover` deletes unconditionally, SafeReplace pre-deletes, Copy/Transaction rename over the derived name.
+- Suggested fix: ownership manifest/token or exclusive-create claim; recover only claimed temps; alternatively reserve suffixes explicitly in the API contract and reject collisions. Do not delete unowned names.
+- Compatibility risk: legacy stale temps may need a migration/recovery policy; refusing collisions changes behaviour for callers who currently rely on silent cleanup.
+- Evidence: `probe-basic-{0,1,2}.log`, snapshots before/after.
+
+### FILE-C-02 — S1 — concurrent SafeReplace can publish interleaved/foreign data
+- Files/functions: `src/fm_safe.c:63 File_SafeReplace` (shared `<path>.fm_tmp` across open/write/flush/close/rename); mount lock is per backend call, not per whole replace.
+- Trigger: two threads call `File_SafeReplace` on the same destination.
+- Repro: `audit_c_race 0` and `1` with barrier/condvar ordering. POSIX/FMFS: `rcA=0 rcB=-3 len=200000 first=B last=A`; the successful call published a payload that is neither A nor B. LittleFS: final ASan run passed, but TSan repetitions 3 and 5 logged `rcA=-5 rcB=0 len=56972` and `rcA=0 rcB=-5 len=56972` (partial destination with a successful result).
+- Expected: a successful SafeReplace publishes exactly its own complete payload, or fails without publishing another writer’s partial data.
+- Actual/root cause: both callers use the same temp name; one can truncate/rewrite/close/rename the other’s temp between backend calls.
+- Suggested fix: per-target operation lock covering the whole replace, or unique claimed temp names plus atomic publish; LittleFS needs the same API-level serialization.
+- Compatibility risk: same-target writers serialize; lock ordering must remain below VFS/cache locks.
+- Evidence: `race-{0,1}.log`, `race-tsan-2-rep3.log`, `race-tsan-2-rep5.log`.
+
+### FILE-C-03 — S1 — FatFS async case-alias move deletes the only copy
+- Files/functions: `src/fm_async.c:582 async_start`, `:615 strcmp(a->src,a->dst)`, `:148 async_poll_copy`, `:159` destination truncate, `:197` source delete.
+- Trigger: FatFS/FAT case-insensitive alias, e.g. `/sd/a` → `/sd/A`; normalized strings differ, so the self-move guard misses backend identity.
+- Repro: real ST FatFS on RAM disk: seed `/sd/a=DATA`; `Async_StartMove("/sd/a","/sd/A")` → start=0, state=DONE, result=0; both `/sd/a` and `/sd/A` absent. Sync controls: `File_Move` preserves data; `File_Copy` rejects alias with -1.
+- Expected: alias move is a rename/no-op or rejected without mutation; it must not truncate then delete the only entry.
+- Actual/root cause: async path compares normalized strings only, then streams directly into the alias and deletes the source.
+- Suggested fix: use backend-aware identity (`FM_File_SamePath`/mount no-case policy) in `async_start`, or route same-mount async move through rename. Validated in `fixcheck`: start=-1, data preserved, real-FatFS probe 0 violations.
+- Compatibility risk: alias copies/moves previously accepted are now rejected; 8.3 long-name aliases still need backend identity support.
+- Evidence: `fatfs-real-probe.log`, `fixcheck/fatfs-real.log`.
+
+### FILE-C-04 — S3 — logger short-write retry duplicates the prefix
+- File/function: `src/fm_logger.c:582 Logger_Flush`, write at `:594`, short-write check at `:599`.
+- Trigger: backend returns `FM_OK` with `written < buffer_len` (short write), then caller retries flush.
+- Repro: `Logger_WriteRaw("ABCDEFGH")` with `flush_records=1` and a 3-byte short-write hook → first rc=-6; second `Logger_Flush` rc=0; final file `ABCABCDEFGH` length 11.
+- Expected: retry writes only the remaining bytes, or seeks/truncates to the original offset; no duplicate prefix.
+- Actual/root cause: `Logger_Flush` returns `FM_ERR_IO` on partial write but leaves `buffer_len` unchanged and does not account for bytes already accepted.
+- Suggested fix: consume partial writes in a loop (`memmove` remainder) or reposition before retry. Validated in `fixcheck`: final `ABCDEFGH` length 8 on all three backends; basic violations drop 8→7.
+- Compatibility risk: `WriteRaw` may now return OK under transparent partial-write retry instead of IO.
+- Evidence: `probe-basic-*.log`, `fixcheck/basic-*.log`.
+
+### FILE-C-05 — S3 — async copy/move can leave a partial pre-existing destination on cancel/error
+- Files/functions: `src/fm_async.c:148 async_poll_copy`, `:159` direct `FM_OPEN_TRUNCATE` destination, `:537 Async_Poll` cancel-first.
+- Trigger: `Async_StartMove`/`StartCopy` to an existing destination, then cancel or injected error after some chunks.
+- Repro: basic oracle, all backends: `/p/b` 8192 bytes, `/p/a=OLD`; start move, poll once, cancel, poll → state=CANCELLED result=-24, destination changed to 512 bytes of source; old destination not preserved.
+- Expected: either document async transfer as non-atomic, or stage/rollback like `File_Copy`’s F-04 policy; cancellation should not silently replace caller data with a partial file.
+- Actual/root cause: async state machine writes directly to the final destination and has no owned-temp rollback.
+- Suggested fix: stage to an owned temp and publish on completion, or explicitly document partial-destination semantics and provide cleanup. Not fix-validated here.
+- Compatibility risk: staging needs free space and rename support; direct-write behaviour changes.
+- Evidence: `probe-basic-*.log` async case.
+
+### FILE-C-06 — S3 — logger finalize/recover can overwrite/delete unrelated logger-shaped names
+- Files/functions: `src/fm_logger.c:332 logger_finalize_file`, rename at `:364`; `:905 Logger_Recover`, delete at `:957`; name generation `:224 logger_make_name`.
+- Trigger: while a crash-safe logger is active, another actor creates the final name (`lg_1.csv`); or a user file matches `<base>*.fm_tmp`.
+- Repro: basic oracle: logger writes `LOG`, user creates `/p/lg_1.csv=USER`, `Logger_Stop` → rc=0, final file becomes logger content; `Logger_Recover("/p","lg")` deletes `/p/lg_user_77.csv.fm_tmp=USER`.
+- Expected: logger publishes only to a name it owns/claimed; recovery deletes only its own stale temps.
+- Actual/root cause: start-time existence bump is not a reservation; finalize rename-over and pattern recovery trust names alone.
+- Suggested fix: claim/manifest final and tmp names, exclusive publish, or rotate to a free final name at finalize; recover only owned entries.
+- Compatibility risk: recovery may leave legacy/unclaimed temps; callers relying on pattern cleanup need a migration path.
+- Evidence: `probe-basic-*.log` logger cases.
+
+### FILE-C-07 — S4 — Transaction ignores backup-cleanup failure and can return OK with a stale backup
+- File/function: `src/fm_safe.c:203 File_Transaction`, final `(void)File_Delete(bak)` at `:265`.
+- Trigger: fault on the final backup delete, or backend storage write/sync faults during cleanup.
+- Repro: errors-txn: POSIX delete#1 → rc=0, dst NEW, `/p/a.fm_tmp.bak=OLD` remains. FMFS 15 points (delete#1, storage_write#138–149, storage_sync#23/24) and LittleFS 3 points (delete#1, storage_write#404, storage_sync#8) also return rc=0 with new data; most leave OLD backup, one LittleFS sync point has no backup.
+- Expected: either propagate cleanup failure, retry, or document that success may leave a stale backup; do not imply full cleanup.
+- Actual/root cause: cleanup result discarded; some backend cleanup faults are not surfaced.
+- Suggested fix: return a distinct cleanup-warning/error policy or retry; document stale-backup recovery. Beware returning IO after data is committed.
+- Compatibility risk: callers may see new non-OK results after successful data replacement.
+- Evidence: `probe-errors-txn-{0,1,2}.log`.
+
+### FILE-C-08 — S4 — LittleFS post-commit sync failure gives an ambiguous commit status
+- Files/functions: `src/fm_safe.c File_SafeReplace`, `src/fm_file.c File_Copy`; LittleFS `lfs_bd_sync`/rename path; storage sync hook.
+- Trigger: `storage_sync` fails after the new file has already been renamed/committed.
+- Repro: errors-safe LittleFS sync#4 → rc=-6 but dst NEW; errors-copy LittleFS sync#3 → rc=-6 but dst NEW.
+- Expected: define whether rename is the visibility commit point and sync is durability; report status so the caller can distinguish “not committed” from “committed but durability unknown”.
+- Actual/root cause: a post-commit barrier failure is returned as ordinary IO although the namespace already changed.
+- Suggested fix: document/encode commit-vs-durability semantics, or perform required sync before publish where the backend allows it.
+- Compatibility risk: error-code expectations change; this is not evidence of a lying-flush device.
+- Evidence: `probe-errors-safe-2.log`, `probe-errors-copy-2.log`.
+
+## 5. Unconfirmed hypotheses (not counted as defects)
+
+- Real card/power-loss behaviour, torn sectors, volatile write caches, lying flush, DMA/cache maintenance, USB MSC timing: not tested; ordered-prefix cuts are not proof.
+- FatFS long-name ↔ 8.3 alias identity in async paths: case alias confirmed; generated 8.3 alias not exercised.
+- LittleFS partial-publish schedule: observed in TSan repetitions, not yet forced by a deterministic failpoint sequence; POSIX/FMFS interleave is deterministic.
+- Allocation-failure failpoints (`FM_Alloc`), erase/program faults on real NAND/NOR parts, and wear-leveling interactions: not injected beyond the RAM-image storage callbacks.
+- Cache invalidation ordering in `FM_File_RenameResolved` (invalidates before BUSY check), transfer `no_overwrite` TOCTOU, cross-mount `File_Move` rollback under faults: code leads, not reproduced here.
+- Zynq/ARM/big-endian/ABI behaviour: no target build or run; no portability claim beyond clean host 32/64 builds.
+
+## 6. Prior-findings review
+
+| prior claim/source | independent verdict |
+|---|---|
+| `audit_reports/FILE_PHASE1_INTERNAL.md`: FatFS rename-over no longer deletes occupied `~fmrn.tmp`/aside names | Held in mock and real ST FatFS host probe: occupied `~fm00.tmp` preserved; exhaustion leaves source/destination. `baseline-fatfs-real-rename.log` PASS. |
+| Same report: FatFS rename-over is still multi-step, not power-cut atomic | Still true by code (`backends/fm_fatfs.c:683`, aside→rename→unlink) and README. Not a new regression; no crash-atomic claim accepted. |
+| Same report: deterministic `.fm_tmp`/backup names need separate ownership review | Confirmed as FILE-C-01/02/06. |
+| Same report: `make tsan` 663/663, 0 warnings | Reproduced independently (`baseline-tsan.log`). Absence of TSan warnings is not a race proof. |
+| Same report: CMake/32-bit skipped because tools absent | Re-run with installed tools: `check_cmake` 13 configs OK; `make m32 M32=ubsan` 659/659. |
+| Target commit subject: overlapping `Path_Join` preserved | Fix present at target; not independently re-fuzzed in this file/storage pass. No claim beyond code presence and green baseline. |
+| `ReportV41.txt` | Audio/media audit; out of scope except noting it is not file/storage evidence. |
+
+## 7. Mutation testing (experiment copies only)
+
+Each mutant is a fresh `git archive` of the target with one source change, rebuilt with ASan/UBSan and run against the audit oracle. “Killed” means the audit probe/race harness reported the targeted violation; it is not a claim about the repo’s own suite.
+
+| id | mutation | test | verdict |
+|---|---|---|---|
+| M1 | SafeReplace ignores `File_Close` error | `audit_c_probe 0 errors-safe` | killed (BAD_ERROR flush#2/close#1, rc=0 new) |
+| M2 | SafeReplace ignores `File_Flush` error | `0 errors-safe` | killed (flush#1 rc=0 new) |
+| M3 | SafeReplace swallows rename error | `0 errors-safe` | killed (rename#1 rc=0 old) |
+| M4 | Transaction ignores backup-copy failure | `0 errors-txn` | killed (write/flush points rc=0 new) |
+| M5 | File_Copy drops destination close error | `0 errors-copy` | killed (flush#2/close#1 rc=0 new) |
+| M6 | `fop_write_end` trusts cached `f->size` instead of backend end | `audit_c_race 1` (FMFS, forced normal-write-before-append) | killed (APPEND_WRITE misplaced records) |
+| M7 | SafeReplace failure paths leak owned temp | `0 errors-safe` | survived — current error oracle does not assert temp absence; coverage gap, not a safety guarantee |
+
+Logs: `audit_file_c_evidence/mutants/`. Early harness arg-order and shared-object-dir mistakes were corrected; final runs use unique per-library object dirs and correct `BACKEND MODE` order.
+
+## 8. Dismissed false positives / harness corrections
+
+- Parallel `make -j4 check` exit 2 was a shared-tree clean race; serial `make check` exit 0. Not a library finding.
+- Probe mount failure: `FS_Mount("/p")` requires a registered storage named `p`; POSIX also needs a dummy RamDisk. Fixed harness.
+- Fork-private static image gave impossible sweep counts; replaced with `mmap(MAP_SHARED|MAP_ANONYMOUS)` and reseeded POSIX reset.
+- Logger names are `lg_1.csv`, not zero-padded `lg_000001.csv`; corrected oracle.
+- `ld --wrap` cannot intercept intra-TU `fs->ops` calls in `fm_file.c`; failpoints moved to vtable hooks. Wraps remain only for cross-TU race ordering.
+- Failpoint decision compared index to event kind and counted unreached points as violations; fixed to compare kind and skip `not_run`. The old `probe-errors-trace.log` is discarded.
+- Race append oracle initially used uniform payloads and weak ordering; corrected to patterned payloads, forced normal-write-before-append, and correct tail expectation. Baseline append/write then passes; M6 is killed on FMFS (POSIX O_APPEND masks the cached-size mutant).
+- FatFS occupied-aside deletion was not reproduced; prior fix held. External `File_Close`/double-close/read lifetime checks pass (`0,-21,-1`). Open-vs-rename/delete/unmount return BUSY; nested transfer reentrancy returns BUSY; handle-pool exhaustion returns NO_MEMORY as expected.
+
+## 9. Unexamined items and simulation/hardware limits
+
+- No board, no real SD/NOR/NAND, no power-cut, no USB, no DMA/cache maintenance, no Zynq/ARM target build. Host 32-bit is zig x86-linux-musl, not ARM.
+- Process-cut sweep assumes ordered durable prefixes and remount; it does not model reordering, torn pages beyond injected short writes, volatile device caches, or controller firmware.
+- LittleFS image is 256 KiB RAM with 512 B blocks; FMFS is the repo’s RAM-backed FS; POSIX is CWD-relative host files. These are oracle substrates, not device fidelity claims.
+- Not deeply examined: recursive async delete/scan cancellation, directory rename/copy fault sweeps, cross-mount move rollback, logger rotation/circular cleanup under faults, cache invalidation races, allocation failure, big-endian, compiler other than gcc/zig, clang/valgrind/gdb (absent).
+- Media read/write/playback entirely out of scope; baseline suites that include media tests are reported only as build/regression context, not media audit evidence.
+
+## 10. Mergeable list
+
+| id | severity | status | component | file:function | cause | reproducer | suggested fix | test |
+|---|---|---|---|---|---|---|---|---|
+| FILE-C-01 | S2 | confirmed | safe/copy/recover | `fm_safe.c:File_SafeReplace/File_Recover/File_Transaction`, `fm_file.c:File_Copy` | derived names treated as owned without claim | `audit_c_probe 0/1/2 basic` collision cases | ownership manifest/exclusive claim; recover only owned temps | basic before/after; add owned-stale cleanup positive test |
+| FILE-C-02 | S1 | confirmed | safe replace concurrency | `fm_safe.c:File_SafeReplace` | shared temp across whole multi-call op | `audit_c_race 0/1`; TSan LittleFS reps | per-target op lock or unique claimed temp | barrier race; assert successful payload equals caller payload |
+| FILE-C-03 | S1 | confirmed, fix validated in temp | async/FatFS alias | `fm_async.c:async_start/async_poll_copy` | string-only self guard misses FAT alias | real FatFS RAM probe `Async_StartMove a→A` | backend-aware identity or rename path | `fixcheck` real probe 0 violations |
+| FILE-C-04 | S3 | confirmed, fix validated in temp | logger | `fm_logger.c:Logger_Flush` | partial write not consumed before retry | short-write hook `ABCDEFGH` | consume remainder/reposition | `fixcheck` basic logger len=8 |
+| FILE-C-05 | S3 | confirmed behaviour/contract gap | async transfer | `fm_async.c:async_poll_copy` | direct destination write, no rollback | basic cancelled move | stage/rollback or document non-atomic | cancel/error destination-preservation oracle |
+| FILE-C-06 | S3 | confirmed | logger publish/recover | `fm_logger.c:logger_finalize_file/Logger_Recover` | name-only ownership | basic logger final/recover cases | claim final/tmp names; rotate or refuse | collision + owned-recovery tests |
+| FILE-C-07 | S4 | confirmed | transaction cleanup | `fm_safe.c:File_Transaction` | backup delete result ignored | errors-txn delete/storage cleanup faults | propagate/retry/document stale backup | assert cleanup status policy |
+| FILE-C-08 | S4 | confirmed behaviour/contract gap | LittleFS sync | `fm_safe.c`, `fm_file.c`, LittleFS sync path | post-commit sync failure returned as ordinary IO | errors-safe/copy LittleFS sync points | define visibility vs durability status | post-commit fault oracle |
+
+No fixes were applied to the main source. `fixcheck` contains only two experimental patches (async alias guard, logger partial-write consumption) and is not a deliverable patch set. This report is not a defect-free guarantee; unconfirmed and unexamined items remain.
