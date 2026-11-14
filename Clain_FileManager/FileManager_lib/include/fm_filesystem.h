@@ -100,7 +100,17 @@ struct FM_FSOps
     FM_FS_DirReadFn      dir_read;
     FM_FS_GetFreeFn      get_free;
     FM_FS_GetTypeFn      get_type;
+    /* File publication without replacing an occupied destination. NULL
+     * means unsupported. Called with the mount lock held. FM_ERR_CLEANUP
+     * means destination published but source cleanup failed. Adapters using
+     * stat+rename must ensure no other actor accesses this instance outside
+     * the same mount lock. */
+    FM_FS_RenameFn       rename_noreplace;
 };
+
+#define FM_FS_CAP_EXCLUSIVE_CREATE 0x01u /* file_open honors FM_OPEN_EXCLUSIVE atomically */
+/* FM_FS has grown: rebuild applications and initialize custom adapters to
+ * zero. Set this capability only for a true atomic create-if-absent. */
 
 struct FM_FS
 {
@@ -110,6 +120,7 @@ struct FM_FS
     FM_Storage     *storage;             /* bound storage       */
     FM_Bool         mounted;
     struct FM_FS   *next;                /* internal registry   */
+    uint32_t        capabilities;        /* FM_FS_CAP_*; opt-in */
 };
 
 /* ------------------------------------------------------------------ */

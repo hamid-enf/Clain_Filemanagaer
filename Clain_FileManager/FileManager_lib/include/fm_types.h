@@ -52,7 +52,8 @@ enum
     FM_ERR_NOT_DIRECTORY         = -23,
     FM_ERR_CANCELLED             = -24,
     FM_ERR_NOT_READY             = -25,
-    FM_ERR_INTERNAL              = -26
+    FM_ERR_INTERNAL              = -26,
+    FM_ERR_CLEANUP               = -27 /* committed; post-commit cleanup failed */
 };
 
 /* Simple-API style aliases (see spec: FILE_OK, FILE_ERROR_*) */

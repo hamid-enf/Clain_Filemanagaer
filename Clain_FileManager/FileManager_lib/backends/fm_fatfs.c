@@ -438,7 +438,8 @@ static BYTE fatfs_flags(uint32_t mode)
 
     if (mode & FM_OPEN_CREATE)
     {
-        if (mode & FM_OPEN_TRUNCATE) flags |= FA_CREATE_ALWAYS;
+        if (mode & FM_OPEN_EXCLUSIVE) flags |= FA_CREATE_NEW;
+        else if (mode & FM_OPEN_TRUNCATE) flags |= FA_CREATE_ALWAYS;
         else if (flags & FA_WRITE)   flags |= FA_OPEN_ALWAYS;
         else                         flags |= FA_OPEN_EXISTING;
     }
@@ -680,6 +681,16 @@ static FM_Result fatfs_delete(FM_FS *fs, const char *path)
     return fatfs_map_err(f_unlink(fpath));
 }
 
+static FM_Result fatfs_rename_noreplace(FM_FS *fs, const char *old_path,
+                                         const char *new_path)
+{
+    FatFS_Ctx *ctx = fatfs_ctx(fs);
+    char old_name[FM_PATH_MAX], new_name[FM_PATH_MAX];
+    fatfs_path(ctx, old_path, old_name, sizeof(old_name));
+    fatfs_path(ctx, new_path, new_name, sizeof(new_name));
+    return fatfs_map_err(f_rename(old_name, new_name));
+}
+
 static FM_Result fatfs_rename(FM_FS *fs, const char *old_path, const char *new_path)
 {
     FatFS_Ctx *ctx = fatfs_ctx(fs);
@@ -715,9 +726,19 @@ static FM_Result fatfs_rename(FM_FS *fs, const char *old_path, const char *new_p
          * on the other file systems. */
         char aside[FM_PATH_MAX];
         FILINFO fi;
+        FILINFO src_info;
+        FILINFO dst_info;
         size_t cut = strlen(fnew);
         unsigned slot;
         static const char hex[] = "0123456789abcdef";
+
+        /* Refuse file/directory type changes before moving either entry. */
+        fr = f_stat(fold, &src_info);
+        if (fr != FR_OK) return fatfs_map_err(fr);
+        fr = f_stat(fnew, &dst_info);
+        if (fr != FR_OK) return fatfs_map_err(fr);
+        if ((src_info.fattrib & AM_DIR) != (dst_info.fattrib & AM_DIR))
+            return (src_info.fattrib & AM_DIR) ? FM_ERR_NOT_DIRECTORY : FM_ERR_IS_DIRECTORY;
 
         while (cut > 0u && fnew[cut - 1u] != '/') cut--;
         if (cut + sizeof("~fm00.tmp") > sizeof(aside))
@@ -933,6 +954,7 @@ FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv)
     if (pdrv >= 10 || pdrv >= FF_VOLUMES) return FM_ERR_INVALID_ARGUMENT;
 
     memset(fs, 0, sizeof(*fs));
+    fs->capabilities = FM_FS_CAP_EXCLUSIVE_CREATE;
 
     FM_Lock();
     /* An FM_FS that is initialised again keeps the slot it has; one that
@@ -1018,6 +1040,7 @@ FM_Result FatFS_Init(FM_FS *fs, uint8_t pdrv)
     fs->ops.stat = fatfs_stat;
     fs->ops.delete_file = fatfs_delete;
     fs->ops.rename = fatfs_rename;
+    fs->ops.rename_noreplace = fatfs_rename_noreplace;
     fs->ops.mkdir = fatfs_mkdir;
     fs->ops.rmdir = fatfs_rmdir;
     fs->ops.dir_open = fatfs_dir_open;
@@ -1097,6 +1120,9 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 
     if (s == NULL || s->read == NULL || buff == NULL) return RES_PARERR;
     ss = fatfs_sector_size(s);
+    if (count == 0 || (uint64_t)count > UINT32_MAX / ss ||
+        (uint64_t)sector > UINT64_MAX / ss - ((uint64_t)count - 1u))
+        return RES_PARERR;
     bytes = (uint32_t)count * ss;
     if (!FM_Cache_SdDirectOk(buff, bytes) && ss == 512u)
     {
@@ -1104,7 +1130,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 
         for (i = 0; i < count; i++)
         {
-            if (s->read(s, (uint64_t)(sector + i) * ss, fm_sd_bounce, ss) != FM_OK)
+            if (s->read(s, ((uint64_t)sector + i) * ss, fm_sd_bounce, ss) != FM_OK)
             {
                 return RES_ERROR;
             }
@@ -1130,6 +1156,9 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     if (s == NULL || s->write == NULL || buff == NULL) return RES_PARERR;
     if (s->read_only) return RES_WRPRT;
     ss = fatfs_sector_size(s);
+    if (count == 0 || (uint64_t)count > UINT32_MAX / ss ||
+        (uint64_t)sector > UINT64_MAX / ss - ((uint64_t)count - 1u))
+        return RES_PARERR;
     bytes = (uint32_t)count * ss;
     if (!FM_Cache_SdDirectOk(buff, bytes) && ss == 512u)
     {
@@ -1139,7 +1168,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
         {
             memcpy(fm_sd_bounce, buff + (size_t)i * ss, ss);
             FM_Cache_CleanForDma(fm_sd_bounce, ss);
-            if (s->write(s, (uint64_t)(sector + i) * ss, fm_sd_bounce, ss) != FM_OK)
+            if (s->write(s, ((uint64_t)sector + i) * ss, fm_sd_bounce, ss) != FM_OK)
             {
                 return RES_ERROR;
             }
@@ -1178,7 +1207,14 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
         if (s->erase != NULL)
         {
             LBA_t *range = (LBA_t *)buff;
-            return (s->erase(s, (uint64_t)range[0] * ss, (uint32_t)(range[1] - range[0] + 1) * ss) == FM_OK) ? RES_OK : RES_ERROR;
+            uint64_t first, last, sectors;
+            if (range == NULL) return RES_PARERR;
+            first = (uint64_t)range[0];
+            last = (uint64_t)range[1];
+            if (last < first || last > UINT64_MAX / ss ||
+                last - first >= (uint64_t)UINT32_MAX / ss) return RES_PARERR;
+            sectors = last - first + 1u;
+            return (s->erase(s, first * ss, (uint32_t)(sectors * ss)) == FM_OK) ? RES_OK : RES_ERROR;
         }
         return RES_OK;
     default:

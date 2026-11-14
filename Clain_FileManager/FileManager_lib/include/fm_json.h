@@ -69,7 +69,10 @@ FM_Result Json_OpenBuffer(const char *text, size_t len, FM_Json *doc,
 /* Write a JSON string to a file atomically (temp + rename). */
 FM_Result Json_SaveFile(const char *path, const char *json_text);
 
-/* Accessors; key = "a.b[2].c" ; returns FM_ERR_NOT_FOUND if absent. */
+/* Accessors; key = "a.b[2].c" ; returns FM_ERR_NOT_FOUND if absent.
+ * Escaped Unicode is decoded to UTF-8. Embedded NUL cannot be returned by
+ * the C-string accessor and yields FM_ERR_INVALID_FORMAT. Non-ASCII text
+ * in JSON strings must be well-formed UTF-8. */
 FM_Result Json_ReadString(const FM_Json *doc, const char *key, char *out,
                           size_t out_size);
 FM_Result Json_ReadInt(const FM_Json *doc, const char *key, int32_t *out);
@@ -119,16 +122,24 @@ FM_Result Json_LoadFloat(const char *path, const char *key, float *out,
 /* ------------------------------------------------------------------ */
 /* Writer (builds JSON text in a user buffer)                          */
 /* ------------------------------------------------------------------ */
+/* Maximum open containers in both parser and writer. */
+#ifndef FM_JSON_MAX_DEPTH
+#define FM_JSON_MAX_DEPTH 64
+#endif
+#if FM_JSON_MAX_DEPTH < 1 || FM_JSON_MAX_DEPTH > 64
+#error "FM_JSON_MAX_DEPTH must be between 1 and 64"
+#endif
+
 typedef struct
 {
     char  *buf;
     size_t cap;
     size_t len;
     int    depth;
-    FM_Bool first[8];     /* first-member tracking per depth */
-    FM_Bool pending[8];   /* object key is waiting for a value  */
+    FM_Bool first[FM_JSON_MAX_DEPTH];     /* first-member tracking per depth */
+    FM_Bool pending[FM_JSON_MAX_DEPTH];   /* object key is waiting for a value  */
     FM_Bool root_written;
-    uint8_t container[8]; /* FM_JsonType of each open container */
+    uint8_t container[FM_JSON_MAX_DEPTH]; /* FM_JsonType of each open container */
     FM_Result err;
 } FM_JsonWriter;
 

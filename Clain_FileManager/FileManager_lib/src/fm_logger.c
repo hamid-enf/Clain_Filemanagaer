@@ -316,7 +316,7 @@ static FM_Result logger_open_file(FM_Logger *lg)
     }
 
     r = File_OpenEx(&lg->file, open_name,
-                    FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+                    FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (r != FM_OK)
     {
         return r;
@@ -361,7 +361,7 @@ static FM_Result logger_finalize_file(FM_Logger *lg)
             return FM_ERR_TOO_LARGE;
         }
         (void)strcat(tmp_name, ".fm_tmp");
-        r = File_Rename(tmp_name, final_name);
+        r = FM_File_RenameNoReplace(tmp_name, final_name);
         if (r != FM_OK)
         {
             return r;
@@ -596,8 +596,15 @@ FM_Result Logger_Flush(FM_Logger *lg)
         {
             return r;
         }
+        if (wr > lg->buffer_len)
+        {
+            return FM_ERR_IO; /* invalid backend result */
+        }
         if (wr != lg->buffer_len)
         {
+            /* Bytes accepted by the backend must not be replayed on retry. */
+            lg->buffer_len -= wr;
+            memmove(lg->buffer, lg->buffer + wr, lg->buffer_len);
             return FM_ERR_IO;
         }
         lg->buffer_len = 0;
@@ -904,7 +911,7 @@ FM_Result Logger_Printf(FM_Logger *lg, const char *fmt, ...)
 
 FM_Result Logger_Recover(const char *dir, const char *base_name)
 {
-    /* Delete stale "<base>*..fm_tmp" files after a power loss. */
+    /* A matching filename does not prove it belongs to this logger. */
     FM_Dir *d;
     FM_DirEntry e;
     FM_Result r;
@@ -932,8 +939,6 @@ FM_Result Logger_Recover(const char *dir, const char *base_name)
     }
     for (;;)
     {
-        char full[FM_PATH_MAX];
-
         r = Directory_Read(d, &e);
         if (r == FM_ERR_EOF)
         {
@@ -952,10 +957,8 @@ FM_Result Logger_Recover(const char *dir, const char *base_name)
         {
             continue;
         }
-        if (Path_Join(dir, e.name, full, sizeof(full)) == FM_OK)
-        {
-            (void)File_Delete(full);
-        }
+        (void)Directory_Close(d);
+        return FM_ERR_EXISTS; /* inspect and remove only after verifying ownership */
     }
     (void)Directory_Close(d);
     return FM_OK;

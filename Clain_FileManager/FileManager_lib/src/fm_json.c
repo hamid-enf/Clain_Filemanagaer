@@ -107,35 +107,134 @@ static FM_Bool peek(Parser *p, char c)
 static FM_Result parse_value(Parser *p, uint8_t parent, int depth,
                              uint8_t *out_tok);
 
+/* Decode one raw JSON string character into UTF-8. Input spans exclude the
+ * surrounding quotes. The parser uses the same decoder for validation. */
+static int json_hex(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static FM_Result json_hex4(const char *text, size_t end, size_t *pos, uint32_t *value)
+{
+    unsigned i;
+    uint32_t v = 0;
+    if (*pos > end || end - *pos < 4u) return FM_ERR_INVALID_FORMAT;
+    for (i = 0; i < 4u; i++)
+    {
+        int digit = json_hex(text[(*pos)++]);
+        if (digit < 0) return FM_ERR_INVALID_FORMAT;
+        v = (v << 4) | (uint32_t)digit;
+    }
+    *value = v;
+    return FM_OK;
+}
+
+static FM_Result json_next(const char *text, size_t end, size_t *pos,
+                           char bytes[4], size_t *count)
+{
+    unsigned char c;
+    uint32_t cp;
+    if (*pos >= end) return FM_ERR_INVALID_FORMAT;
+    c = (unsigned char)text[(*pos)++];
+    if (c < 0x20u) return FM_ERR_INVALID_FORMAT;
+    if (c != '\\')
+    {
+        size_t width, j;
+        uint32_t min_value;
+        bytes[0] = (char)c;
+        if (c < 0x80u) { *count = 1; return FM_OK; }
+        if (c >= 0xc2u && c <= 0xdfu) { width = 2; cp = c & 0x1fu; min_value = 0x80u; }
+        else if (c >= 0xe0u && c <= 0xefu) { width = 3; cp = c & 0x0fu; min_value = 0x800u; }
+        else if (c >= 0xf0u && c <= 0xf4u) { width = 4; cp = c & 0x07u; min_value = 0x10000u; }
+        else return FM_ERR_INVALID_FORMAT;
+        if (end - *pos < width - 1u) return FM_ERR_INVALID_FORMAT;
+        for (j = 1; j < width; j++)
+        {
+            unsigned char next = (unsigned char)text[(*pos)++];
+            if ((next & 0xc0u) != 0x80u) return FM_ERR_INVALID_FORMAT;
+            bytes[j] = (char)next;
+            cp = (cp << 6) | (uint32_t)(next & 0x3fu);
+        }
+        if (cp < min_value || cp > 0x10ffffu || (cp >= 0xd800u && cp <= 0xdfffu))
+            return FM_ERR_INVALID_FORMAT;
+        *count = width;
+        return FM_OK;
+    }
+    if (*pos >= end) return FM_ERR_INVALID_FORMAT;
+    c = (unsigned char)text[(*pos)++];
+    switch (c)
+    {
+    case '"': case '\\': case '/': bytes[0] = (char)c; break;
+    case 'b': bytes[0] = '\b'; break;
+    case 'f': bytes[0] = '\f'; break;
+    case 'n': bytes[0] = '\n'; break;
+    case 'r': bytes[0] = '\r'; break;
+    case 't': bytes[0] = '\t'; break;
+    case 'u':
+        if (json_hex4(text, end, pos, &cp) != FM_OK) return FM_ERR_INVALID_FORMAT;
+        if (cp >= 0xd800u && cp <= 0xdbffu)
+        {
+            uint32_t low;
+            if (end - *pos < 6u || text[*pos] != '\\' || text[*pos + 1u] != 'u')
+                return FM_ERR_INVALID_FORMAT;
+            *pos += 2u;
+            if (json_hex4(text, end, pos, &low) != FM_OK || low < 0xdc00u || low > 0xdfffu)
+                return FM_ERR_INVALID_FORMAT;
+            cp = 0x10000u + ((cp - 0xd800u) << 10) + (low - 0xdc00u);
+        }
+        else if (cp >= 0xdc00u && cp <= 0xdfffu) return FM_ERR_INVALID_FORMAT;
+        if (cp < 0x80u) { bytes[0] = (char)cp; *count = 1; }
+        else if (cp < 0x800u) {
+            bytes[0] = (char)(0xc0u | (cp >> 6));
+            bytes[1] = (char)(0x80u | (cp & 0x3fu)); *count = 2;
+        } else if (cp < 0x10000u) {
+            bytes[0] = (char)(0xe0u | (cp >> 12));
+            bytes[1] = (char)(0x80u | ((cp >> 6) & 0x3fu));
+            bytes[2] = (char)(0x80u | (cp & 0x3fu)); *count = 3;
+        } else {
+            bytes[0] = (char)(0xf0u | (cp >> 18));
+            bytes[1] = (char)(0x80u | ((cp >> 12) & 0x3fu));
+            bytes[2] = (char)(0x80u | ((cp >> 6) & 0x3fu));
+            bytes[3] = (char)(0x80u | (cp & 0x3fu)); *count = 4;
+        }
+        return FM_OK;
+    default: return FM_ERR_INVALID_FORMAT;
+    }
+    *count = 1;
+    return FM_OK;
+}
+
+static FM_Result parse_string_span(Parser *p, size_t *start, size_t *len)
+{
+    if (!peek(p, '"')) return FM_ERR_INVALID_FORMAT;
+    p->pos++;
+    *start = p->pos;
+    while (p->pos < p->len && p->text[p->pos] != '"')
+    {
+        char bytes[4];
+        size_t count;
+        FM_Result r = json_next(p->text, p->len, &p->pos, bytes, &count);
+        if (r != FM_OK) return r;
+    }
+    if (p->pos >= p->len) return FM_ERR_INVALID_FORMAT;
+    *len = p->pos - *start;
+    p->pos++;
+    return FM_OK;
+}
+
 static FM_Result parse_string(Parser *p, uint8_t tok)
 {
-    size_t start;
-
-    if (!peek(p, '"'))
+    size_t start, len;
+    FM_Result r = parse_string_span(p, &start, &len);
+    if (r == FM_OK)
     {
-        return FM_ERR_INVALID_FORMAT;
+        p->tokens[tok].val_start = (uint16_t)start;
+        p->tokens[tok].val_len = (uint16_t)len;
     }
-    p->pos++;
-    start = p->pos;
-    while (p->pos < p->len)
-    {
-        char c = p->text[p->pos];
-
-        if (c == '\\')
-        {
-            p->pos += 2;
-            continue;
-        }
-        if (c == '"')
-        {
-            p->tokens[tok].val_start = (uint16_t)start;
-            p->tokens[tok].val_len = (uint16_t)(p->pos - start);
-            p->pos++;
-            return FM_OK;
-        }
-        p->pos++;
-    }
-    return FM_ERR_INVALID_FORMAT;
+    return r;
 }
 
 static FM_Result parse_number(Parser *p, uint8_t tok)
@@ -210,7 +309,7 @@ static FM_Result parse_number(Parser *p, uint8_t tok)
 
 static FM_Result parse_object(Parser *p, uint8_t tok, int depth)
 {
-    if (depth > 64)
+    if (depth >= FM_JSON_MAX_DEPTH)
     {
         return FM_ERR_TOO_LARGE;
     }
@@ -228,26 +327,10 @@ static FM_Result parse_object(Parser *p, uint8_t tok, int depth)
         size_t klen;
 
         skip_ws(p);
-        if (!peek(p, '"'))
+        if (parse_string_span(p, &kstart, &klen) != FM_OK)
         {
             return FM_ERR_INVALID_FORMAT;
         }
-        p->pos++;
-        kstart = p->pos;
-        while (p->pos < p->len && p->text[p->pos] != '"')
-        {
-            if (p->text[p->pos] == '\\')
-            {
-                p->pos++;
-            }
-            p->pos++;
-        }
-        if (p->pos >= p->len)
-        {
-            return FM_ERR_INVALID_FORMAT;
-        }
-        klen = p->pos - kstart;
-        p->pos++; /* closing quote */
         skip_ws(p);
         if (!peek(p, ':'))
         {
@@ -284,7 +367,7 @@ static FM_Result parse_object(Parser *p, uint8_t tok, int depth)
 
 static FM_Result parse_array(Parser *p, uint8_t tok, int depth)
 {
-    if (depth > 64)
+    if (depth >= FM_JSON_MAX_DEPTH)
     {
         return FM_ERR_TOO_LARGE;
     }
@@ -529,6 +612,21 @@ static const FM_JsonToken *token_root(const FM_Json *doc)
     return (const FM_JsonToken *)doc->tokens;
 }
 
+static FM_Bool json_key_equals(const char *text, size_t start, size_t end,
+                               const char *name, size_t len)
+{
+    size_t n = 0;
+    while (start < end)
+    {
+        char bytes[4];
+        size_t count;
+        if (json_next(text, end, &start, bytes, &count) != FM_OK ||
+            count > len - n || memcmp(bytes, name + n, count) != 0) return FM_FALSE;
+        n += count;
+    }
+    return n == len ? FM_TRUE : FM_FALSE;
+}
+
 static const FM_JsonToken *token_find_member(const FM_Json *doc,
                                              const FM_JsonToken *parent,
                                              const char *name,
@@ -544,8 +642,9 @@ static const FM_JsonToken *token_find_member(const FM_Json *doc,
     child = parent->first_child;
     while (child != NO_TOKEN)
     {
-        if (tokens[child].key_len == name_len &&
-            strncmp(doc->text + tokens[child].key_start, name, name_len) == 0)
+        if (json_key_equals(doc->text, tokens[child].key_start,
+                            (size_t)tokens[child].key_start + tokens[child].key_len,
+                            name, name_len))
         {
             return &tokens[child];
         }
@@ -716,31 +815,25 @@ static FM_Result token_string_value(const FM_Json *doc,
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
-    for (i = src; i < end; i++)
+    i = src;
+    while (i < end)
     {
-        char c = doc->text[i];
-
-        if (c == '\\' && i + 1 < end)
+        char bytes[4];
+        size_t count;
+        FM_Result r = json_next(doc->text, end, &i, bytes, &count);
+        if (r != FM_OK) { out[n] = '\0'; return r; }
+        /* C-string accessors cannot represent embedded NUL. */
+        if (count == 1u && bytes[0] == '\0')
         {
-            i++;
-            switch (doc->text[i])
-            {
-            case 'n': c = '\n'; break;
-            case 't': c = '\t'; break;
-            case 'r': c = '\r'; break;
-            case 'b': c = '\b'; break;
-            case 'f': c = '\f'; break;
-            default:  c = doc->text[i]; break;
-            }
+            out[n] = '\0';
+            return FM_ERR_INVALID_FORMAT;
         }
-        if (n + 1 < out_size)
+        if (!truncated && count < out_size - n)
         {
-            out[n++] = c;
+            memcpy(out + n, bytes, count);
+            n += count;
         }
-        else
-        {
-            truncated = FM_TRUE;
-        }
+        else truncated = FM_TRUE;
     }
     out[n] = '\0';
     return truncated ? FM_ERR_TOO_LARGE : FM_OK;
@@ -1416,7 +1509,7 @@ static FM_Result w_value_start(FM_JsonWriter *w)
 
 FM_Result JsonWriter_BeginObject(FM_JsonWriter *w)
 {
-    if (w == NULL || w->depth >= 8)
+    if (w == NULL || w->depth >= FM_JSON_MAX_DEPTH)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
@@ -1453,7 +1546,7 @@ FM_Result JsonWriter_EndObject(FM_JsonWriter *w)
 
 FM_Result JsonWriter_BeginArray(FM_JsonWriter *w)
 {
-    if (w == NULL || w->depth >= 8)
+    if (w == NULL || w->depth >= FM_JSON_MAX_DEPTH)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }

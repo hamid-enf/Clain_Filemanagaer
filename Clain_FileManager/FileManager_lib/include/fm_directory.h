@@ -17,6 +17,8 @@ FM_BEGIN_DECLS
 typedef struct
 {
     uint8_t used;                       /* internal                    */
+    uint8_t backend_open;               /* internal                    */
+    FM_Result read_error;               /* sticky oversized entry      */
     void   *mount;                      /* internal FM_MountEntry*     */
     FM_FS  *fs;                         /* internal FM_FS*             */
     uint8_t fh[FM_FS_DIRHANDLE_SIZE];   /* adapter dir handle storage  */
@@ -56,12 +58,15 @@ FM_Result Directory_GetInfo(const char *path, FM_FileInfo *info);
 /* Listing                                                             */
 /* ------------------------------------------------------------------ */
 /* Directory_Open returns a handle from an internal static pool sized
- * by FM_MAX_OPEN_DIRS (no allocation). */
+ * by FM_MAX_OPEN_DIRS (no allocation). A pointer is invalid after Close;
+ * a later open may reuse the slot, so never reuse a stale pointer. */
 FM_Dir *Directory_Open(const char *path);
 /* Open into a user-provided FM_Dir object (used by subsystems). */
 FM_Result Directory_OpenEx(FM_Dir *d, const char *path);
 FM_Result Directory_Close(FM_Dir *d);
-/* Next entry; returns FM_OK and fills *entry, or FM_ERR_EOF at end. */
+/* Next entry; returns FM_OK and fills *entry, or FM_ERR_EOF at end.
+ * FM_ERR_TOO_LARGE is sticky for this handle even after Rewind. Close and
+ * reopen after correcting the name or using a larger FM_NAME_MAX. */
 FM_Result Directory_Read(FM_Dir *d, FM_DirEntry *entry);
 FM_Result Directory_Rewind(FM_Dir *d);
 

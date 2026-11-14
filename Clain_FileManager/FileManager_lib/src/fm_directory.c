@@ -545,6 +545,7 @@ FM_Result Directory_OpenEx(FM_Dir *d, const char *path)
         }
         return r;
     }
+    d->backend_open = 1;
     (void)strcpy(d->path, normalized);
     (void)strcpy(d->resolved, rel);
     return FM_OK;
@@ -590,7 +591,7 @@ FM_Result Directory_Close(FM_Dir *d)
     {
         return FM_ERR_NOT_OPEN;
     }
-    if (d->fs != NULL && d->fs->ops.dir_close != NULL)
+    if (d->backend_open && d->fs != NULL && d->fs->ops.dir_close != NULL)
     {
         r = dop_close(d);
     }
@@ -612,43 +613,44 @@ FM_Result Directory_Read(FM_Dir *d, FM_DirEntry *entry)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
+    if (!d->backend_open) return FM_ERR_NOT_OPEN;
     if (d->fs->ops.dir_read == NULL)
     {
         return FM_ERR_UNSUPPORTED;
     }
-    memset(entry, 0, sizeof(*entry));
-    return dop_read(d, entry);
+    {
+        FM_Result r;
+        if (d->read_error != FM_OK) return d->read_error;
+        memset(entry, 0, sizeof(*entry));
+        r = dop_read(d, entry);
+        if (r == FM_ERR_TOO_LARGE) d->read_error = r;
+        return r;
+    }
 }
 
 FM_Result Directory_Rewind(FM_Dir *d)
 {
+    FM_Result r;
     if (d == NULL || !d->used)
     {
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
         return FM_ERR_INVALID_ARGUMENT;
     }
-    /* Re-open the directory on the same handle. */
+    if (d->backend_open)
     {
-        FM_Result r;
-
-        if (d->fs->ops.dir_close != NULL)
-        {
-            (void)dop_close(d);
-        }
-        r = dop_open(d, d->resolved);
+        r = dop_close(d);
+        d->backend_open = 0;
         if (r != FM_OK)
         {
-            if (dir_is_pool(d))
-            {
-                dir_release(d);
-            }
-            else
-            {
-                external_dir_remove(d);
-                memset(d, 0, sizeof(*d));
-            }
+            FM_Core_SetLastError(r);
+            return r;
         }
-        return r;
     }
+    r = dop_open(d, d->resolved);
+    if (r == FM_OK) d->backend_open = 1;
+    /* Keep the public handle claimed until the caller explicitly closes it. */
+    FM_Core_SetLastError(r);
+    return r;
 }
 
 FM_Result Directory_Count(const char *path, uint8_t type_filter,

@@ -161,7 +161,7 @@ static FM_Result xfer_copy_locked(const char *src_path, const char *dst_path,
     (void)File_Size(&src, &total);
 
     r = File_OpenEx(&dst, dst_path,
-                    FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+                    FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (r != FM_OK)
     {
         (void)File_Close(&src);
@@ -232,7 +232,8 @@ static FM_Result xfer_copy_locked(const char *src_path, const char *dst_path,
     {
         r = rc;                          /* خطای بستن را گم نکن */
     }
-    (void)File_Close(&src);
+    rc = File_Close(&src);
+    if (r == FM_OK) r = rc;
 
     if (r != FM_OK)
     {
@@ -258,6 +259,7 @@ static FM_Result xfer_copy_locked(const char *src_path, const char *dst_path,
         r = File_OpenEx(&chk, dst_path, FM_OPEN_READ);
         if (r != FM_OK)
         {
+            (void)File_Delete(dst_path);
             return r;
         }
         for (;;)
@@ -290,6 +292,7 @@ static FM_Result xfer_copy_locked(const char *src_path, const char *dst_path,
         }
         if (r != FM_OK)
         {
+            (void)File_Delete(dst_path);
             return r;
         }
         if (out_info != NULL)
@@ -318,11 +321,17 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
     FM_TransferOpts tmp;
     const FM_TransferOpts *o = xfer_opts(opts, &tmp);
     FM_Result r;
+    char work[FM_PATH_MAX];
+    static const char suffix[] = ".fm_tmp";
 
     if (src_path == NULL || dst_path == NULL)
     {
         return FM_ERR_INVALID_ARGUMENT;
     }
+    if (strlen(dst_path) + sizeof(suffix) > sizeof(work)) return FM_ERR_TOO_LARGE;
+    strcpy(work, dst_path);
+    strcat(work, suffix);
+    if (FM_File_SamePath(src_path, work)) return FM_ERR_INVALID_ARGUMENT;
     if (out_info != NULL)
     {
         memset(out_info, 0, sizeof(*out_info));
@@ -362,7 +371,14 @@ FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
     {
         return FM_ERR_BUSY;
     }
-    r = xfer_copy_locked(src_path, dst_path, o, out_info);
+    r = xfer_copy_locked(src_path, work, o, out_info);
+    if (r == FM_OK)
+    {
+        r = o->no_overwrite ? FM_File_RenameNoReplace(work, dst_path)
+                            : File_Rename(work, dst_path);
+        /* Rename failures can be post-commit. Never delete by this name
+         * afterward; another actor may already have recreated it. */
+    }
     xfer_release();
     return r;
 }

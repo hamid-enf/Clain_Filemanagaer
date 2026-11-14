@@ -516,6 +516,7 @@ static int lfs_flags(uint32_t mode)
     int flags = 0;
 
     if (mode & FM_OPEN_CREATE)   flags |= LFS_O_CREAT;
+    if (mode & FM_OPEN_EXCLUSIVE) flags |= LFS_O_EXCL;
     if (mode & FM_OPEN_TRUNCATE) flags |= LFS_O_TRUNC;
     if (mode & FM_OPEN_APPEND)   flags |= LFS_O_APPEND;
     if ((mode & (FM_OPEN_READ | FM_OPEN_WRITE)) ==
@@ -889,19 +890,25 @@ static FM_Result lfs_fs_rename(FM_FS *fs, const char *old_path,
     }
 
     err = lfs_rename(&ctx->lfs, oldp, newp);
-    if (err == LFS_ERR_EXIST)
-    {
-        /* littlefs does not replace an existing destination.  Emulate
-         * POSIX rename-over: remove the destination first.  lfs_remove
-         * fails with LFS_ERR_NOTEMPTY for non-empty directories, which
-         * matches the expected semantics. */
-        err = lfs_remove(&ctx->lfs, newp);
-        if (err == LFS_ERR_OK)
-        {
-            err = lfs_rename(&ctx->lfs, oldp, newp);
-        }
-    }
+    /* Never remove a destination on error. Bundled littlefs handles
+     * replacement and type checks within lfs_rename itself. */
     return lfs_map_err(err);
+}
+
+/* Called with the mount lock held across lookup and rename. All accesses to
+ * this littlefs instance must be mediated by the same mount/lock. */
+static FM_Result lfs_fs_rename_noreplace(FM_FS *fs, const char *old_path,
+                                          const char *new_path)
+{
+    LittleFS_Ctx *ctx = lfs_ctx(fs);
+    struct lfs_info info;
+    char target[FM_PATH_MAX];
+    int err;
+    lfs_path(new_path, target, sizeof(target));
+    err = lfs_stat(&ctx->lfs, target, &info);
+    if (err == LFS_ERR_OK) return FM_ERR_EXISTS;
+    if (err != LFS_ERR_NOENT) return lfs_map_err(err);
+    return lfs_fs_rename(fs, old_path, new_path);
 }
 
 static FM_Result lfs_fs_mkdir(FM_FS *fs, const char *path)
@@ -1085,6 +1092,7 @@ FM_Result LittleFS_Init(FM_FS *fs)
         return FM_ERR_INVALID_ARGUMENT;
     }
     memset(fs, 0, sizeof(*fs));
+    fs->capabilities = FM_FS_CAP_EXCLUSIVE_CREATE;
 
     FM_Lock();
     /* an FM_FS that is initialised again keeps the context it has */
@@ -1155,6 +1163,7 @@ FM_Result LittleFS_Init(FM_FS *fs)
     fs->ops.stat = lfs_ops_stat;
     fs->ops.delete_file = lfs_fs_delete;
     fs->ops.rename = lfs_fs_rename;
+    fs->ops.rename_noreplace = lfs_fs_rename_noreplace;
     fs->ops.mkdir = lfs_fs_mkdir;
     fs->ops.rmdir = lfs_fs_rmdir;
     fs->ops.dir_open = lfs_fs_dir_open;

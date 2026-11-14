@@ -315,7 +315,7 @@ Directory_Copy("/qspi/project", "/backup/project", NULL, NULL);
 | `JsonWriter_...` | JSON می‌سازد | مقدارها | بافر متن |
 | `Logger_Init / Start / Write / Stop` | لاگر CSV با چرخش فایل | آرایهٔ `float` | فایل‌های پوشهٔ لاگ |
 | `File_SafeReplace(path, data, size)` | جایگزینی با فایل موقت؛ اتمی‌بودن و دوام به فایل‌سیستم وابسته است، در FatFS تضمین قطع برق ندارد | بافر | فایل |
-| `File_Recover(path)` | بعد از قطع برق، فایل موقتِ جامانده را پاک می‌کند | – | – |
+| `File_Recover(path)` | وجود فایل موقت را گزارش می‌کند؛ بدون احراز مالکیت آن را پاک نمی‌کند | – | – |
 
 - `Text_Replace` / `Text_InsertLine` / `Text_DeleteLine` از فایل موقت
   `<path>.fm_tmp` استفاده می‌کنند؛ مسیری بلندتر از `FM_PATH_MAX - 8` نویسه

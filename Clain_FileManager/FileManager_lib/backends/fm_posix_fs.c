@@ -96,6 +96,7 @@ static int open_flags(uint32_t mode)
         flags = O_WRONLY;
     }
     if (mode & FM_OPEN_CREATE)   { flags |= O_CREAT; }
+    if (mode & FM_OPEN_EXCLUSIVE) { flags |= O_EXCL; }
     if (mode & FM_OPEN_TRUNCATE) { flags |= O_TRUNC; }
     if (mode & FM_OPEN_APPEND)   { flags |= O_APPEND; }
     return flags;
@@ -260,6 +261,20 @@ static FM_Result posix_delete(FM_FS *fs, const char *path)
     path = strip_slash(path);
     if (remove(path) < 0) { return sys2fm(errno); }
     (void)fs;
+    return FM_OK;
+}
+
+/* link(2) creates the destination atomically only when absent. The source
+ * is a staged regular file, on the same filesystem. If unlink fails the
+ * destination is committed but the old name remains. */
+static FM_Result posix_rename_noreplace(FM_FS *fs, const char *old_path,
+                                         const char *new_path)
+{
+    const char *old_name = strip_slash(old_path);
+    const char *new_name = strip_slash(new_path);
+    (void)fs;
+    if (link(old_name, new_name) < 0) return sys2fm(errno);
+    if (unlink(old_name) < 0) return FM_ERR_CLEANUP;
     return FM_OK;
 }
 
@@ -468,6 +483,7 @@ FM_Result PosixFS_Init(FM_FS *fs)
 {
     if (fs == NULL) { return FM_ERR_INVALID_ARGUMENT; }
     memset(fs, 0, sizeof(*fs));
+    fs->capabilities = FM_FS_CAP_EXCLUSIVE_CREATE;
     (void)strncpy(fs->name, "POSIX", sizeof(fs->name) - 1);
     fs->mounted = FM_FALSE;
     fs->storage = NULL;
@@ -487,6 +503,7 @@ FM_Result PosixFS_Init(FM_FS *fs)
     fs->ops.stat = posix_stat;
     fs->ops.delete_file = posix_delete;
     fs->ops.rename = posix_rename;
+    fs->ops.rename_noreplace = posix_rename_noreplace;
     fs->ops.mkdir = posix_mkdir;
     fs->ops.rmdir = posix_rmdir;
     fs->ops.dir_open = posix_dir_open;

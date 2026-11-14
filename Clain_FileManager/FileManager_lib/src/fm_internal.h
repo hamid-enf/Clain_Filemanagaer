@@ -118,6 +118,7 @@ void     FM_InternalBufferRelease(void);
 
 /* FM_TRUE when both paths resolve to the same entry of the same mount. */
 FM_Bool FM_File_SamePath(const char *a, const char *b);
+FM_Result FM_File_RenameNoReplace(const char *old_path, const char *new_path);
 FM_Bool FM_Mount_NoCase(const FM_MountEntry *mount);
 /* a name of FM_NAME_MAX characters or more (the last component of
  * `rel`, or with `all` any of them): cannot be listed, so not created */

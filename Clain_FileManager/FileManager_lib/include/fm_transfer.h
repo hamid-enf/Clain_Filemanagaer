@@ -97,8 +97,12 @@ FM_Result FM_Transfer_Copy(const char *src_path, const char *dst_path,
 /* مثل بالا ولی با گزارش تفصیلی.
  *
  * مبدأ و مقصدِ یکسان (بعد از نرمال‌سازی مسیر) → FM_ERR_INVALID_ARGUMENT و
- * فایل دست‌نخورده می‌ماند. با verify، اگر CRC مقصد با مبدأ نخواند مقصد
- * حذف می‌شود و FM_ERR_CORRUPTED برمی‌گردد. */
+ * فایل دست‌نخورده می‌ماند. کپی و verify روی فایل موقتِ انحصاری انجام
+ * می‌شوند؛ شکست پیش از rename مقصد قبلی را حفظ می‌کند. وضعیت پس از خطای
+ * rename/sync وابسته به backend است و فایل موقت ممکن است باقی بماند؛
+ * پیش از پاک‌سازی دستی آن را بررسی کنید. no_overwrite از انتشار بدون جایگزینی
+ * استفاده می‌کند؛ adapter سفارشی بدون این عملیات FM_ERR_UNSUPPORTED می‌دهد.
+ * در FMFS/LittleFS همهٔ دسترسی‌ها باید از قفل همان mount عبور کنند. */
 FM_Result FM_Transfer_CopyEx(const char *src_path, const char *dst_path,
                              const FM_TransferOpts *opts,
                              FM_TransferInfo *out_info);

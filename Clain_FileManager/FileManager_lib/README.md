@@ -809,9 +809,9 @@ failed rollback can leave the old file under the aside name; filesystem
 and device flush semantics also determine durability. Because FAT names ignore case, `a.txt` -> `A.TXT` (or a long name ->
 its 8.3 alias) is recognised as the same entry and simply gets the new
 name.  A same-path rename is a no-op, and adapters that
-do not implement rename at all are handled safely: `File_Move` /
-`Directory_Move` fall back to copy + delete and `File_Rename` /
-`Directory_Rename` return `FM_ERR_UNSUPPORTED`.
+do not implement rename cannot perform staged `File_Copy`; `File_Move`
+fails rather than risking a direct overwrite. `File_Rename` and
+`Directory_Rename` return `FM_ERR_UNSUPPORTED` where rename is absent.
 
 ### File rules worth knowing
 
@@ -825,7 +825,14 @@ do not implement rename at all are handled safely: `File_Move` /
   Any number of read-only handles is fine.  FatFS, FMFS and POSIX share
   the state and allow it.
 * **Truncating** needs a handle that may write (`FM_ERR_ACCESS`
-  otherwise) and leaves the position where it was, on every backend.
+  otherwise). After a shrink, position is clamped to the new size. A
+  post-truncate seek error may be returned after the size has changed.
+* **Temporary ownership.** Staged operations exclusively claim `.fm_tmp`;
+  an existing name is refused rather than deleted. `File_Recover` and
+  `Logger_Recover` report unowned matches, not delete them. Custom adapters
+  must opt into `FM_FS_CAP_EXCLUSIVE_CREATE` only after implementing atomic
+  create-if-absent. This changes `FM_FS` ABI and requires a full rebuild.
+  No claim is made against external actors changing claimed names mid-operation.
 * **A failed replace keeps the backup.** When `File_Transaction` cannot
   put the original back after a failure (volume full, card gone), the
   backup stays as `<path>.fm_tmp.bak`: it is the last copy of the data.

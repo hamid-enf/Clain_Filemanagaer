@@ -5,7 +5,7 @@
  * Replace: write "<path>.fm_tmp", flush, rename over target. Crash
  * atomicity and durability depend on the filesystem and storage backend;
  * FatFS rename-over, for example, requires multiple operations.
- * Recovery: File_Recover removes stale temp files.
+ * Recovery: File_Recover reports unverified temp names without deleting them.
  */
 
 #define FM_DEBUG_TAG "safe"
@@ -77,17 +77,8 @@ FM_Result File_SafeReplace(const char *path, const void *data, size_t size)
         return r;
     }
 
-    /* Clean a stale temp from a previous crash. */
-    {
-        FM_Bool exists = FM_FALSE;
-
-        if (File_Exists(tmp, &exists) == FM_OK && exists)
-        {
-            (void)File_Delete(tmp);
-        }
-    }
-
-    f = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    /* An existing path is not proof of ownership. Claim atomically. */
+    f = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (f == NULL)
     {
         return File_GetLastError();
@@ -116,13 +107,9 @@ FM_Result File_SafeReplace(const char *path, const void *data, size_t size)
         return r;
     }
 
-    /* Atomic swap: rename tmp over the target.  Adapters that support
-     * rename-over (POSIX, FMFS) replace atomically. */
+    /* Publish via backend rename; failure may have ambiguous commit status. */
     r = File_Rename(tmp, path);
-    if (r != FM_OK)
-    {
-        (void)File_Delete(tmp);
-    }
+    /* Do not delete after ambiguous rename failure: the name may be new. */
     FM_Core_SetLastError(r);
     return r;
 }
@@ -176,28 +163,37 @@ FM_Result File_SafeAppend(const char *path, const void *data, size_t size)
 
 FM_Result File_Recover(const char *path)
 {
-    /* Remove a stale temp file, if any.  Also walks up to the parent
-     * directory for robustness is not needed: temp name is derived
-     * deterministically from the target path. */
     char tmp[FM_PATH_MAX];
     FM_Bool exists = FM_FALSE;
-    FM_Result r;
-
-    r = tmp_path_for(path, tmp, sizeof(tmp));
-    if (r != FM_OK)
-    {
-        return r;
-    }
+    FM_Result r = tmp_path_for(path, tmp, sizeof(tmp));
+    if (r != FM_OK) return r;
     r = File_Exists(tmp, &exists);
-    if (r != FM_OK)
+    if (r != FM_OK) return r;
+    /* A name alone cannot distinguish an old library temp from user data. */
+    return exists ? FM_ERR_EXISTS : FM_OK;
+}
+
+/* Claim the backup name before writing; never replace an existing file. */
+static FM_Result backup_claim_copy(const char *path, const char *bak)
+{
+    FM_File *src = File_Open(path, FM_OPEN_READ);
+    FM_File *dst;
+    FM_Result r, c;
+    if (src == NULL) return File_GetLastError();
+    dst = File_Open(bak, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
+    if (dst == NULL)
     {
+        r = File_GetLastError();
+        (void)File_Close(src);
         return r;
     }
-    if (exists)
-    {
-        return File_Delete(tmp);
-    }
-    return FM_OK;
+    r = FM_File_CopyStream(src, dst, NULL, NULL);
+    c = File_Close(dst);
+    if (r == FM_OK) r = c;
+    c = File_Close(src);
+    if (r == FM_OK) r = c;
+    if (r != FM_OK) (void)File_Delete(bak);
+    return r;
 }
 
 FM_Result File_Transaction(const char *path, const void *data, size_t size)
@@ -226,7 +222,7 @@ FM_Result File_Transaction(const char *path, const void *data, size_t size)
     }
     if (existed)
     {
-        r = File_Copy(path, bak, NULL, NULL);
+        r = backup_claim_copy(path, bak);
         if (r != FM_OK)
         {
             return r;
@@ -260,10 +256,13 @@ FM_Result File_Transaction(const char *path, const void *data, size_t size)
         return r;
     }
 
-    if (existed)
+    if (existed && File_Delete(bak) != FM_OK)
     {
-        (void)File_Delete(bak);
+        /* Replacement succeeded; the backup may still be present. */
+        FM_Core_SetLastError(FM_ERR_CLEANUP);
+        return FM_ERR_CLEANUP;
     }
+    FM_Core_SetLastError(FM_OK);
     return FM_OK;
 }
 

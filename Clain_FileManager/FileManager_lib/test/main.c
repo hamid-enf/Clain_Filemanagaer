@@ -5110,6 +5110,7 @@ static FM_Result wfs_mount(const char *where)
     memset(&g_wfs, 0, sizeof(g_wfs));
     (void)strcpy(g_wfs.name, "WRAPFS");
     g_wfs.ops = g_wfs_base.ops;
+    g_wfs.capabilities = g_wfs_base.capabilities;
     g_wfs.ops.delete_file = wfs_delete;
     g_wfs.ops.rename = wfs_rename;
     g_wfs.ops.file_open = wfs_open;
@@ -5438,7 +5439,7 @@ static void test_file_report(void)
         }
     }
 
-    TEST("F-02: failed move still rolls back a destination it created");
+    TEST("F-02: failed move preserves its published copy");
     {
         FM_Result r;
 
@@ -5450,9 +5451,9 @@ static void test_file_report(void)
         {
             FAIL("source delete failure not reported");
         }
-        else if (f_exists("/f02_dst.txt"))
+        else if (!f_file_equals("/f02_dst.txt", "payload-to-move", 15u))
         {
-            FAIL("copy left behind although the move failed");
+            FAIL("published copy lost after failed source deletion");
         }
         else if (!f_exists("/f02_src.txt"))
         {
@@ -5644,19 +5645,9 @@ static void test_file_report(void)
         g_wfs_write_budget = 5000;
         r = File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL, NULL);
         g_wfs_write_budget = -1;
-        if (r != FM_ERR_NO_SPACE)
+        if (r != FM_ERR_UNSUPPORTED || f_exists("/f04_dst.bin"))
         {
-            FAIL("expected NO_SPACE");
-        }
-        else if (f_exists("/f04_dst.bin"))
-        {
-            FAIL("truncated destination left behind");
-        }
-        else if (File_Copy("/f04_src.bin", "/ram/f04_dst.bin", NULL,
-                           NULL) != FM_OK ||
-                 !f_file_equals("/f04_dst.bin", big, sizeof(big)))
-        {
-            FAIL("direct-mode copy broken");
+            FAIL("unsafe copy without rename was not refused");
         }
         else
         {
@@ -6525,17 +6516,17 @@ static void test_file_report(void)
         else
         {
             r = File_Insert(longp, 0u, "XY", 2u);
-            if (r != FM_ERR_INVALID_PATH)
+            if (r != FM_ERR_TOO_LARGE)
             {
                 static char m[48];
 
-                (void)snprintf(m, sizeof(m), "expected INVALID_PATH, got %d",
+                (void)snprintf(m, sizeof(m), "expected TOO_LARGE, got %d",
                                (int)r);
                 FAIL(m);
             }
-            else if (File_DeleteRange(longp, 0u, 1u) != FM_ERR_INVALID_PATH ||
+            else if (File_DeleteRange(longp, 0u, 1u) != FM_ERR_TOO_LARGE ||
                      File_ReplaceRange(longp, 0u, 1u, "Z", 1u) !=
-                         FM_ERR_INVALID_PATH)
+                         FM_ERR_TOO_LARGE)
             {
                 FAIL("DeleteRange / ReplaceRange not guarded");
             }
@@ -10613,7 +10604,7 @@ static void test_regressions(void)
             custom_fs.ops = base_fs.ops;
             custom_fs.ops.rename = NULL; /* minimal adapter: no rename */
 
-            TEST("Regression: File_Move without rename falls back");
+            TEST("Regression: File_Move without rename refuses safely");
             r = FS_Register(&custom_fs);
             if (r == FM_OK) r = FS_Mount("/ram", &custom_fs);
             if (r == FM_OK) r = File_WriteText("/ram/mv_norename_src.txt",
@@ -10625,13 +10616,13 @@ static void test_regressions(void)
                 FM_Bool exists = FM_FALSE;
                 FM_Result r2 = File_Exists("/ram/mv_norename_dst.txt",
                                            &exists);
-                if (r == FM_OK && r2 == FM_OK && exists)
+                if (r == FM_ERR_UNSUPPORTED && r2 == FM_OK && !exists)
                 {
                     PASS();
                 }
                 else
                 {
-                    FAIL("move without rename did not fall back");
+                    FAIL("move without rename did not refuse safely");
                 }
             }
             (void)File_Delete("/ram/mv_norename_src.txt");
@@ -11009,13 +11000,13 @@ static void test_coverage(void)
 
     /* ---- Safe write: recover + transaction rollback ---- */
 #if FM_USE_SAFE_WRITE
-    TEST("Coverage: File_Recover removes stale temp");
+    TEST("Coverage: File_Recover preserves unowned temp");
     {
         r = File_WriteText("/fm_cov_rec.txt.fm_tmp", "stale");
         if (r == FM_OK) r = File_WriteText("/fm_cov_rec.txt", "real");
-        if (r == FM_OK) r = File_Recover("/fm_cov_rec.txt");
+        if (r == FM_OK && File_Recover("/fm_cov_rec.txt") != FM_ERR_EXISTS) r = FM_ERR_INTERNAL;
         if (r == FM_OK) r = File_Exists("/fm_cov_rec.txt.fm_tmp", &b);
-        if (r == FM_OK && b) r = FM_ERR_INTERNAL;
+        if (r == FM_OK && !b) r = FM_ERR_INTERNAL;
         (void)File_Delete("/fm_cov_rec.txt");
         (void)File_Delete("/fm_cov_rec.txt.fm_tmp");
         CHECK_RESULT(r, "recover");
@@ -20682,6 +20673,8 @@ static void suite_leak_check(const char *suite)
 #include "audit_v3_tests.h"
 #include "audit_v4_tests.h"
 #include "audit_v5_tests.h"
+#include "audit_file_v51_tests.h"
+#include "audit_file_v51_round2_tests.h"
 #include "audit_audio_late_tests.h"
 
 int main(void)
@@ -20791,6 +20784,9 @@ int main(void)
     RUN_SUITE(test_audit_v2_file);
     RUN_SUITE(test_audit_v4_file);
     RUN_SUITE(test_audit_v5_file);
+    restore_posix_root();
+    RUN_SUITE(test_audit_file_v51);
+    RUN_SUITE(test_audit_file_v51_round2);
 #if FM_USE_IMAGE
     RUN_SUITE(test_audit_v5_image);
 #endif

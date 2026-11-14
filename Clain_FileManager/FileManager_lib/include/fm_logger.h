@@ -63,7 +63,10 @@ typedef struct
 FM_Result Logger_Init(FM_Logger *lg, const char *dir, const char *base_name,
                       FM_LogFormat format, const FM_LoggerConfig *cfg);
 FM_Result Logger_Start(FM_Logger *lg);
-FM_Result Logger_Stop(FM_Logger *lg);        /* flush + close current file */
+/* For crash_safe, publication never overwrites the final name. On collision
+ * FM_ERR_EXISTS is returned and the .fm_tmp log remains for manual recovery;
+ * FM_ERR_CLEANUP means the final name was published but its temp remains. */
+FM_Result Logger_Stop(FM_Logger *lg);
 FM_Result Logger_Close(FM_Logger *lg);       /* alias for Stop             */
 FM_Result Logger_Flush(FM_Logger *lg);
 FM_Result Logger_GetInfo(FM_Logger *lg, FM_LoggerInfo *info);
@@ -86,7 +89,8 @@ FM_Result Logger_WriteRaw(FM_Logger *lg, const void *data, uint32_t size);
 /* Log a CSV line from printf-style formatting. */
 FM_Result Logger_Printf(FM_Logger *lg, const char *fmt, ...);
 
-/* Recovery: remove stale temp files left after power loss. */
+/* Recovery: returns FM_ERR_EXISTS for matching temporary names; does not
+ * delete them because a name alone does not establish ownership. */
 FM_Result Logger_Recover(const char *dir, const char *base_name);
 
 FM_END_DECLS

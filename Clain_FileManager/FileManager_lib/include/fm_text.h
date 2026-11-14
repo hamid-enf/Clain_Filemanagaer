@@ -42,7 +42,8 @@ FM_Result Text_Find(const char *path, const char *needle, size_t *line_out);
  * this name does not fit in FM_PATH_MAX (longer than FM_PATH_MAX - 8
  * characters) is FM_ERR_TOO_LARGE and nothing is touched.  (The name
  * used to be cut to fit: the temporary file then WAS the file being
- * edited, and the edit emptied it.) */
+ * edited, and the edit emptied it.) A rename failure may leave the temp;
+ * inspect it before manual cleanup. */
 FM_Result Text_Replace(const char *path, const char *old_sub,
                        const char *new_sub);
 

@@ -120,16 +120,18 @@ FM_Result Text_WriteLine(FM_File *f, const char *line)
         return FM_ERR_INVALID_ARGUMENT;
     }
     len = strlen(line);
-    if (len > 0)
+    while (len > 0)
     {
-        r = File_Write(f, line, (uint32_t)len, &wr);
-        if (r != FM_OK)
-        {
-            return r;
-        }
+        uint32_t chunk = len > UINT32_MAX ? UINT32_MAX : (uint32_t)len;
+        r = File_Write(f, line, chunk, &wr);
+        if (r != FM_OK) return r;
+        if (wr == 0 || wr > chunk) return FM_ERR_IO;
+        line += wr;
+        len -= wr;
     }
     r = File_Write(f, "\n", 1, &wr);
-    return r;
+    if (r != FM_OK) return r;
+    return wr == 1u ? FM_OK : FM_ERR_IO;
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,7 +304,7 @@ FM_Result Text_Replace(const char *path, const char *old_sub,
     {
         return File_GetLastError();
     }
-    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (dst == NULL)
     {
         r = File_GetLastError();
@@ -371,10 +373,7 @@ FM_Result Text_Replace(const char *path, const char *old_sub,
         goto fail;
     }
     r = File_Rename(tmp, path);
-    if (r != FM_OK)
-    {
-        (void)File_Delete(tmp);
-    }
+    /* Do not delete after ambiguous rename failure: the name may be new. */
     FM_Core_SetLastError(r);
     return r;
 
@@ -420,7 +419,7 @@ FM_Result Text_InsertLine(const char *path, size_t at_line, const char *line)
     {
         return File_GetLastError();
     }
-    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (dst == NULL)
     {
         r = File_GetLastError();
@@ -479,10 +478,7 @@ FM_Result Text_InsertLine(const char *path, size_t at_line, const char *line)
         goto fail;
     }
     r = File_Rename(tmp, path);
-    if (r != FM_OK)
-    {
-        (void)File_Delete(tmp);
-    }
+    /* Do not delete after ambiguous rename failure: the name may be new. */
     FM_Core_SetLastError(r);
     return r;
 
@@ -525,7 +521,7 @@ FM_Result Text_DeleteLine(const char *path, size_t line)
     {
         return File_GetLastError();
     }
-    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (dst == NULL)
     {
         r = File_GetLastError();
@@ -576,10 +572,7 @@ FM_Result Text_DeleteLine(const char *path, size_t line)
         goto fail;
     }
     r = File_Rename(tmp, path);
-    if (r != FM_OK)
-    {
-        (void)File_Delete(tmp);
-    }
+    /* Do not delete after ambiguous rename failure: the name may be new. */
     FM_Core_SetLastError(r);
     return r;
 

@@ -516,6 +516,7 @@ const char *FM_ResultString(FM_Result err)
     case FM_ERR_CANCELLED:         return "cancelled";
     case FM_ERR_NOT_READY:         return "not ready";
     case FM_ERR_INTERNAL:          return "internal error";
+    case FM_ERR_CLEANUP:           return "committed; cleanup failed";
     default:                       return "unknown error";
     }
 }

@@ -25,6 +25,7 @@ FM_BEGIN_DECLS
 #define FM_OPEN_CREATE    0x04u   /* create if missing                */
 #define FM_OPEN_APPEND    0x08u   /* start writing at end of file     */
 #define FM_OPEN_TRUNCATE  0x10u   /* discard existing content         */
+#define FM_OPEN_EXCLUSIVE 0x20u   /* create only if absent, atomically */
 #define FM_OPEN_READ_WRITE (FM_OPEN_READ | FM_OPEN_WRITE)
 
 /* ------------------------------------------------------------------ */
@@ -66,6 +67,9 @@ void     File_PoolUsedSplit(uint32_t *internal, uint32_t *external);
 /* FM_MAX_OPEN_FILES (no allocation).  File_OpenEx opens into a        */
 /* user-provided FM_File object (used by subsystems such as the        */
 /* logger and audio/video readers).                                    */
+/* FM_OPEN_TRUNCATE requires FM_OPEN_WRITE, otherwise FM_ERR_ACCESS.   */
+/* A pointer returned by File_Open is invalid after File_Close; a later
+ * open may reuse the same slot. Never use or close the stale pointer. */
 /* ------------------------------------------------------------------ */
 FM_File *File_Open(const char *path, uint32_t mode);
 FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode);
@@ -78,6 +82,8 @@ FM_Result File_Append(FM_File *f, const void *buf, uint32_t len,
 FM_Result File_Seek(FM_File *f, int64_t offset, FM_SeekOrigin origin);
 FM_Result File_Tell(FM_File *f, uint64_t *pos);
 FM_Result File_Size(FM_File *f, uint64_t *size);
+/* After shrink, position is min(old position, size). If the post-truncate
+ * seek fails, the size may already have changed even though an error returns. */
 FM_Result File_Truncate(FM_File *f, uint64_t size);
 /* File_Flush: when it returns FM_OK, every byte written through this
  * handle before the call has been handed to the medium
@@ -137,14 +143,15 @@ FM_Result File_AppendText(const char *path, const char *text);
 
 /* Copy / move with optional progress reporting (cb may be NULL).
  *
- * File_Copy is all-or-nothing for the destination: the data is written to
- * "<dst>.fm_tmp" and renamed over dst only after it has been written,
- * flushed and closed.  On any failure the temp file is removed, dst does
- * not appear half-written, and a dst that already existed keeps its old
- * content.  Consequence: replacing an existing file needs free space for
- * the old and the new copy at the same time.  (Adapters without rename,
- * or a dst too long for the suffix, write dst directly and delete it on
- * failure.)  src and dst naming the same file -> FM_ERR_INVALID_ARGUMENT.
+ * File_Copy exclusively creates "<dst>.fm_tmp", writes, flushes and closes
+ * it before rename. Existing temp: FM_ERR_EXISTS; no exclusive-create/rename:
+ * FM_ERR_UNSUPPORTED; name too long: FM_ERR_TOO_LARGE. No direct-write
+ * fallback. Free space for both copies is needed. Rename/sync failures can
+ * have backend-dependent commit status; a failed rename may leave staging
+ * behind and requires inspection before manual cleanup. Crash atomicity is
+ * not guaranteed.
+ * src and dst naming the same file -> FM_ERR_INVALID_ARGUMENT. External
+ * actors must not replace the claimed temp during the operation.
  *
  * Progress: cur == total is reported exactly once, after the data has
  * been flushed.  The callback must not start another File_Copy /
@@ -152,10 +159,8 @@ FM_Result File_AppendText(const char *path, const char *text);
  * share one scratch buffer and the nested call returns FM_ERR_BUSY.
  *
  * File_Move is a rename inside one mount and copy + delete across mounts.
- * If the source cannot be deleted after the copy, the error is returned
- * and the copy is removed again -- unless dst already existed before the
- * call, in which case it is left in place (now holding the new content)
- * rather than deleted. */
+ * If source deletion fails after publishing, the error is returned and
+ * the destination is left in place; both source and copy may remain. */
 FM_Result File_Copy(const char *src, const char *dst,
                     FM_ProgressCallback progress, void *user_data);
 FM_Result File_Move(const char *src, const char *dst,

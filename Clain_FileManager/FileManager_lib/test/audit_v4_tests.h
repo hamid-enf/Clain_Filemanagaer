@@ -175,6 +175,7 @@ static void av4_open_file_ops(void)
         (void)File_Delete(x);
         (void)File_Delete(y);
         (void)File_Delete(z);
+        (void)File_Delete(tmp);
         if (r == FM_OK) r = File_WriteAll(y, "ABCDEFGH", 8u);
         f = (r == FM_OK) ? File_Open(x, FM_OPEN_WRITE | FM_OPEN_CREATE |
                                         FM_OPEN_TRUNCATE)
@@ -224,8 +225,8 @@ static void av4_open_file_ops(void)
             printf("[content '%s'] ", back);
             r = FM_ERR_CRC;
         }
-        /* the source of the refused copy / move is still there, and no
-         * half-made copy was left beside the target */
+        /* The source is intact. A refused publication may retain staging;
+         * its name is not automatically deleted after rename was attempted. */
         memset(back, 0, sizeof(back));
         if (r == FM_OK) r = File_ReadAll(y, back, sizeof(back) - 1u, &got);
         if (r == FM_OK && (got != 8u || memcmp(back, "ABCDEFGH", 8u) != 0))
@@ -235,8 +236,10 @@ static void av4_open_file_ops(void)
         if (r == FM_OK) r = File_Exists(tmp, &there);
         if (r == FM_OK && there)
         {
-            printf("[%s left behind] ", tmp);
-            r = FM_ERR_EXISTS;
+            memset(back, 0, sizeof(back));
+            r = File_ReadAll(tmp, back, sizeof(back) - 1u, &got);
+            if (r == FM_OK && (got != 8u || memcmp(back, "ABCDEFGH", 8u) != 0))
+                r = FM_ERR_CRC;
         }
         /* closed: everything is allowed again */
         if (r == FM_OK) r = File_Rename(x, z);

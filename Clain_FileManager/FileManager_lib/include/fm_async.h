@@ -62,12 +62,19 @@ struct FM_Async
     uint32_t depth;
     uint64_t item_size;
     uint8_t  phase;
+    uint8_t  temp_owned;
+    char     temp_path[FM_PATH_MAX];
 };
 
 /* Initialize a user-owned async operation object. */
 void Async_Init(FM_Async *a);
 
-/* Start operations (returns FM_OK, state becomes RUNNING) */
+/* Start operations (returns FM_OK, state becomes RUNNING).
+ * Copy and cross-mount move stage to an exclusively-created temporary file;
+ * same-mount moves use the backend rename on the first poll. Cancel before
+ * that poll to prevent it. Rename/sync failures have backend-dependent commit
+ * status; failed publication may leave staging behind for inspection.
+ * No crash-atomicity or external-actor protection is implied. */
 FM_Result Async_StartCopy(FM_Async *a, const char *src, const char *dst,
                           FM_AsyncDoneCb done, FM_AsyncProgressCb progress,
                           void *user_data);

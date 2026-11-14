@@ -32,6 +32,11 @@ static void async_finish(FM_Async *a, FM_AsyncState state, FM_Result result)
         state = FM_ASYNC_ERROR;
         result = cleanup;
     }
+    if (a->temp_owned)
+    {
+        (void)File_Delete(a->temp_path);
+        a->temp_owned = 0;
+    }
     a->state = state;
     a->result = result;
     if (a->done_cb != NULL)
@@ -149,20 +154,52 @@ static FM_AsyncState async_poll_copy(FM_Async *a)
 {
     if (!File_IsOpen(&a->srcf))
     {
-        FM_Result r = File_OpenEx(&a->srcf, a->src, FM_OPEN_READ);
+        FM_Result r;
+        FM_MountEntry *ms = NULL, *md = NULL;
+        char rs[FM_PATH_MAX], rd[FM_PATH_MAX];
+        static const char suffix[] = ".fm_tmp";
+
+        /* Same-volume move is a rename, which also allows the FAT adapter
+         * to resolve 8.3 aliases without truncating and deleting the source. */
+        if (a->op == OP_MOVE && FM_VFS_Pin(a->src, &ms, rs, sizeof(rs)) == FM_OK)
+        {
+            r = FM_VFS_Resolve(a->dst, &md, rd, sizeof(rd));
+            if (r == FM_OK && ms == md && ms->fs->ops.rename != NULL)
+            {
+                FM_VFS_Unpin(ms);
+                r = File_Move(a->src, a->dst, NULL, NULL);
+                async_finish(a, r == FM_OK ? FM_ASYNC_DONE : FM_ASYNC_ERROR, r);
+                return a->state;
+            }
+            FM_VFS_Unpin(ms);
+        }
+        if (strlen(a->dst) + sizeof(suffix) > sizeof(a->temp_path))
+        {
+            async_finish(a, FM_ASYNC_ERROR, FM_ERR_TOO_LARGE);
+            return a->state;
+        }
+        strcpy(a->temp_path, a->dst);
+        strcat(a->temp_path, suffix);
+        if (FM_File_SamePath(a->src, a->temp_path))
+        {
+            async_finish(a, FM_ASYNC_ERROR, FM_ERR_INVALID_ARGUMENT);
+            return a->state;
+        }
+        r = File_OpenEx(&a->srcf, a->src, FM_OPEN_READ);
 
         if (r != FM_OK)
         {
             async_finish(a, FM_ASYNC_ERROR, r);
             return a->state;
         }
-        r = File_OpenEx(&a->dstf, a->dst,
-                        FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+        r = File_OpenEx(&a->dstf, a->temp_path,
+                        FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
         if (r != FM_OK)
         {
             async_finish(a, FM_ASYNC_ERROR, r);
             return a->state;
         }
+        a->temp_owned = 1;
         r = File_Size(&a->srcf, &a->total);
         if (r != FM_OK)
         {
@@ -178,7 +215,7 @@ static FM_AsyncState async_poll_copy(FM_Async *a)
         FM_Result r = File_Read(&a->srcf, a->chunk, FM_ASYNC_CHUNK_SIZE,
                                 &rd);
 
-        if (r == FM_ERR_EOF || rd == 0)
+        if (r == FM_ERR_EOF || (r == FM_OK && rd == 0))
         {
             r = File_Flush(&a->dstf);
             if (r != FM_OK)
@@ -192,6 +229,16 @@ static FM_AsyncState async_poll_copy(FM_Async *a)
                 async_finish(a, FM_ASYNC_ERROR, r);
                 return a->state;
             }
+            r = File_Rename(a->temp_path, a->dst);
+            if (r != FM_OK)
+            {
+                /* A failed rename may have committed; the old name can
+                 * now belong to somebody else. Leave it untouched. */
+                a->temp_owned = 0;
+                async_finish(a, FM_ASYNC_ERROR, r);
+                return a->state;
+            }
+            a->temp_owned = 0;
             if (a->op == OP_MOVE)
             {
                 r = File_Delete(a->src);
@@ -612,7 +659,8 @@ static FM_Result async_start(FM_Async *a, uint8_t op, const char *src,
         {
             return r;
         }
-        if ((op == OP_COPY || op == OP_MOVE) && strcmp(a->src, a->dst) == 0)
+        if ((op == OP_COPY || op == OP_MOVE) &&
+            (strcmp(a->src, a->dst) == 0 || FM_File_SamePath(a->src, a->dst)))
         {
             return FM_ERR_INVALID_ARGUMENT;
         }

@@ -15,7 +15,8 @@
 
 FM_BEGIN_DECLS
 
-/* Replace via a flushed temporary file; see backend limits above. */
+/* Replace via a flushed temporary file; see backend limits above. A failed
+ * rename may leave staging behind; inspect it before manual cleanup. */
 FM_Result File_SafeReplace(const char *path, const void *data, size_t size);
 FM_Result File_SafeWriteText(const char *path, const char *text);
 FM_Result File_AtomicWrite(const char *path, const void *data, size_t size);
@@ -26,12 +27,14 @@ FM_Result File_AtomicWrite(const char *path, const void *data, size_t size);
  * program operation. */
 FM_Result File_SafeAppend(const char *path, const void *data, size_t size);
 
-/* Remove the deterministic stale temporary file (<path>.fm_tmp). */
+/* Return FM_ERR_EXISTS if <path>.fm_tmp exists; never delete an unowned
+ * name. Inspect it before any manual recovery/cleanup. */
 FM_Result File_Recover(const char *path);
 
-/* Transactional update of a whole file with a rollback copy.
- * On success the backup is removed; on failure the original is
- * restored from the backup. */
+/* Transactional update with an exclusively created rollback copy.
+ * FM_ERR_CLEANUP means replacement succeeded but backup removal failed.
+ * Other errors, including rename/sync errors, may have ambiguous commit
+ * status; rollback is best effort and the backup can be left behind. */
 FM_Result File_Transaction(const char *path, const void *data, size_t size);
 
 FM_END_DECLS

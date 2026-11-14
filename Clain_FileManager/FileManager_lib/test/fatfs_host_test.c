@@ -20,6 +20,7 @@
 
 #include "file_manager.h"
 #include "fm_fatfs.h"
+#include "fm_transfer.h"
 #include "ff.h"
 
 static int g_failures = 0;
@@ -38,6 +39,14 @@ static int g_tests = 0;
         } else PASS();                                                    \
     } while (0)
 #define CHECK_TRUE(c, msg) do { if (c) PASS(); else FAIL(msg); } while (0)
+
+static FM_Bool v51_publish_rival(uint64_t done, uint64_t total, void *user)
+{
+    FM_Result *out = (FM_Result *)user;
+    (void)done; (void)total;
+    *out = File_WriteText("/sd/v51_race_dst", "RIVAL");
+    return FM_TRUE;
+}
 
 static FM_FS      g_sd_fs;
 static FM_Storage g_ram_storage;
@@ -691,6 +700,93 @@ int main(void)
             }
             CHECK_TRUE(opened == FM_MAX_OPEN_FILES, "an open was refused");
         }
+
+#if FM_USE_ASYNC
+        TEST("V51: async case alias is rejected without touching source");
+        {
+            FM_Async a;
+            FM_Result x = File_WriteText("/sd/v51case.txt", "valuable");
+            Async_Init(&a);
+            if (x == FM_OK && Async_StartMove(&a, "/sd/v51case.txt", "/sd/V51CASE.TXT", NULL, NULL, NULL) != FM_ERR_INVALID_ARGUMENT)
+                x = FM_ERR_INTERNAL;
+            memset(buf, 0, sizeof(buf));
+            if (x == FM_OK) x = File_ReadText("/sd/v51case.txt", buf, sizeof(buf), NULL);
+            CHECK_TRUE(x == FM_OK && strcmp(buf, "valuable") == 0, "case alias");
+        }
+#endif
+        TEST("V51: mixed file/directory rename preserves both");
+        {
+            FM_Bool dir = FM_FALSE;
+            FM_Result x = Directory_Create("/sd/v51dir");
+            if (x == FM_OK) x = File_WriteText("/sd/v51file", "valuable");
+            if (x == FM_OK && g_sd_fs.ops.rename(&g_sd_fs, "/v51dir", "/v51file") != FM_ERR_NOT_DIRECTORY)
+                x = FM_ERR_INTERNAL;
+            if (x == FM_OK && g_sd_fs.ops.rename(&g_sd_fs, "/v51file", "/v51dir") != FM_ERR_IS_DIRECTORY)
+                x = FM_ERR_INTERNAL;
+            memset(buf, 0, sizeof(buf));
+            if (x == FM_OK) x = File_ReadText("/sd/v51file", buf, sizeof(buf), NULL);
+            if (x == FM_OK) x = Directory_Exists("/sd/v51dir", &dir);
+            CHECK_TRUE(x == FM_OK && dir && strcmp(buf, "valuable") == 0, "mixed rename");
+        }
+
+        TEST("V51: FatFS exclusive create preserves collision");
+        {
+            FM_File *h;
+            FM_Result x = File_WriteText("/sd/v51exclusive", "valuable");
+            h = File_Open("/sd/v51exclusive", FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
+            if (h != NULL) { (void)File_Close(h); x = FM_ERR_INTERNAL; }
+            else if (File_GetLastError() != FM_ERR_EXISTS) x = FM_ERR_INTERNAL;
+            memset(buf, 0, sizeof(buf));
+            if (x == FM_OK) x = File_ReadText("/sd/v51exclusive", buf, sizeof(buf), NULL);
+            CHECK_TRUE(x == FM_OK && strcmp(buf, "valuable") == 0, "exclusive collision");
+        }
+
+        TEST("V51: FatFS no-overwrite refuses late destination");
+        {
+            FM_TransferOpts opts;
+            FM_Result rival = FM_ERR_INTERNAL;
+            FM_Result x = File_WriteText("/sd/v51_race_src", "SOURCE");
+            (void)File_Delete("/sd/v51_race_dst");
+            memset(&opts, 0, sizeof(opts));
+            opts.no_overwrite = FM_TRUE;
+            opts.progress = v51_publish_rival;
+            opts.progress_user = &rival;
+            if (x == FM_OK && FM_Transfer_CopyEx("/sd/v51_race_src", "/sd/v51_race_dst", &opts, NULL) != FM_ERR_EXISTS)
+                x = FM_ERR_INTERNAL;
+            memset(buf, 0, sizeof(buf));
+            if (x == FM_OK) x = File_ReadText("/sd/v51_race_dst", buf, sizeof(buf), NULL);
+            CHECK_TRUE(x == FM_OK && rival == FM_OK && strcmp(buf, "RIVAL") == 0, "no-overwrite race");
+            (void)File_Delete("/sd/v51_race_src");
+            (void)File_Delete("/sd/v51_race_dst");
+        }
+#if FM_USE_DATA_LOGGER
+        TEST("V51: FatFS logger preserves late final destination");
+        {
+            FM_Logger lg;
+            FM_LoggerConfig cfg;
+            char final[FM_PATH_MAX], temp[FM_PATH_MAX + sizeof(".fm_tmp")];
+            FM_Result x;
+            memset(&cfg, 0, sizeof(cfg));
+            cfg.crash_safe = FM_TRUE;
+            x = Logger_Init(&lg, "/sd", "v51log", FM_LOG_FORMAT_CSV, &cfg);
+            if (x == FM_OK) x = Logger_Start(&lg);
+            if (x == FM_OK) {
+                snprintf(final, sizeof(final), "%s", lg.info.file_name);
+                snprintf(temp, sizeof(temp), "%s.fm_tmp", final);
+                x = Logger_WriteRaw(&lg, "LOG", 3);
+                if (x == FM_OK) x = File_WriteText(final, "RIVAL");
+                if (x == FM_OK && Logger_Stop(&lg) != FM_ERR_EXISTS) x = FM_ERR_INTERNAL;
+                memset(buf, 0, sizeof(buf));
+                if (x == FM_OK) x = File_ReadText(final, buf, sizeof(buf), NULL);
+                if (x == FM_OK && strcmp(buf, "RIVAL") != 0) x = FM_ERR_INTERNAL;
+                memset(buf, 0, sizeof(buf));
+                if (x == FM_OK) x = File_ReadText(temp, buf, sizeof(buf), NULL);
+                CHECK_TRUE(x == FM_OK && strcmp(buf, "LOG") == 0, "logger collision");
+                (void)File_Delete(final);
+                (void)File_Delete(temp);
+            } else FAIL("logger setup");
+        }
+#endif
 
         /* MED-08: one entry, two spellings */
         TEST("MED-08: renaming a file to its own name in another case keeps it");

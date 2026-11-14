@@ -704,7 +704,7 @@ static void av2_safe_write(void)
         /* the backup copy gets its write and its rename; after that
          * nothing can be written and nothing renamed */
         av2_write_budget = 1;
-        av2_rename_budget = 1;
+        av2_rename_budget = 0;
         q = File_Transaction("/fca/cfg.txt", "replacement", 11);
         av2_write_budget = -1;
         av2_rename_budget = -1;

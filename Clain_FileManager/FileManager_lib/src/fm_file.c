@@ -999,6 +999,14 @@ static FM_Result file_open_internal(FM_File *f, const char *path,
         return FM_ERR_TOO_LARGE;
     }
     fs = mount->fs;
+    if ((mode & FM_OPEN_EXCLUSIVE) &&
+        (((mode & (FM_OPEN_CREATE | FM_OPEN_WRITE)) != (FM_OPEN_CREATE | FM_OPEN_WRITE)) ||
+         !(fs->capabilities & FM_FS_CAP_EXCLUSIVE_CREATE)))
+    {
+        FM_VFS_Unpin(mount);
+        file_release(f);
+        return FM_ERR_UNSUPPORTED;
+    }
 
     /* Normalize directly into f->path instead of an extra stack buffer:
      * this function sits at the deepest point of the File_* call chain
@@ -1079,6 +1087,11 @@ FM_File *File_Open(const char *path, uint32_t mode)
         FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
         return NULL;
     }
+    if ((mode & FM_OPEN_TRUNCATE) && !(mode & FM_OPEN_WRITE))
+    {
+        FM_Core_SetLastError(FM_ERR_ACCESS);
+        return NULL;
+    }
     f = file_acquire();
     if (f == NULL)
     {
@@ -1105,6 +1118,11 @@ FM_Result File_OpenEx(FM_File *f, const char *path, uint32_t mode)
 
     FM_CHECK_PTR(f, FM_ERR_INVALID_ARGUMENT);
     FM_CHECK_PTR(path, FM_ERR_INVALID_ARGUMENT);
+    if ((mode & FM_OPEN_TRUNCATE) && !(mode & FM_OPEN_WRITE))
+    {
+        FM_Core_SetLastError(FM_ERR_ACCESS);
+        return FM_ERR_ACCESS;
+    }
     {
         uint32_t i;
         FM_Bool registered = FM_FALSE;
@@ -1521,6 +1539,8 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
     {
         return FM_ERR_UNSUPPORTED;
     }
+    if (f->pos > size && (f->fs->ops.file_seek == NULL || size > INT64_MAX))
+        return FM_ERR_UNSUPPORTED;
     r = fop_truncate(f, size);
     if (r == FM_OK)
     {
@@ -1532,7 +1552,9 @@ FM_Result File_Truncate(FM_File *f, uint64_t size)
         f->size = size;
         if (f->pos > size)
         {
-            f->pos = size;
+            /* Truncate may already be committed if this seek fails. */
+            r = fop_seek(f, (int64_t)size, FM_SEEK_SET);
+            if (r == FM_OK) f->pos = size;
         }
     }
     return r;
@@ -1774,6 +1796,40 @@ FM_Result File_Rename(const char *old_path, const char *new_path)
         return FM_ERR_UNSUPPORTED; /* cross-mount rename: use Move */
     }
     r = FM_File_RenameResolved(m1, r1, r2);
+    FM_VFS_Unpin(m1);
+    FM_Core_SetLastError(r);
+    return r;
+}
+
+/* Publish a file only if its destination is absent. Backends either use a
+ * native exclusive primitive, or serialize lookup+rename under the same
+ * mount lock. A custom adapter must explicitly provide this operation. */
+FM_Result FM_File_RenameNoReplace(const char *old_path, const char *new_path)
+{
+    FM_MountEntry *m1 = NULL, *m2 = NULL;
+    char r1[FM_PATH_MAX], r2[FM_PATH_MAX];
+    FM_Result r = FM_VFS_Pin(old_path, &m1, r1, sizeof(r1));
+    if (r != FM_OK) return r;
+    r = FM_VFS_Resolve(new_path, &m2, r2, sizeof(r2));
+    if (r == FM_OK && m1 != m2) r = FM_ERR_UNSUPPORTED;
+    if (r == FM_OK && (r1[0] == '\0' || r2[0] == '\0')) r = FM_ERR_INVALID_ARGUMENT;
+    if (r == FM_OK && FM_Path_NameTooLong(r2, FM_FALSE)) r = FM_ERR_TOO_LARGE;
+    if (r == FM_OK && m1->fs->ops.rename_noreplace == NULL) r = FM_ERR_UNSUPPORTED;
+    if (r == FM_OK)
+    {
+#if FM_USE_CACHE
+        cache_lock();
+        cache_invalidate_path(m1, r1);
+        cache_invalidate_path(m1, r2);
+        cache_unlock();
+#endif
+        FM_Mount_Lock(m1);
+        if (FM_File_OpenOnPath(m1, r1, FM_TRUE) || FM_File_OpenOnPath(m1, r2, FM_TRUE))
+            r = FM_ERR_BUSY;
+        else
+            r = m1->fs->ops.rename_noreplace(m1->fs, r1, r2);
+        FM_Mount_Unlock(m1);
+    }
     FM_VFS_Unpin(m1);
     FM_Core_SetLastError(r);
     return r;
@@ -2243,23 +2299,27 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
         }
     }
 
-    /* F-04: never let a failed copy leave a truncated destination, and
-     * never destroy an existing destination before the copy is known to
-     * be good.  The data goes to "<dst>.fm_tmp" (the pattern file_edit
-     * and File_SafeReplace already use) and is renamed over the
-     * destination only after it was written, flushed and closed.
-     *
-     * Staging needs rename support and a name that fits; otherwise the
-     * copy writes the destination directly and removes it on failure. */
-    if (dst_can_rename &&
-        strlen(dst_path) + sizeof(FM_FILE_TMP_SUFFIX) <= sizeof(tmp))
+    /* Require a rename-capable destination and atomically claim the temp.
+     * Never fall back to truncating the destination on failure. */
+    if (!dst_can_rename)
     {
-        (void)strcpy(tmp, dst_path);
-        (void)strcat(tmp, FM_FILE_TMP_SUFFIX);
-        /* copying "<x>.fm_tmp" to "<x>" must not stage onto its source */
-        staged = FM_File_SamePath(src_path, tmp) ? FM_FALSE : FM_TRUE;
+        FM_Core_SetLastError(FM_ERR_UNSUPPORTED);
+        return FM_ERR_UNSUPPORTED;
     }
-    work_path = staged ? tmp : dst_path;
+    if (strlen(dst_path) + sizeof(FM_FILE_TMP_SUFFIX) > sizeof(tmp))
+    {
+        FM_Core_SetLastError(FM_ERR_TOO_LARGE);
+        return FM_ERR_TOO_LARGE;
+    }
+    (void)strcpy(tmp, dst_path);
+    (void)strcat(tmp, FM_FILE_TMP_SUFFIX);
+    if (FM_File_SamePath(src_path, tmp))
+    {
+        FM_Core_SetLastError(FM_ERR_INVALID_ARGUMENT);
+        return FM_ERR_INVALID_ARGUMENT;
+    }
+    staged = FM_TRUE;
+    work_path = tmp;
 
     src = File_Open(src_path, FM_OPEN_READ);
     if (src == NULL)
@@ -2267,21 +2327,7 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
         return File_GetLastError();
     }
     dst = File_Open(work_path, FM_OPEN_WRITE | FM_OPEN_CREATE |
-                               FM_OPEN_TRUNCATE);
-    if (dst == NULL && staged)
-    {
-        r = File_GetLastError();
-        if (r == FM_ERR_INVALID_PATH || r == FM_ERR_INVALID_ARGUMENT ||
-            r == FM_ERR_UNSUPPORTED)
-        {
-            /* The filesystem refuses the temp name (e.g. FAT without
-             * long-file-name support): fall back to a direct copy. */
-            staged = FM_FALSE;
-            work_path = dst_path;
-            dst = File_Open(work_path, FM_OPEN_WRITE | FM_OPEN_CREATE |
-                                       FM_OPEN_TRUNCATE);
-        }
-    }
+                               FM_OPEN_EXCLUSIVE);
     if (dst == NULL)
     {
         r = File_GetLastError();
@@ -2303,13 +2349,13 @@ FM_Result File_Copy(const char *src_path, const char *dst_path,
     }
     if (r == FM_OK && staged)
     {
+        /* A failed rename may already have committed. Do not delete this
+         * path afterward: another actor could have recreated it. */
         r = File_Rename(tmp, dst_path);
     }
-    if (r != FM_OK)
+    else if (r != FM_OK)
     {
-        /* remove only what this call wrote: the temp file, or (direct
-         * mode) the partial destination */
-        (void)File_Delete(work_path);
+        (void)File_Delete(work_path); /* pre-publication cleanup */
     }
     FM_Core_SetLastError(r);
     return r;
@@ -2322,7 +2368,6 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
     FM_MountEntry *m2 = NULL;
     char r1[FM_PATH_MAX];
     char r2[FM_PATH_MAX];
-    FM_Bool dst_existed = FM_TRUE;
     FM_Result r;
 
     /* F-01: reject NULL here and report the resolver's own verdict for
@@ -2358,32 +2403,16 @@ FM_Result File_Move(const char *src_path, const char *dst_path,
     }
     FM_VFS_Unpin(m1);
 
-    /* Cross-mount: copy then delete.  If the source delete fails after a
-     * successful copy, remove the destination copy so the operation stays
-     * atomic from the caller's perspective -- but ONLY when this call
-     * created it (F-02).  A destination that existed before the call was
-     * the caller's data; deleting it as "rollback" would leave the
-     * caller without the old file and without a completed move.  When
-     * the pre-check itself fails, assume it existed (never delete on a
-     * guess). */
-    {
-        FM_Bool exists = FM_FALSE;
-
-        if (File_Exists(dst_path, &exists) == FM_OK && !exists)
-        {
-            dst_existed = FM_FALSE;
-        }
-    }
+    /* Cross-mount: publish the copy, then delete the source. If source
+     * deletion fails, never delete the published destination: an external
+     * writer could already have replaced that name, and removing it would
+     * destroy unrelated data. The error means both names may remain. */
     r = File_Copy(src_path, dst_path, progress, user_data);
     if (r != FM_OK)
     {
         return r;
     }
     r = File_Delete(src_path);
-    if (r != FM_OK && !dst_existed)
-    {
-        (void)File_Delete(dst_path); /* rollback: undo only our copy */
-    }
     FM_Core_SetLastError(r);
     return r;
 }
@@ -2413,8 +2442,8 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
      * file's temp) -- the edit would then replace the wrong entry. */
     if (strlen(path) + sizeof(FM_FILE_TMP_SUFFIX) > sizeof(tmp))
     {
-        FM_Core_SetLastError(FM_ERR_INVALID_PATH);
-        return FM_ERR_INVALID_PATH;
+        FM_Core_SetLastError(FM_ERR_TOO_LARGE);
+        return FM_ERR_TOO_LARGE;
     }
     (void)strcpy(tmp, path);
     (void)strcat(tmp, FM_FILE_TMP_SUFFIX);
@@ -2438,7 +2467,7 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
         FM_InternalBufferRelease();
         return File_GetLastError();
     }
-    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_TRUNCATE);
+    dst = File_Open(tmp, FM_OPEN_WRITE | FM_OPEN_CREATE | FM_OPEN_EXCLUSIVE);
     if (dst == NULL)
     {
         r = File_GetLastError();
@@ -2575,10 +2604,7 @@ static FM_Result file_edit(const char *path, uint64_t ins_offset,
 
     /* Replace original with temp (safe rename). */
     r = File_Rename(tmp, path);
-    if (r != FM_OK)
-    {
-        (void)File_Delete(tmp);
-    }
+    /* On rename error the commit is unknown; preserve any name now there. */
     FM_Core_SetLastError(r);
     return r;
 

@@ -2486,6 +2486,10 @@ static FM_Result fmfs_file_open(FM_FS *fs, void *fh, const char *path,
         return FM_ERR_IS_DIRECTORY;
     }
     index = fmfs_find(ctx, clean);
+    if (index >= 0 && (mode & FM_OPEN_EXCLUSIVE))
+    {
+        return FM_ERR_EXISTS;
+    }
     if (index < 0)
     {
         if (!(mode & FM_OPEN_CREATE))
@@ -3011,6 +3015,17 @@ static FM_Result fmfs_rename(FM_FS *fs, const char *old_path,
     return FM_OK;
 }
 
+/* Called with the mount lock held across lookup and rename. */
+static FM_Result fmfs_rename_noreplace(FM_FS *fs, const char *old_path,
+                                       const char *new_path)
+{
+    FM_FileInfo info;
+    FM_Result r = fmfs_stat(fs, new_path, &info);
+    if (r == FM_OK) return FM_ERR_EXISTS;
+    if (r != FM_ERR_NOT_FOUND) return r;
+    return fmfs_rename(fs, old_path, new_path);
+}
+
 static FM_Result fmfs_mkdir(FM_FS *fs, const char *path)
 {
     FMFS_Context *ctx = fmfs_ctx(fs);
@@ -3227,6 +3242,7 @@ FM_Result FMFS_Init(FM_FS *fs)
         return FM_ERR_INVALID_ARGUMENT;
     }
     memset(fs, 0, sizeof(*fs));
+    fs->capabilities = FM_FS_CAP_EXCLUSIVE_CREATE;
     FM_Lock();
     /* An FM_FS that is initialised again without having been mounted
      * in between keeps the context it has. */
@@ -3293,6 +3309,7 @@ FM_Result FMFS_Init(FM_FS *fs)
     fs->ops.stat = fmfs_stat;
     fs->ops.delete_file = fmfs_delete;
     fs->ops.rename = fmfs_rename;
+    fs->ops.rename_noreplace = fmfs_rename_noreplace;
     fs->ops.mkdir = fmfs_mkdir;
     fs->ops.rmdir = fmfs_rmdir;
     fs->ops.dir_open = fmfs_dir_open;

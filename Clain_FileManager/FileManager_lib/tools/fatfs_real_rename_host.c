@@ -41,7 +41,27 @@ int main(void)
     if (put("target.txt", "target") ||
         fatfs_rename(&adapter, "/~fmrn.tmp", "/target.txt") != FM_OK ||
         !same("target.txt", "sentinel")) return 4;
-    puts("real FatFS rename collision and source preservation: PASS");
+    /* Mixed-type replacement must not remove either original entry. */
+    if (f_mkdir("adir") != FR_OK || put("afile", "valuable")) return 5;
+    if (fatfs_rename(&adapter, "/adir", "/afile") != FM_ERR_NOT_DIRECTORY ||
+        !same("afile", "valuable")) return 6;
+    {
+        FILINFO info;
+        if (f_stat("adir", &info) != FR_OK || !(info.fattrib & AM_DIR)) return 7;
+    }
+    if (fatfs_rename(&adapter, "/afile", "/adir") != FM_ERR_IS_DIRECTORY ||
+        !same("afile", "valuable")) return 8;
+    {
+        FILINFO info;
+        if (f_stat("adir", &info) != FR_OK || !(info.fattrib & AM_DIR)) return 9;
+    }
+    if (put("stage.txt", "LOG") || put("final.txt", "RIVAL")) return 10;
+    if (fatfs_rename_noreplace(&adapter, "/stage.txt", "/final.txt") != FM_ERR_EXISTS ||
+        !same("stage.txt", "LOG") || !same("final.txt", "RIVAL")) return 11;
+    if (f_unlink("final.txt") != FR_OK ||
+        fatfs_rename_noreplace(&adapter, "/stage.txt", "/final.txt") != FM_OK ||
+        !same("final.txt", "LOG")) return 12;
+    puts("real FatFS rename collision, no-replace, mixed-type and source preservation: PASS");
     return 0;
 }
 #endif /* USE_HAL_DRIVER */
