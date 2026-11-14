@@ -17,7 +17,9 @@ FM_BEGIN_DECLS
 
 /* Join two path components: Path_Join("/data", "logs") -> "/data/logs".
  * Handles missing/duplicated separators and empty parts.  `out` may be
- * `a` or `b` (joining in place); FM_ERR_TOO_LARGE leaves it unchanged. */
+ * `a` or `b` (joining in place); FM_ERR_TOO_LARGE leaves it unchanged.
+ * When preserving an overlapping `a` requires a temporary copy, its length
+ * must be less than FM_PATH_MAX; non-overlapping joins have no such limit. */
 FM_Result Path_Join(const char *a, const char *b, char *out, size_t out_size);
 
 /* Normalize a path in place: collapses '.', '..', duplicate separators.

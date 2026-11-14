@@ -90,8 +90,31 @@ FM_Result Path_Join(const char *a, const char *b, char *out, size_t out_size)
      * place first: copying `a` first wrote over `b` when out == b, and
      * Path_Join("/dir", buf, buf, n) returned FM_OK with "/dir//dir/..."
      * in buf. */
-    memmove(out + la + (add_sep ? 1u : 0u), b + b_start, lb - b_start);
-    memmove(out, a, la);
+    {
+        char *tail = out + la + (add_sep ? 1u : 0u);
+        size_t tail_len = lb - b_start;
+        uintptr_t ap = (uintptr_t)(const void *)a;
+        uintptr_t tp = (uintptr_t)(void *)tail;
+        FM_Bool overlaps = (ap <= tp) ? (tp - ap < la)
+                                           : (ap - tp < tail_len);
+
+        if (overlaps)
+        {
+            /* Moving b first would overwrite the bytes of a before they
+             * are copied. Preserve a on the bounded stack; reject an
+             * unusually long overlapping input without touching out. */
+            char saved[FM_PATH_MAX];
+            if (la >= sizeof(saved)) return FM_ERR_TOO_LARGE;
+            memcpy(saved, a, la);
+            memmove(tail, b + b_start, tail_len);
+            memmove(out, saved, la);
+        }
+        else
+        {
+            memmove(tail, b + b_start, tail_len);
+            memmove(out, a, la);
+        }
+    }
     if (add_sep)
     {
         out[la] = '/';

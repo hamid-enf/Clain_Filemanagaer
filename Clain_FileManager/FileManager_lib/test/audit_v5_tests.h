@@ -1139,6 +1139,22 @@ static void av5_utils(void)
             printf("[out == a == b: %d \"%s\"] ", (int)r, buf);
             ok = 0;
         }
+        (void)strcpy(buf, "abcdef");
+        r = Path_Join(buf + 2, buf, buf, sizeof(buf));
+        if (r != FM_OK || strcmp(buf, "cdef/abcdef") != 0) ok = 0;
+        (void)strcpy(buf, "abc");
+        (void)strcpy(buf + 4, "wxyz");
+        r = Path_Join(buf + 4, buf, buf, sizeof(buf));
+        if (r != FM_OK || strcmp(buf, "wxyz/abc") != 0) ok = 0;
+        {
+            char big[FM_PATH_MAX * 4u + 4u];
+            size_t n = FM_PATH_MAX * 2u;
+            memset(big, 'q', n);
+            big[n] = '\0';
+            r = Path_Join(big + FM_PATH_MAX, big, big, sizeof(big));
+            if (r != FM_ERR_TOO_LARGE || strlen(big) != n) ok = 0;
+            for (size_t k = 0; k < n; ++k) if (big[k] != 'q') ok = 0;
+        }
         if (ok) { PASS(); } else { FAIL("wrong result"); }
     }
 
